@@ -1,0 +1,582 @@
+/* ============================================
+   RESET I ZMIENNE CSS
+   ============================================ */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+:root {
+    /* Kolory */
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #2d2d2d;
+    --bg-card: #3a3a3a;
+    --bg-card-hover: #4a4a4a;
+    --text-primary: #ffffff;
+    --text-secondary: #b0b0b0;
+    --text-muted: #808080;
+    --accent: #4a9eff;
+    --accent-hover: #6bb3ff;
+    --accent-dark: #2d7cd6;
+    --border: #505050;
+    --success: #4caf50;
+    --warning: #ff9800;
+    --error: #f44336;
+
+    /* Rozmiary */
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    --transition: all 0.3s ease;
+}
+
+/* ============================================
+   PODSTAWOWE STYLE
+   ============================================ */
+html {
+    height: 100%;
+}
+
+body {
+    min-height: 100%;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    overflow-x: hidden;
+}
+
+#app {
+    height: 100vh;
+    height: 100dvh;
+}
+
+/* ============================================
+   LAYOUT APLIKACJI
+   ============================================ */
+.app-container {
+    height: 100vh;
+    height: 100dvh;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* ============================================
+   NAGŁÓWEK
+   ============================================ */
+.app-header {
+    padding: 15px 30px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    flex-shrink: 0;
+}
+
+.back-button {
+    width: 44px;
+    height: 44px;
+    border: none;
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--transition);
+    flex-shrink: 0;
+}
+
+.back-button:hover {
+    background-color: var(--accent);
+}
+
+.back-button:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.back-button svg {
+    width: 22px;
+    height: 22px;
+}
+
+.header-title {
+    flex: 1;
+    min-width: 0;
+}
+
+.header-title h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.header-title .step-indicator {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+/* ============================================
+   GŁÓWNA ZAWARTOŚĆ
+   ============================================ */
+.app-content {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* ============================================
+   LAYOUT PODZIELONY (SPLIT)
+   ============================================ */
+.split-layout {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Lewa strona - wizualizacja 3D */
+.visualization-panel {
+    flex: 1;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    min-width: 300px;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Prawa strona - panel konfiguracji */
+.config-panel-wrapper {
+    position: relative;
+    height: 100%;
+    width: 480px;
+    max-width: 50%;
+    flex-shrink: 0;
+}
+
+.config-panel {
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+    min-height: 0;
+    overflow: hidden;
+}
+
+.config-panel-header {
+    padding: 25px 30px;
+    border-bottom: 1px solid var(--border);
+}
+
+.config-panel-header h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin-bottom: 5px;
+}
+
+.config-panel-header p {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.config-panel-content {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 25px 30px;
+    min-height: 0;
+}
+
+.config-panel-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.config-panel-content::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+    border-radius: 4px;
+}
+
+.config-panel-content::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+}
+
+.config-panel-footer {
+    padding: 20px 30px;
+    border-top: 1px solid var(--border);
+    background-color: var(--bg-primary);
+    display: flex;
+    gap: 12px;
+}
+
+/* ============================================
+   KARTY WYBORU
+   ============================================ */
+.choice-grid {
+    display: grid;
+    gap: 15px;
+}
+
+.choice-grid.cols-2 {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.choice-card {
+    background-color: var(--bg-card);
+    border: 2px solid transparent;
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    transition: var(--transition);
+    overflow: hidden;
+    padding: 20px;
+}
+
+.choice-card:hover {
+    border-color: var(--accent);
+    background-color: var(--bg-card-hover);
+}
+
+.choice-card.selected {
+    border-color: var(--accent);
+    background-color: rgba(74, 158, 255, 0.15);
+    box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.2);
+}
+
+.choice-card-icon {
+    font-size: 2.5rem;
+    margin-bottom: 12px;
+    text-align: center;
+}
+
+.choice-card-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    text-align: center;
+}
+
+.choice-card-description {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    text-align: center;
+    line-height: 1.4;
+}
+
+/* ============================================
+   GRUPY FORMULARZY
+   ============================================ */
+.form-group {
+    margin-bottom: 24px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+}
+
+.form-group .hint {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+/* ============================================
+   INPUTY
+   ============================================ */
+.input-with-unit {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.input-field {
+    flex: 1;
+    height: 52px;
+    padding: 0 16px;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    font-weight: 600;
+    text-align: center;
+    transition: border-color 0.2s;
+}
+
+.input-field:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.input-unit {
+    font-size: 1.1rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.input-btn {
+    width: 52px;
+    height: 52px;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    color: var(--accent);
+    font-size: 1.5rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.input-btn:hover {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+/* ============================================
+   PRZYCISKI
+   ============================================ */
+.btn {
+    padding: 14px 28px;
+    border: none;
+    border-radius: var(--radius-md);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+    color: white;
+    flex: 1;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(74, 158, 255, 0.3);
+}
+
+.btn-secondary {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+    background: var(--bg-card-hover);
+}
+
+/* ============================================
+   PODSUMOWANIE KONFIGURACJI
+   ============================================ */
+.config-summary {
+    background-color: var(--bg-primary);
+    border-radius: var(--radius-md);
+    padding: 18px;
+    margin-bottom: 25px;
+}
+
+.config-summary-title {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+}
+
+.config-summary-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.config-summary-row:last-child {
+    border-bottom: none;
+}
+
+.config-summary-row .label {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.config-summary-row .value {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+/* ============================================
+   PANEL INFO 3D
+   ============================================ */
+.viewer-info-panel {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    background: rgba(26, 26, 26, 0.9);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px 20px;
+    backdrop-filter: blur(10px);
+}
+
+.viewer-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 4px 0;
+    font-size: 0.9rem;
+}
+
+.viewer-info-row .label {
+    color: var(--text-muted);
+}
+
+.viewer-info-row .value {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* ============================================
+   KONTROLKI 3D
+   ============================================ */
+.viewer-controls {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.viewer-control-btn {
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: rgba(26, 26, 26, 0.9);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    backdrop-filter: blur(10px);
+}
+
+.viewer-control-btn:hover {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.viewer-control-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.viewer-control-btn svg {
+    width: 20px;
+    height: 20px;
+}
+
+/* ============================================
+   TOAST / KOMUNIKATY
+   ============================================ */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    padding: 16px 24px;
+    border-radius: var(--radius-md);
+    color: white;
+    font-weight: 500;
+    animation: slideIn 0.3s ease;
+    z-index: 9999;
+}
+
+.toast-error {
+    background: var(--error);
+}
+
+.toast-success {
+    background: var(--success);
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* ============================================
+   RESPONSIVE
+   ============================================ */
+@media (max-width: 900px) {
+    .split-layout {
+        flex-direction: column;
+    }
+
+    .visualization-panel {
+        height: 40vh;
+        min-height: 250px;
+    }
+
+    .config-panel-wrapper {
+        width: 100%;
+        max-width: 100%;
+        flex: 1;
+    }
+
+    .config-panel-header {
+        padding: 15px 20px;
+    }
+
+    .config-panel-content {
+        padding: 15px 20px;
+    }
+
+    .config-panel-footer {
+        padding: 15px 20px;
+    }
+
+    .choice-grid.cols-2 {
+        grid-template-columns: 1fr;
+    }
+}

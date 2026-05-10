@@ -1,0 +1,6234 @@
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import ThreeCanvas from './components/ThreeCanvas.vue'
+import { calculateLadder, validatePromoCode, calculateLocal, type ComponentItem } from './services/api'
+
+// ============================================
+// STAN APLIKACJI (1:1 z oryginału)
+// ============================================
+const currentScreen = ref<'purpose' | 'params' | 'summary'>('purpose')
+
+const state = ref({
+  purpose: '' as '' | 'internal' | 'external',
+  scheme: '' as '' | 'no-platform' | 'with-platform' | 'attic-passage',
+  cage: '' as '' | 'no-cage' | 'with-cage',
+  wallHeight: 5,
+  bracketType: 'short' as 'short' | 'medium' | 'long' | 'none' | 'custom',
+  bracketSpacing: 215,
+  surfaceType: 'smooth' as 'smooth' | 'rough',
+  // Opcje montażu
+  accessLock: false,       // Blokada dostępu (dla kosza)
+  restingPlatform: false,  // Podest spoczynkowy
+  cageClosing: false,      // Zamykanie kosza od dołu
+  suspended: false,        // Drabina zawieszona
+  suspendedHeight: 0,      // Wysokość zawieszenia (m)
+  hasObstacles: false,     // Przeszkody w miejscu montażu
+  obstacles: [] as Array<{ id: number; heightFrom: number; height: number; type: string; description: string }>,
+  // Okap (tylko jeden, na górze ściany)
+  hasEave: false,
+  eaveHeight: 20,          // Wysokość okapu (cm)
+  eaveDepth: 15,           // Głębokość okapu - w stronę drabiny (cm)
+
+  // ============================================
+  // PRZEJŚCIE PRZEZ ATTYKĘ (z oryginalnego konfiguratora)
+  // ============================================
+  // Strona zejścia
+  atticWallHeight: 0.2,              // Wysokość ściany zejścia (m) - domyślnie 20cm
+  atticMinDistance: 5,               // Dystans podest-attyka (cm) - domyślnie 5cm
+  descentMountType: 'bigfoot' as 'bigfoot' | 'custom-base' | 'brackets' | 'self',
+  descentBracketType: 'short' as 'short' | 'medium' | 'long',
+  descentCageType: 'no-cage' as 'no-cage' | 'with-cage',
+  descentAccessLock: false,
+  bigfootAllowLowDistance: false,    // Checkbox: pozwól na mniejszy dystans dla bigfoot
+  customBaseAllowLowDistance: false,  // Checkbox: pozwól na mniejszy dystans dla custom-base
+  customBaseHeight: 0,               // Wysokość własnego podłoża (cm) - domyślnie 0cm
+  selfBracketType: 'ready' as 'ready' | 'connecting',  // Typ uchwytu dla montażu na własną rękę
+  atticWallThickness: 25,            // Grubość ściany attyki (cm) - domyślnie 25cm
+  atticHasInsulation: false,         // Czy jest ocieplenie na attyce (strona wejścia)
+  atticInsulationThickness: 10,      // Grubość ocieplenia attyki (cm) - domyślnie 10cm
+  atticBackHasInsulation: false,     // Czy jest ocieplenie strona zejścia
+  atticBackInsulationThickness: 10,  // Grubość ocieplenia strona zejścia (cm)
+  // Ocieplenie dla klasycznej i z podestem (przednia ściana)
+  hasInsulation: false,              // Czy jest ocieplenie (klasyczna/z podestem)
+  insulationThickness: 10            // Grubość ocieplenia (cm)
+})
+
+// Zmienne formularza
+const wallHeightTouched = ref(false)
+const wallHeightWarning = ref('')
+
+// Flaga: użytkownik ręcznie wybrał 'none' lub 'custom' - okap nie nadpisuje
+const bracketTypeManualOverride = ref(false)
+const showBracketInfo = ref(false)
+
+// Computed dla progress bar
+const formProgress = computed(() => {
+  let progress = 0
+
+  // Wysokość ściany (obowiązkowe)
+  if (state.value.wallHeight >= 0.6 && state.value.wallHeight <= 30) progress += 30
+
+  // Schemat zakończenia (dla zewnętrznej)
+  if (state.value.purpose === 'external') {
+    if (state.value.scheme) progress += 25
+    // Kosz (jeśli nie attyka)
+    if (state.value.scheme === 'attic-passage' || state.value.cage) progress += 25
+  } else {
+    // Wewnętrzna - schemat i kosz automatyczne
+    progress += 50
+  }
+
+  // Wsporniki (dla zewnętrznej)
+  if (state.value.purpose === 'external') {
+    if (state.value.bracketType) progress += 20
+  } else {
+    progress += 20
+  }
+
+  return Math.min(100, progress)
+})
+
+// Stan 3D (bezpośrednia integracja Three.js)
+const threeState = ref({
+  numX7Ladders: 0,
+  finalLadderRungs: 0,
+  totalRungs: 0,
+  safetyCageCount: 0,
+  totalHeightMm: 0,
+  // Watchdog - ciągłe pomiary
+  lastRungToGround: 0,
+  lastHoopToGround: 0
+})
+
+const threeReady = ref(false)
+
+// Stan API i komponentów
+const apiLoading = ref(false)
+const apiError = ref('')
+const componentsList = ref<ComponentItem[]>([])
+const pricing = ref({
+  subtotal: 0,
+  discount: 0,
+  discountPercent: 0,
+  total: 0,
+  totalWithVat: 0,
+  vatRate: 23
+})
+
+// Cage correction state (moved here to be available in threeCanvasProps)
+const cageCorrection = ref(0)
+
+// Computed props dla ThreeCanvas
+const threeCanvasProps = computed(() => {
+  const ladderConfig = calculateLadderStructure()
+
+  return {
+    numX7Ladders: ladderConfig.numX7,
+    finalLadderRungs: ladderConfig.finalRungs,
+    safetyCageCount: state.value.cage === 'with-cage' ? Math.max(0, ladderConfig.cageHoops + cageCorrection.value) : 0,
+    wallHeight: state.value.wallHeight,
+    scheme: state.value.scheme || 'no-platform',
+    wspornikDistance: state.value.bracketSpacing || 215,
+    showWall: show3DWall.value,
+    showGround: show3DGround.value,
+    showInsulation: show3DInsulation.value,
+    suspended: state.value.suspended,
+    suspendedHeight: state.value.suspendedHeight,
+    obstacles: state.value.hasObstacles
+      ? state.value.obstacles.map(obs => ({
+          id: obs.id,
+          bottomHeightMm: obs.heightFrom * 1000,
+          heightMm: obs.height * 1000,
+          topHeightMm: (obs.heightFrom + obs.height) * 1000,
+          type: obs.type  // 'window' | 'wall-point'
+        }))
+      : [],
+    // Dodatkowe propsy
+    cageClosing: state.value.accessLock || state.value.cageClosing,
+    restingPlatform: state.value.restingPlatform,
+    showWsporniki: state.value.bracketType !== 'none' && state.value.bracketType !== 'custom',
+    distanceFromGround: ladderConfig.distanceFromGround || 160,
+    // Okap
+    eave: state.value.hasEave ? {
+      height: state.value.eaveHeight * 10,  // cm to mm
+      depth: state.value.eaveDepth * 10     // cm to mm
+    } : null,
+    // Przejście przez attykę - dystans podest-attyka w mm
+    atticPlatformDistance: state.value.scheme === 'attic-passage'
+      ? actualPlatformDistance.value * 10  // cm -> mm
+      : 0,
+    // Wysokość ściany strona zejścia (attyka) w mm
+    atticWallHeight: state.value.scheme === 'attic-passage'
+      ? state.value.atticWallHeight * 1000  // m -> mm
+      : 0,
+    // Typ montażu strona zejścia (dla attyki)
+    descentMountType: state.value.scheme === 'attic-passage'
+      ? state.value.descentMountType
+      : '',
+    // Wysokość własnego podłoża w mm
+    customBaseHeight: state.value.scheme === 'attic-passage' && state.value.descentMountType === 'custom-base'
+      ? (state.value.customBaseHeight || 0) * 10  // cm -> mm
+      : 0,
+    // Dane drabiny zejścia (dla attyki)
+    descentLadder: descentLadderData.value,
+    // Ukryty dystans (gdy checkbox odznaczony)
+    hiddenDistanceMm: hiddenDistanceMm.value,
+    // Grubość ściany attyki w mm
+    atticWallThickness: state.value.scheme === 'attic-passage'
+      ? (state.value.atticWallThickness || 25) * 10  // cm -> mm
+      : 250,
+    // Ocieplenie attyki - strona wejścia
+    atticHasInsulation: state.value.scheme === 'attic-passage' && state.value.atticHasInsulation,
+    atticInsulationThickness: state.value.scheme === 'attic-passage' && state.value.atticHasInsulation
+      ? (state.value.atticInsulationThickness || 10) * 10  // cm -> mm
+      : 0,
+    // Ocieplenie attyki - strona zejścia
+    atticBackHasInsulation: state.value.scheme === 'attic-passage' && state.value.atticBackHasInsulation,
+    atticBackInsulationThickness: state.value.scheme === 'attic-passage' && state.value.atticBackHasInsulation
+      ? (state.value.atticBackInsulationThickness || 10) * 10  // cm -> mm
+      : 0,
+    // Ocieplenie przedniej ściany (klasyczna/z podestem)
+    hasInsulation: state.value.scheme !== 'attic-passage' && state.value.hasInsulation,
+    insulationThickness: state.value.scheme !== 'attic-passage' && state.value.hasInsulation
+      ? (state.value.insulationThickness || 10) * 10  // cm -> mm
+      : 0
+  }
+})
+
+// Handler dla aktualizacji z ThreeCanvas
+function onThreeReady() {
+  threeReady.value = true
+  updateThreeState()
+}
+
+function onThreeUpdate(data: {
+  totalRungs: number;
+  totalHeightMm: number;
+  lastRungToGround?: number;
+  lastHoopToGround?: number;
+}) {
+  threeState.value.totalRungs = data.totalRungs
+  threeState.value.totalHeightMm = data.totalHeightMm
+  if (data.lastRungToGround !== undefined) {
+    threeState.value.lastRungToGround = data.lastRungToGround
+  }
+  if (data.lastHoopToGround !== undefined) {
+    threeState.value.lastHoopToGround = data.lastHoopToGround
+  }
+}
+
+function updateThreeState() {
+  const ladderConfig = calculateLadderStructure()
+  threeState.value.numX7Ladders = ladderConfig.numX7
+  threeState.value.finalLadderRungs = ladderConfig.finalRungs
+  threeState.value.totalRungs = ladderConfig.totalRungs
+  threeState.value.safetyCageCount = state.value.cage === 'with-cage' ? ladderConfig.cageHoops : 0
+  threeState.value.totalHeightMm = ladderConfig.ladderLength
+}
+
+// ============================================
+// COMPUTED
+// ============================================
+const screenTitle = computed(() => {
+  switch (currentScreen.value) {
+    case 'purpose': return 'Konfigurator Drabin'
+    case 'params': return 'Parametry drabiny'
+    case 'summary': return 'Podsumowanie'
+    default: return 'Konfigurator Drabin'
+  }
+})
+
+const stepIndicator = computed(() => {
+  switch (currentScreen.value) {
+    case 'purpose': return 'Wybierz przeznaczenie'
+    case 'params': return 'Krok 2 z 3'
+    case 'summary': return 'Podsumowanie'
+    default: return ''
+  }
+})
+
+// ============================================
+// COMPUTED DLA ATTYKI (strona zejścia)
+// Stałe z oryginalnego konfiguratora
+// ============================================
+const ATTIC_CONSTANTS = {
+  RUNG_SPACING: 275,           // mm
+  BIGFOOT_HEIGHT: 90,          // mm (9cm)
+  BIGFOOT_CONNECTION_OVERLAP: 105,  // mm
+  BIGFOOT_MAX_ADDITIONAL_RUNGS: 4
+}
+
+// Max wysokość ściany zejścia (zależy od typu montażu i dystansu)
+const atticWallHeightMax = computed(() => {
+  const mountType = state.value.descentMountType
+  const minDistanceCm = state.value.atticMinDistance || 0
+  
+  if (mountType === 'bigfoot') {
+    // Max = 1.465m - dystans/100
+    return Math.max(0, 1.465 - (minDistanceCm / 100))
+  } else if (mountType === 'custom-base') {
+    // Max = 1.555m - wysokość_podłoża/100 - dystans/100
+    const baseHeightCm = (state.value.customBaseHeight || 0)  // wysokość w cm
+    return Math.max(0, 1.555 - (baseHeightCm / 100) - (minDistanceCm / 100))
+  } else {
+    // Dla brackets i self - max 30m
+    return 30
+  }
+})
+
+// Próg minimalnego dystansu (zależy od typu montażu)
+// Bigfoot: 275 + 90 + 5 = 370mm
+// Custom-base: 275 + customBaseHeight + 5
+const minDistanceThresholdMm = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType === 'bigfoot') {
+    return 275 + 90 + 5  // 370mm
+  } else if (mountType === 'custom-base') {
+    const customHeightMm = (state.value.customBaseHeight || 0) * 10  // cm -> mm
+    return 275 + customHeightMm + 5
+  }
+  return 0
+})
+
+// Warunek pokazania checkboxa: minDistance + wallHeight < próg
+const showLowDistanceCheckbox = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return false
+  const wallHeightMm = (state.value.atticWallHeight || 0) * 1000
+  const minDistanceMm = (state.value.atticMinDistance || 0) * 10
+  return (minDistanceMm + wallHeightMm) < minDistanceThresholdMm.value
+})
+
+// Ukryty dystans gdy checkbox NIE jest zaznaczony
+const hiddenDistanceMm = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return 0
+
+  // Sprawdź odpowiedni checkbox
+  if (mountType === 'bigfoot' && state.value.bigfootAllowLowDistance) return 0
+  if (mountType === 'custom-base' && state.value.customBaseAllowLowDistance) return 0
+
+  const wallHeightMm = (state.value.atticWallHeight || 0) * 1000
+  const minDistanceMm = (state.value.atticMinDistance || 0) * 10
+  const total = minDistanceMm + wallHeightMm
+  const threshold = minDistanceThresholdMm.value
+
+  if (total >= threshold) return 0
+  return threshold - total  // ukryty dystans do dodania
+})
+
+// Efektywny minimalny dystans (z inputa + ukryty)
+const effectiveAtticMinDistanceMm = computed(() => {
+  const rawMinDistanceMm = (state.value.atticMinDistance || 0) * 10
+  return rawMinDistanceMm + hiddenDistanceMm.value
+})
+
+// Suma grubości ściany + ocieplenie 1 + ocieplenie 2 (cm)
+const atticTotalThickness = computed(() => {
+  const wallThickness = state.value.atticWallThickness || 25
+  const insulation1 = state.value.atticHasInsulation ? (state.value.atticInsulationThickness || 0) : 0
+  const insulation2 = state.value.atticBackHasInsulation ? (state.value.atticBackInsulationThickness || 0) : 0
+  return wallThickness + insulation1 + insulation2
+})
+
+// Maksymalna grubość ściany (50cm minus ocieplenia) dla bigfoot/custom-base
+const atticWallThicknessMax = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return 60
+  const insulation1 = state.value.atticHasInsulation ? (state.value.atticInsulationThickness || 0) : 0
+  const insulation2 = state.value.atticBackHasInsulation ? (state.value.atticBackInsulationThickness || 0) : 0
+  return Math.max(10, 50 - insulation1 - insulation2)
+})
+
+// Maksymalna grubość ocieplenia 1 (50cm minus ściana i ocieplenie 2) dla bigfoot/custom-base
+const atticInsulationMax = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return 30
+  const wallThickness = state.value.atticWallThickness || 25
+  const insulation2 = state.value.atticBackHasInsulation ? (state.value.atticBackInsulationThickness || 0) : 0
+  return Math.max(1, 50 - wallThickness - insulation2)
+})
+
+// Maksymalna grubość ocieplenia 2 (50cm minus ściana i ocieplenie 1) dla bigfoot/custom-base
+const atticBackInsulationMax = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return 30
+  const wallThickness = state.value.atticWallThickness || 25
+  const insulation1 = state.value.atticHasInsulation ? (state.value.atticInsulationThickness || 0) : 0
+  return Math.max(1, 50 - wallThickness - insulation1)
+})
+
+// Ostrzeżenie o przekroczeniu 50cm
+const atticThicknessWarning = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') return null
+  if (atticTotalThickness.value > 50) {
+    return `Niestety, przy sumie grubości ściany i ocieplenia wynoszącej ${atticTotalThickness.value} cm nie możemy zaoferować drabiny z montażem ${mountType === 'bigfoot' ? 'Bigfoot' : 'Własne podłoże'}. Prosimy o kontakt z działem sprzedaży.`
+  }
+  return null
+})
+
+// Aktualny dystans podest-attyka (obliczony dla BIGFOOT/custom-base)
+// Logika 1:1 z oryginalnego konfiguratora
+const actualPlatformDistance = computed(() => {
+  const mountType = state.value.descentMountType
+  if (mountType !== 'bigfoot' && mountType !== 'custom-base') {
+    return state.value.atticMinDistance || 0
+  }
+  
+  const wallHeightMm = (state.value.atticWallHeight || 0) * 1000
+  const minDistanceMm = effectiveAtticMinDistanceMm.value  // używa efektywnego dystansu (z ukrytym)
+  const footHeight = mountType === 'custom-base'
+    ? (state.value.customBaseHeight || 0) * 10  // cm -> mm
+    : ATTIC_CONSTANTS.BIGFOOT_HEIGHT
+  
+  // Oba typy używają tej samej formuły: 275mm + wysokość podłoża
+  const baseHeight = ATTIC_CONSTANTS.RUNG_SPACING + footHeight
+  const extendedHeight = baseHeight + ATTIC_CONSTANTS.BIGFOOT_CONNECTION_OVERLAP  // baseHeight + 105
+  const targetHeight = wallHeightMm + minDistanceMm
+  
+  let platformDistance = 0
+  
+  if (targetHeight <= baseHeight) {
+    // Krótsze nóżki
+    platformDistance = baseHeight - wallHeightMm
+  } else if (targetHeight <= extendedHeight) {
+    // Pełne podłużnice
+    platformDistance = extendedHeight - wallHeightMm
+  } else {
+    // Drabina końcowa
+    for (let i = 1; i <= ATTIC_CONSTANTS.BIGFOOT_MAX_ADDITIONAL_RUNGS; i++) {
+      const totalHeight = baseHeight + (i * ATTIC_CONSTANTS.RUNG_SPACING)
+      if (totalHeight >= targetHeight) {
+        platformDistance = totalHeight - wallHeightMm
+        break
+      }
+    }
+  }
+  
+  // Korekta dla custom-base: -5mm (wizualnie jest 5mm mniej)
+  const correction = mountType === 'custom-base' ? 5 : 0
+  return (platformDistance - correction) / 10  // mm to cm
+})
+
+// Min wysokość bloczków dla custom-base
+// Warunek: (wysokość_ściany + dystans_podest) - wysokość_bloczków <= 138cm
+// Więc: wysokość_bloczków >= (wysokość_ściany + dystans_podest) - 138
+const customBaseHeightMin = computed(() => {
+  if (state.value.descentMountType !== 'custom-base') return 0
+  const wallHeightCm = (state.value.atticWallHeight || 0) * 100  // m -> cm
+  const platformDistCm = actualPlatformDistance.value  // już w cm
+  const minHeight = (wallHeightCm + platformDistCm) - 138
+  return Math.max(0, minHeight)
+})
+
+// Dopuszczalna szerokość murka (dla brackets)
+// Wzór: 102cm - odległość_wejścia - odległość_zejścia
+const wallThicknessMin = computed(() => {
+  const bracketRanges: Record<string, [number, number]> = {
+    'short': [16, 26],
+    'medium': [26, 36],
+    'long': [36, 46]
+  }
+  const entryRange = bracketRanges[state.value.bracketType] || [16, 26]
+  const descentRange = bracketRanges[state.value.descentBracketType] || [16, 26]
+  // Min szerokość = 102 - max_entry - max_descent
+  return Math.max(0, 102 - entryRange[1] - descentRange[1])
+})
+
+const wallThicknessMax = computed(() => {
+  const bracketRanges: Record<string, [number, number]> = {
+    'short': [16, 26],
+    'medium': [26, 36],
+    'long': [36, 46]
+  }
+  const entryRange = bracketRanges[state.value.bracketType] || [16, 26]
+  const descentRange = bracketRanges[state.value.descentBracketType] || [16, 26]
+  // Max szerokość = 102 - min_entry - min_descent
+  return Math.max(0, 102 - entryRange[0] - descentRange[0])
+})
+
+// Obliczenia drabiny zejścia (dla attyki)
+const descentLadderData = computed(() => {
+  if (state.value.scheme !== 'attic-passage') {
+    return null
+  }
+
+  const mountType = state.value.descentMountType
+  const descentWallHeightMm = (state.value.atticWallHeight || 0) * 1000
+  const minDistanceMm = (state.value.atticMinDistance || 0) * 10
+  const platformDistanceMm = actualPlatformDistance.value * 10
+
+  // Stałe
+  const RUNG_SPACING = 275
+  const BIGFOOT_HEIGHT = 90
+  const BIGFOOT_CONNECTION_OVERLAP = 105
+  const BIGFOOT_MAX_ADDITIONAL_RUNGS = 4
+  const MIN_LAST_RUNG = 40
+  const MAX_LAST_RUNG = 330
+
+  if (mountType === 'bigfoot' || mountType === 'custom-base') {
+    // Dla BIGFOOT/custom-base: oblicz ile dodatkowych szczebli potrzeba
+    const footHeight = mountType === 'custom-base'
+      ? (state.value.customBaseHeight || 0) * 10  // cm -> mm
+      : BIGFOOT_HEIGHT
+
+    // Oba typy używają tej samej formuły: 275mm + wysokość podłoża
+    const baseHeight = RUNG_SPACING + footHeight
+    const extendedHeight = baseHeight + BIGFOOT_CONNECTION_OVERLAP  // +105mm
+    const targetHeight = descentWallHeightMm + minDistanceMm
+
+    let descentRungs = 0
+    let calculatedPlatformDistance = 0
+
+    if (targetHeight <= baseHeight) {
+      // Krótsze nóżki
+      calculatedPlatformDistance = baseHeight - descentWallHeightMm
+      descentRungs = 0
+    } else if (targetHeight <= extendedHeight) {
+      // Pełne podłużnice
+      calculatedPlatformDistance = extendedHeight - descentWallHeightMm
+      descentRungs = 0
+    } else {
+      // Drabina końcowa (1-4 szczeble)
+      for (let i = 1; i <= BIGFOOT_MAX_ADDITIONAL_RUNGS; i++) {
+        const totalHeight = baseHeight + (i * RUNG_SPACING)
+        if (totalHeight >= targetHeight) {
+          descentRungs = i
+          calculatedPlatformDistance = totalHeight - descentWallHeightMm
+          break
+        }
+      }
+    }
+
+    return {
+      type: mountType,  // 'bigfoot' lub 'custom-base'
+      rungs: descentRungs,
+      repeatLadder7: 0,
+      endLadderRungs: descentRungs,
+      platformDistanceMm: calculatedPlatformDistance
+    }
+
+  } else if (mountType === 'brackets' || mountType === 'self') {
+    // Wysokość drabiny = (ściana zejścia + dystans podestu) - 375mm
+    const ladderHeight = descentWallHeightMm + platformDistanceMm - 515
+    
+    // Oblicz liczbę szczebli (co 275mm)
+    let rungCount = Math.max(1, Math.round(ladderHeight / RUNG_SPACING))
+    
+    // Sprawdź pozycję ostatniego szczebla względem dachu
+    const actualLadderSpan = (rungCount - 1) * RUNG_SPACING
+    const lastRungOffset = ladderHeight - actualLadderSpan
+    
+    // Dopasuj jeśli ostatni szczebel poza zakresem 40-330mm
+    if (lastRungOffset > MAX_LAST_RUNG) {
+      rungCount++
+    } else if (lastRungOffset < MIN_LAST_RUNG && rungCount > 1) {
+      rungCount--
+    }
+    
+    rungCount = Math.max(1, rungCount)
+    
+    // Oblicz finalną odległość ostatni szczebel -> dach
+    const finalLadderSpan = (rungCount - 1) * RUNG_SPACING
+    const lastRungToRoof = ladderHeight - finalLadderSpan
+    
+    // Podział na moduły (jak strona wejścia)
+    let numX7 = 0
+    let endLadderRungs = rungCount
+    
+    if (rungCount <= 7) {
+      endLadderRungs = rungCount
+    } else {
+      numX7 = 1  // startLadder7
+      const remaining = rungCount - 7
+      const repeatCount = Math.floor(remaining / 7)
+      let endRungs = remaining % 7
+      
+      if (endRungs === 0) {
+        endRungs = 7
+        numX7 += Math.max(0, repeatCount - 1)
+      } else {
+        numX7 += repeatCount
+      }
+      endLadderRungs = endRungs
+    }
+
+    return {
+      type: mountType,
+      rungs: rungCount,
+      totalRungs: rungCount,
+      repeatLadder7: numX7,
+      endLadderRungs: endLadderRungs,
+      ladderHeight: ladderHeight,
+      lastRungToRoof: lastRungToRoof
+    }
+  }
+
+  return null
+})
+
+const canGoBack = computed(() => currentScreen.value !== 'purpose')
+
+// ============================================
+// NAWIGACJA
+// ============================================
+function goBack() {
+  switch (currentScreen.value) {
+    case 'params':
+      currentScreen.value = 'purpose'
+      break
+    case 'summary':
+      currentScreen.value = 'params'
+      break
+  }
+}
+
+function selectPurpose(purpose: 'internal' | 'external') {
+  state.value.purpose = purpose
+  if (purpose === 'internal') {
+    // Wewnętrzna - domyślne ustawienia
+    state.value.scheme = 'no-platform'
+    state.value.cage = 'no-cage'
+  } else {
+    // Zewnętrzna - domyślne ustawienia (użytkownik może zmienić w params)
+    if (!state.value.scheme) {
+      state.value.scheme = 'no-platform'
+    }
+    if (!state.value.cage) {
+      state.value.cage = 'no-cage'
+    }
+  }
+  currentScreen.value = 'params'
+}
+
+function selectScheme(scheme: 'no-platform' | 'with-platform' | 'attic-passage') {
+  state.value.scheme = scheme
+  // Jeśli attyka - brak kosza
+  if (scheme === 'attic-passage') {
+    state.value.cage = 'no-cage'
+  }
+  updateThreeState()
+}
+
+function selectCage(cage: 'no-cage' | 'with-cage') {
+  state.value.cage = cage
+  updateThreeState()
+}
+
+// Obsługa checkboxa "pozwól na mniejszy dystans"
+function handleLowDistanceCheckbox(checked: boolean) {
+  if (state.value.descentMountType === 'bigfoot') {
+    state.value.bigfootAllowLowDistance = checked
+  } else if (state.value.descentMountType === 'custom-base') {
+    state.value.customBaseAllowLowDistance = checked
+  }
+  updateThreeState()
+}
+
+// ============================================
+// STAŁE DRABINY (z oryginału LadderCalculator)
+// ============================================
+const LADDER_CONSTANTS = {
+  RUNG_SPACING: 275,        // mm - odstęp między szczeblami
+  MAX_GROUND_DISTANCE: 300, // mm - max odległość ostatniego szczebla od ziemi (FIXED: was 330)
+  MIN_GROUND_DISTANCE: 40,  // mm - min odległość ostatniego szczebla od ziemi
+  PLATFORM_OFFSET: 50,      // mm - przesunięcie pierwszego szczebla dla podestu
+  MIN_HEIGHT: 600,          // mm - minimalna wysokość ściany
+  MAX_HEIGHT: 30000,        // mm - maksymalna wysokość ściany
+
+  // Stałe dla kosza ochronnego
+  CAGE_START_OFFSET: 1114,  // mm - odległość środka pierwszej obręczy od górnego szczebla (FIXED: was 1122)
+  CAGE_HOOP_SPACING: 641.7, // mm - rozstaw między obręczami
+  CAGE_MIN_HEIGHT: 2200,    // mm - minimalna wysokość ostatniej obręczy od ziemi (2.2m)
+  CAGE_MAX_HEIGHT: 3000,    // mm - maksymalna wysokość ostatniej obręczy od ziemi (3m)
+
+  // Ilość otworów na obręcze w modułach
+  CAGE_HOLES: {
+    handrails: 2,
+    startLadder: 3,
+    repeatLadder: 3,
+    endLadder: { 7: 3, 6: 3, 5: 2, 4: 2, 3: 1, 2: 1, 1: 0 } as Record<number, number>
+  }
+}
+
+/**
+ * Oblicz szczeble drabiny (logika 1:1 z oryginału)
+ */
+function calculateRungs(
+  wallHeightMm: number,
+  scheme: string,
+  suspended: boolean = false,
+  suspendedHeightMm: number = 0,
+  atticPlatformDistanceMm: number = 0
+) {
+  const hasPlatform = scheme === 'with-platform'
+  const isAtticPassage = scheme === 'attic-passage'
+
+  // ============================================
+  // PRZEJŚCIE PRZEZ ATTYKĘ - osobna logika
+  // ============================================
+  if (isAtticPassage) {
+    // Zmienne:
+    // a = dystans podest-attyka (mm)
+    // b = wysokość ściany (mm)
+    // c = wysokość zawieszenia (mm)
+    const a = atticPlatformDistanceMm
+    const b = wallHeightMm
+    const c = suspendedHeightMm
+
+    let d: number  // ilość szczebli (razem)
+    let e: number  // ostatni szczebel → ziemia
+
+    if (suspended) {
+      // Dla zawieszonej drabiny - bez korekt (adjustments)
+      // Uwaga: c (suspendedHeightMm) może być 0 jeśli nie wpisano wartości
+      d = Math.floor((a + 36 + b - c) / 275)
+      e = (a + 36 + b) - (275 * d)
+    } else {
+      // Dla nie-zawieszonej drabiny
+      d = Math.floor((a + 36 + b) / 275)
+      e = (a + 36 + b) - (275 * d)
+
+      // Sprawdź warunki i dostosuj
+      if (e < 40) {
+        // Za blisko ziemi - usuń szczebel
+        d = d - 1
+        e = (a + 36 + b) - (275 * d)
+      } else if (e > 340) {
+        // Za daleko od ziemi - dodaj szczebel
+        d = d + 1
+        e = (a + 36 + b) - (275 * d)
+      } else if (e > 40 && e < 340) {
+        // W zakresie - sprawdź czy można zoptymalizować
+        if (e + 275 <= 340) {
+          d = d - 1
+          e = (a + 36 + b) - (275 * d)
+        }
+      }
+    }
+
+    // Szczeble do generowania modeli = d - 2 (przełaz ma 2 szczeble)
+    const ladderRungs = Math.max(0, d - 1)  // przełaz ma 1 szczebel wliczony
+    const ladderLength = ladderRungs > 0 ? (ladderRungs - 1) * 275 : 0
+
+    return {
+      valid: true,
+      rungCount: d,               // Razem szczebli (do wyświetlenia)
+      ladderRungs: ladderRungs,  // Szczeble do generowania (bez przełazu)
+      firstRungHeight: a + 36 + b,
+      lastRungHeight: e,
+      ladderLength,
+      distanceFromGround: e,
+      hasPlatform,
+      isAtticPassage
+    }
+  }
+
+  // ============================================
+  // KLASYCZNA I Z PODESTEM - oryginalna logika
+  // ============================================
+  let firstRungOffset = 0
+
+  if (hasPlatform) {
+    // Drabina z podestem: pierwszy szczebel 5cm wyżej niż krawędź dachu
+    firstRungOffset = LADDER_CONSTANTS.PLATFORM_OFFSET
+  }
+
+  const firstRungHeight = wallHeightMm + firstRungOffset
+
+  // Poziom gruntu (lub zawieszenia) - tylko gdy faktycznie zawieszona > 0
+  const groundLevel = (suspended && suspendedHeightMm > 0) ? suspendedHeightMm : 0
+  const maxLastRungHeight = groundLevel + LADDER_CONSTANTS.MAX_GROUND_DISTANCE
+  const minLastRungHeight = groundLevel + LADDER_CONSTANTS.MIN_GROUND_DISTANCE
+
+  let rungCount = 1 // minimum 1 szczebel na górze
+  let lastRungHeight = firstRungHeight // pierwszy szczebel
+
+  // Dodawaj szczeble aż ostatni będzie w zakresie 40-330mm od ziemi/zawieszenia
+  while (lastRungHeight > maxLastRungHeight) {
+    rungCount++
+    lastRungHeight = firstRungHeight - (rungCount - 1) * LADDER_CONSTANTS.RUNG_SPACING
+  }
+
+  // Sprawdź czy ostatni szczebel nie jest za nisko (poniżej 40mm)
+  if (lastRungHeight < minLastRungHeight && rungCount > 1) {
+    rungCount--
+    lastRungHeight = firstRungHeight - (rungCount - 1) * LADDER_CONSTANTS.RUNG_SPACING
+  }
+
+  // Dla drabiny zawieszonej: sprawdź czy można dodać jeszcze jeden szczebel
+  if (suspended && suspendedHeightMm > 0) {
+    const nextRungHeight = firstRungHeight - rungCount * LADDER_CONSTANTS.RUNG_SPACING
+    if (nextRungHeight >= minLastRungHeight) {
+      rungCount++
+      lastRungHeight = nextRungHeight
+    }
+  }
+
+  const ladderLength = (rungCount - 1) * LADDER_CONSTANTS.RUNG_SPACING
+  const distanceFromGround = lastRungHeight - groundLevel
+
+  return {
+    valid: true,
+    rungCount,
+    ladderRungs: rungCount,  // Dla klasycznej/podestem = rungCount
+    firstRungHeight,
+    lastRungHeight,
+    ladderLength,
+    distanceFromGround,
+    hasPlatform,
+    isAtticPassage
+  }
+}
+
+/**
+ * Oblicz moduły drabiny na podstawie ilości szczebli
+ */
+function calculateModules(rungCount: number) {
+  const modules = {
+    startLadder7: 0,
+    repeatLadder7: 0,
+    endLadder: { count: 0, rungs: 0 },
+    handrails: 2,
+    handrailConnectors: 2,
+    connectionMounts: 0,
+    clampMounts: 0,
+    brackets: 0
+  }
+
+  if (rungCount <= 7) {
+    // Tylko drabina końcowa
+    modules.endLadder = { count: 1, rungs: rungCount }
+    modules.clampMounts = 2
+    modules.brackets = 2
+  } else {
+    // Drabina początkowa X7
+    modules.startLadder7 = 1
+
+    const remaining = rungCount - 7
+    let repeatCount = Math.floor(remaining / 7)
+    let endRungs = remaining % 7
+
+    // Jeśli reszta = 0, ostatnia powielana staje się końcową
+    if (endRungs === 0) {
+      endRungs = 7
+      repeatCount = Math.max(0, repeatCount - 1)
+    }
+
+    modules.repeatLadder7 = repeatCount
+    modules.endLadder = { count: 1, rungs: endRungs }
+
+    // Uchwyty montażowe i wsporniki
+    modules.connectionMounts = 2 + repeatCount
+    modules.brackets = 2 + repeatCount
+
+    // Dodatkowe uchwyty dla drabiny końcowej >= 4 szczebli
+    if (endRungs >= 4) {
+      modules.clampMounts = 1
+      modules.brackets += 1
+    }
+  }
+
+  return modules
+}
+
+/**
+ * Oblicz obręcze kosza ochronnego (logika 1:1 z oryginału)
+ * Kosz zaczyna się 112.2cm nad górnym szczeblem
+ * Ostatnia obręcz musi być między 2.2m a 3m od ziemi
+ */
+function calculateCageHoops(
+  firstRungHeight: number,
+  modules: ReturnType<typeof calculateModules>,
+  suspended: boolean = false,
+  suspendedHeightMm: number = 0
+) {
+  // Środek pierwszej obręczy jest 112.2cm nad górnym szczeblem
+  const firstHoopHeight = firstRungHeight + LADDER_CONSTANTS.CAGE_START_OFFSET
+
+  // Poziom gruntu (lub zawieszenia)
+  const groundLevel = (suspended && suspendedHeightMm > 0) ? suspendedHeightMm : 0
+
+  // Oblicz maksymalną ilość otworów dostępnych w modułach
+  let maxHolesAvailable = LADDER_CONSTANTS.CAGE_HOLES.handrails
+
+  if (modules.startLadder7 > 0) {
+    maxHolesAvailable += LADDER_CONSTANTS.CAGE_HOLES.startLadder
+  }
+
+  maxHolesAvailable += modules.repeatLadder7 * LADDER_CONSTANTS.CAGE_HOLES.repeatLadder
+
+  if (modules.endLadder.count > 0) {
+    const endRungs = modules.endLadder.rungs
+    maxHolesAvailable += LADDER_CONSTANTS.CAGE_HOLES.endLadder[endRungs] || 0
+  }
+
+  // Oblicz obręcze idąc w dół od pierwszej
+  let hoopCount = 0
+  const hoopHeights: number[] = []
+  let currentHeight = firstHoopHeight
+
+  // Standardowy kosz: ostatnia obręcz między 2.2m a 3m od ziemi (groundLevel)
+  // Obręcze dodawane dopóki currentHeight >= CAGE_MIN_HEIGHT + groundLevel
+  const minCageHeight = LADDER_CONSTANTS.CAGE_MIN_HEIGHT + groundLevel
+
+  while (currentHeight >= minCageHeight && hoopCount < maxHolesAvailable) {
+    hoopHeights.push(currentHeight)
+    hoopCount++
+    currentHeight -= LADDER_CONSTANTS.CAGE_HOOP_SPACING
+  }
+
+  // Minimum 2 obręcze - jeśli tylko 1, to traktujemy jako 0
+  if (hoopCount === 1) {
+    hoopCount = 0
+  }
+
+  // Oblicz wysokość ostatniej obręczy od ziemi
+  const lastHoopHeight = hoopHeights.length > 0 ? hoopHeights[hoopHeights.length - 1] : null
+  const cageDistanceFromGround = lastHoopHeight !== null ? lastHoopHeight - groundLevel : null
+
+  return {
+    count: hoopCount,
+    heights: hoopHeights,
+    firstHoopHeight,
+    lastHoopHeight,
+    cageDistanceFromGround,
+    maxHolesAvailable
+  }
+}
+
+/**
+ * Główna funkcja obliczeniowa
+ */
+function calculateLadderStructure() {
+  const wallHeightMm = state.value.wallHeight * 1000
+  const scheme = state.value.scheme || 'no-platform'
+  const suspended = state.value.suspended
+  const suspendedHeightMm = state.value.suspendedHeight * 1000
+  
+  // Dla attyki: oblicz dystans podest-attyka w mm
+  const atticPlatformDistanceMm = scheme === 'attic-passage' 
+    ? actualPlatformDistance.value * 10  // cm -> mm
+    : 0
+
+  // 1. Oblicz szczeble
+  const rungs = calculateRungs(wallHeightMm, scheme, suspended, suspendedHeightMm, atticPlatformDistanceMm)
+
+  // 2. Oblicz moduły (używaj ladderRungs dla generowania modeli)
+  const modules = calculateModules(rungs.ladderRungs)
+
+  // 3. Oblicz kosz
+  const cage = calculateCageHoops(rungs.firstRungHeight, modules, suspended, suspendedHeightMm)
+
+  // 4. Oblicz numX7 i finalRungs
+  const numX7 = modules.startLadder7 + modules.repeatLadder7
+  const finalRungs = modules.endLadder.rungs
+
+  return {
+    numX7,
+    finalRungs,
+    totalRungs: rungs.rungCount,
+    cageHoops: cage.count,
+    ladderLength: rungs.ladderLength,
+    firstRungHeight: rungs.firstRungHeight,
+    lastRungHeight: rungs.lastRungHeight,
+    distanceFromGround: rungs.distanceFromGround,
+    cageDistanceFromGround: cage.cageDistanceFromGround
+  }
+}
+
+// ============================================
+// LIFECYCLE I WATCHERS
+// ============================================
+
+// Aktualizuj stan 3D przy zmianach konfiguracji
+watch(
+  () => [
+    state.value.wallHeight,
+    state.value.cage,
+    state.value.scheme,
+    state.value.bracketSpacing,
+    state.value.suspended,
+    state.value.suspendedHeight,
+    state.value.cageClosing,
+    state.value.restingPlatform
+  ],
+  () => {
+    updateThreeState()
+  }
+)
+
+// Pobierz dane z API przy przejściu do podsumowania
+watch(
+  () => currentScreen.value,
+  (newScreen) => {
+    if (newScreen === 'summary') {
+      fetchCalculation()
+    }
+  }
+)
+
+// Auto-korekta wysokości bloczków gdy min się zmienia lub wartość przekracza max
+watch(customBaseHeightMin, (newMin) => {
+  if (state.value.descentMountType === 'custom-base') {
+    if (state.value.customBaseHeight < newMin) {
+      state.value.customBaseHeight = Math.ceil(newMin * 2) / 2  // Zaokrąglij do 0.5
+    }
+    if (state.value.customBaseHeight > 40) {
+      state.value.customBaseHeight = 40
+    }
+  }
+})
+
+// ============================================
+// WALIDACJA WYSOKOŚCI
+// ============================================
+function validateWallHeight() {
+  wallHeightTouched.value = true
+  const h = state.value.wallHeight
+  if (h < 0.6) {
+    wallHeightWarning.value = 'Minimalna wysokość to 0.6m'
+  } else if (h > 30) {
+    wallHeightWarning.value = 'Maksymalna wysokość to 30m'
+  } else {
+    wallHeightWarning.value = ''
+  }
+}
+
+// ============================================
+// OBSŁUGA WSPORNIKÓW
+// ============================================
+function onBracketChange() {
+  const type = state.value.bracketType
+
+  // Ustaw flagę ręcznego wyboru jeśli użytkownik wybrał 'none' lub 'custom'
+  if (type === 'none' || type === 'custom') {
+    bracketTypeManualOverride.value = true
+  } else {
+    // Użytkownik wybrał standardowy typ - resetuj flagę
+    bracketTypeManualOverride.value = false
+  }
+
+  let distance = 215
+  switch (type) {
+    case 'short':
+      distance = 215
+      break
+    case 'medium':
+      distance = 315
+      break
+    case 'long':
+      distance = 415
+      break
+    case 'none':
+    case 'custom':
+      distance = 0
+      break
+  }
+  state.value.bracketSpacing = distance
+
+  // Sync with global slider and 3D
+  if (distance > 0) {
+    globalWspornikDistance.value = distance
+    threeCanvasRef.value?.setGlobalWspornikDistance(distance, 1)
+  }
+  updateThreeState()
+}
+
+// ============================================
+// OBSŁUGA DRABINY ZAWIESZONEJ
+// ============================================
+function toggleSuspended() {
+  if (!state.value.suspended) {
+    state.value.suspendedHeight = 0
+  }
+}
+
+// Maksymalna wysokość zawieszenia
+const maxSuspendedHeight = computed(() => {
+  return Math.max(0, state.value.wallHeight - 1)
+})
+
+// ============================================
+// OBSŁUGA PRZESZKÓD
+// ============================================
+let obstacleIdCounter = 0
+const obstacleAboveWallWarning = ref('')
+let obstacleWarningTimeout: ReturnType<typeof setTimeout> | null = null
+
+// Walidacja przeszkód - sprawdź czy nie przekracza wysokości ściany
+function validateObstacleHeight(obstacle: { heightFrom: number; height: number }) {
+  // Tylko dla przejścia przez attykę - sprawdź względem ściany wejścia
+  if (state.value.scheme !== 'attic-passage') return
+
+  const wallHeight = state.value.wallHeight || 0  // wysokość ściany wejścia w metrach
+  const obstacleTop = obstacle.heightFrom + obstacle.height
+
+  if (obstacleTop > wallHeight) {
+    // Pokaż ostrzeżenie
+    obstacleAboveWallWarning.value = 'Przeszkoda znajduje się ponad ścianą'
+
+    // Ogranicz wartości - najpierw spróbuj zmniejszyć height
+    const maxHeight = wallHeight - obstacle.heightFrom
+    if (maxHeight > 0) {
+      obstacle.height = Math.round(maxHeight * 10) / 10  // zaokrąglij do 0.1
+    } else {
+      // Jeśli heightFrom jest za duże, zmniejsz je
+      obstacle.heightFrom = Math.max(0, Math.round((wallHeight - obstacle.height) * 10) / 10)
+      if (obstacle.heightFrom + obstacle.height > wallHeight) {
+        obstacle.height = Math.round((wallHeight - obstacle.heightFrom) * 10) / 10
+      }
+    }
+
+    // Wyczyść poprzedni timeout
+    if (obstacleWarningTimeout) {
+      clearTimeout(obstacleWarningTimeout)
+    }
+
+    // Ukryj po 10 sekundach
+    obstacleWarningTimeout = setTimeout(() => {
+      obstacleAboveWallWarning.value = ''
+    }, 10000)
+  }
+}
+
+// Watch dla zmian w przeszkodach
+watch(() => state.value.obstacles, (obstacles) => {
+  for (const obs of obstacles) {
+    validateObstacleHeight(obs)
+  }
+}, { deep: true })
+
+function addObstacle() {
+  state.value.obstacles.push({
+    id: ++obstacleIdCounter,
+    heightFrom: 0,  // wysokość od ziemi do dołu przeszkody (m)
+    height: 1,       // wysokość przeszkody (m)
+    type: 'window',  // 'window' | 'wall-point' | 'recess' | 'groove' | 'other'
+    description: ''
+  })
+}
+
+function addWallPoint() {
+  state.value.obstacles.push({
+    id: ++obstacleIdCounter,
+    heightFrom: 0,
+    height: 1,
+    type: 'wall-point',  // Punkt na ścianie - nie usuwa uchwytów
+    description: ''
+  })
+}
+
+function removeObstacle(id: number) {
+  state.value.obstacles = state.value.obstacles.filter(o => o.id !== id)
+}
+
+function toggleEave() {
+  state.value.hasEave = !state.value.hasEave
+  if (state.value.hasEave) {
+    // Ustaw domyślne wartości (cm)
+    state.value.eaveHeight = 20
+    state.value.eaveDepth = 15
+  }
+}
+
+// ============================================
+// WYŚWIETLANIE BRAKETÓW
+// ============================================
+const bracketTypeLabel = computed(() => {
+  switch (state.value.bracketType) {
+    case 'short': return 'Krótkie (16-26 cm)'
+    case 'medium': return 'Średnie (26-36 cm)'
+    case 'long': return 'Długie (36-46 cm)'
+    case 'none': return 'Bez wsporników'
+    case 'custom': return 'Inne - niestandardowe'
+    default: return 'Wybierz...'
+  }
+})
+
+// ============================================
+// WYWOŁANIE API
+// ============================================
+async function fetchCalculation() {
+  apiLoading.value = true
+  apiError.value = ''
+
+  const request = {
+    wallHeight: state.value.wallHeight,
+    scheme: state.value.scheme || 'no-platform',
+    cage: state.value.cage || 'no-cage',
+    bracketType: state.value.bracketType,
+    bracketSpacing: state.value.bracketSpacing,
+    purpose: state.value.purpose,
+    suspended: state.value.suspended,
+    suspendedHeight: state.value.suspendedHeight,
+    hasObstacles: state.value.hasObstacles,
+    obstacles: state.value.obstacles.map(obs => ({
+      id: obs.id,
+      type: obs.type,
+      bottomHeightMm: obs.heightFrom * 1000,
+      heightMm: obs.height * 1000
+    }))
+  }
+
+  try {
+    // Najpierw spróbuj API
+    const response = await calculateLadder(request)
+
+    if (response.success && response.data) {
+      componentsList.value = response.data.components
+      pricing.value = {
+        subtotal: response.data.subtotal,
+        discount: response.data.discount,
+        discountPercent: response.data.discountPercent,
+        total: response.data.total,
+        totalWithVat: response.data.totalWithVat,
+        vatRate: response.data.vatRate
+      }
+    } else {
+      // Fallback do lokalnych obliczeń
+      const localResult = calculateLocal(request)
+      if (localResult.success && localResult.data) {
+        componentsList.value = localResult.data.components
+      }
+    }
+  } catch (error) {
+    console.warn('API error, using local calculation:', error)
+    // Fallback do lokalnych obliczeń
+    const localResult = calculateLocal(request)
+    if (localResult.success && localResult.data) {
+      componentsList.value = localResult.data.components
+    }
+  } finally {
+    apiLoading.value = false
+  }
+}
+
+// ============================================
+// KOD PROMOCYJNY
+// ============================================
+const promoCode = ref('')
+const promoMessage = ref('')
+const promoSuccess = ref(false)
+
+async function applyPromoCode() {
+  const code = promoCode.value.trim().toUpperCase()
+  if (!code) {
+    promoMessage.value = 'Wpisz kod promocyjny'
+    promoSuccess.value = false
+    return
+  }
+
+  try {
+    const response = await validatePromoCode(code)
+    if (response.valid) {
+      promoMessage.value = response.message || 'Kod zastosowany!'
+      promoSuccess.value = true
+      pricing.value.discountPercent = response.discountPercent || 0
+      // Przelicz cenę
+      if (pricing.value.subtotal > 0) {
+        pricing.value.discount = pricing.value.subtotal * (pricing.value.discountPercent / 100)
+        pricing.value.total = pricing.value.subtotal - pricing.value.discount
+        pricing.value.totalWithVat = pricing.value.total * (1 + pricing.value.vatRate / 100)
+      }
+    } else {
+      promoMessage.value = response.message || 'Nieprawidłowy kod promocyjny'
+      promoSuccess.value = false
+    }
+  } catch (error) {
+    // Fallback
+    if (code === 'DRABINA10') {
+      promoMessage.value = 'Kod zastosowany! Rabat 10%'
+      promoSuccess.value = true
+      pricing.value.discountPercent = 10
+    } else {
+      promoMessage.value = 'Nieprawidłowy kod promocyjny'
+      promoSuccess.value = false
+    }
+  }
+}
+
+// ============================================
+// AKCJE
+// ============================================
+function generateOffer() {
+  // TODO: Generowanie PDF oferty
+  alert('Funkcja generowania oferty - w przygotowaniu')
+}
+
+function addToCart() {
+  // TODO: Dodanie do koszyka
+  const config = {
+    purpose: state.value.purpose,
+    scheme: state.value.scheme,
+    cage: state.value.cage,
+    wallHeight: state.value.wallHeight,
+    bracketType: state.value.bracketType,
+    accessLock: state.value.accessLock,
+    suspended: state.value.suspended,
+    suspendedHeight: state.value.suspendedHeight,
+    numX7Ladders: threeState.value.numX7Ladders,
+    finalLadderRungs: threeState.value.finalLadderRungs,
+    totalRungs: threeState.value.totalRungs,
+    safetyCageCount: threeState.value.safetyCageCount
+  }
+  console.log('Dodano do koszyka:', config)
+  alert('Drabina została dodana do koszyka!')
+}
+
+function addAnotherLadder() {
+  // Reset konfiguracji i powrót do pierwszego ekranu
+  state.value.purpose = ''
+  state.value.scheme = ''
+  state.value.cage = ''
+  state.value.wallHeight = 5
+  state.value.bracketType = 'short'
+  state.value.accessLock = false
+  state.value.suspended = false
+  state.value.suspendedHeight = 0
+  state.value.hasObstacles = false
+  state.value.obstacles = []
+  currentScreen.value = 'purpose'
+}
+
+// ============================================
+// KONTROLKI 3D
+// ============================================
+const show3DWall = ref(true)
+const show3DGround = ref(true)
+const show3DInsulation = ref(false)  // Domyślnie wyłączone
+const warningDismissed = ref(false)  // Czy użytkownik zamknął popup ostrzeżenia
+const threeCanvasRef = ref<InstanceType<typeof ThreeCanvas> | null>(null)
+
+// Tool modes
+const measureModeActive = ref(false)
+const measureAxisMode = ref<'3d' | 'x' | 'y' | 'z'>('3d')
+const measureResult = ref<{ distanceMm: number; axisMode: string } | null>(null)
+const techDrawingActive = ref(false)
+const techDrawingView = ref('front')
+
+// Edit mode state (sciskane mode - handled by ThreeCanvas)
+const sciskaneModeActive = ref(false)
+
+// Sciskane handle edit panel state
+const sciskaneEditPanelActive = ref(false)
+const sciskaneEditData = ref<{
+  offsetFromBottom: number
+  ladderNum: number
+  connType: string
+  wspornikType: string
+  wspornikDistance: number
+  isMidRung?: boolean  // True for mid-rung bracket (auto-added between rungs 2-3)
+  isJointConnector?: boolean  // True for joint connector (at section joints)
+  pairIndex?: number  // For joint connectors
+} | null>(null)
+
+// Zakresy odległości dla typów wsporników
+const wspornikDistanceRanges: Record<string, { min: number; max: number }> = {
+  krotki: { min: 160, max: 260 },
+  sredni: { min: 260, max: 360 },
+  dlugi: { min: 360, max: 460 }
+}
+
+// Computed property dla aktualnego zakresu suwaka
+const currentWspornikRange = computed(() => {
+  if (!sciskaneEditData.value) return { min: 160, max: 260 }
+  const type = sciskaneEditData.value.wspornikType || 'krotki'
+  return wspornikDistanceRanges[type] || wspornikDistanceRanges['krotki']
+})
+
+// Global settings for all brackets (editable in sciskane mode)
+const globalWspornikDistance = ref(215)
+
+// Computed type based on distance
+const globalWspornikType = computed(() => {
+  const d = globalWspornikDistance.value
+  if (d <= 260) return 'krótki'
+  if (d <= 360) return 'średni'
+  return 'długi'
+})
+
+function setGlobalWspornikDistanceValue(distance: number) {
+  globalWspornikDistance.value = distance
+  state.value.bracketSpacing = distance
+  threeCanvasRef.value?.setGlobalWspornikDistance(distance, 1)
+
+  // Auto-update bracket type in dropdown
+  if (distance <= 260) {
+    state.value.bracketType = 'short'
+  } else if (distance <= 360) {
+    state.value.bracketType = 'medium'
+  } else {
+    state.value.bracketType = 'long'
+  }
+}
+
+// ============================================
+// AUTOMATYCZNE DOSTOSOWANIE WSPORNIKÓW DO OKAPU
+// ============================================
+// Wymagana długość wspornika dla okapu (cm) - drabina 15cm od okapu
+const requiredCustomBracketLength = computed(() => {
+  if (!state.value.hasEave) return 0
+  return state.value.eaveDepth + 15  // głębokość okapu + 15cm odstępu
+})
+
+function updateWspornikDistanceForEave() {
+  if (!state.value.hasEave) return
+
+  // Jeśli użytkownik ręcznie wybrał 'none' lub 'custom' - nie nadpisuj
+  if (bracketTypeManualOverride.value) return
+
+  // Minimalna odległość = głębokość okapu + 15cm (drabina 15cm od okapu) w mm
+  const minDistanceMm = (state.value.eaveDepth + 15) * 10
+
+  // Jeśli okap za głęboki dla standardowych wsporników (>31cm = >460mm)
+  if (minDistanceMm > 460) {
+    // Ustaw typ "custom" - potrzebuję dłuższe (ale nie ustawiaj flagi manual)
+    state.value.bracketType = 'custom'
+    state.value.bracketSpacing = minDistanceMm
+    globalWspornikDistance.value = minDistanceMm
+    // Aktualizuj pozycję ściany w 3D
+    threeCanvasRef.value?.setGlobalWspornikDistance(minDistanceMm, 1)
+  } else {
+    // Standardowe wsporniki - dostosuj do wymaganej odległości (w górę lub w dół)
+    setGlobalWspornikDistanceValue(minDistanceMm)
+  }
+}
+
+// Watcher dla zmian głębokości okapu
+watch(
+  () => [state.value.hasEave, state.value.eaveDepth],
+  () => {
+    updateWspornikDistanceForEave()
+  }
+)
+
+// Aktualizacja wsporników dla ocieplenia attyki
+function updateWspornikDistanceForAtticInsulation() {
+  if (state.value.scheme !== 'attic-passage') return
+  if (!state.value.atticHasInsulation) return
+
+  // Jeśli użytkownik ręcznie wybrał 'none' lub 'custom' - nie nadpisuj
+  if (bracketTypeManualOverride.value) return
+
+  // Minimalna odległość = grubość ocieplenia + 15cm (drabina 15cm od ocieplenia) w mm
+  const minDistanceMm = (state.value.atticInsulationThickness + 15) * 10
+
+  // Jeśli ocieplenie za grube dla standardowych wsporników (>31cm = >460mm)
+  if (minDistanceMm > 460) {
+    // Ustaw typ "custom"
+    state.value.bracketType = 'custom'
+    state.value.bracketSpacing = minDistanceMm
+    globalWspornikDistance.value = minDistanceMm
+    threeCanvasRef.value?.setGlobalWspornikDistance(minDistanceMm, 1)
+  } else {
+    // Standardowe wsporniki - dostosuj do wymaganej odległości
+    setGlobalWspornikDistanceValue(minDistanceMm)
+  }
+}
+
+// Watcher dla zmian ocieplenia attyki
+watch(
+  () => [state.value.scheme, state.value.atticHasInsulation, state.value.atticInsulationThickness],
+  () => {
+    updateWspornikDistanceForAtticInsulation()
+  }
+)
+
+// Aktualizacja wsporników dla ocieplenia przedniej ściany (klasyczna/z podestem)
+function updateWspornikDistanceForInsulation() {
+  if (state.value.scheme === 'attic-passage') return
+  if (!state.value.hasInsulation) return
+
+  // Jeśli użytkownik ręcznie wybrał 'none' lub 'custom' - nie nadpisuj
+  if (bracketTypeManualOverride.value) return
+
+  // Minimalna odległość = grubość ocieplenia + 15cm (drabina 15cm od ocieplenia) w mm
+  const minDistanceMm = (state.value.insulationThickness + 15) * 10
+
+  // Jeśli ocieplenie za grube dla standardowych wsporników (>31cm = >460mm)
+  if (minDistanceMm > 460) {
+    // Ustaw typ "custom"
+    state.value.bracketType = 'custom'
+    state.value.bracketSpacing = minDistanceMm
+    globalWspornikDistance.value = minDistanceMm
+    threeCanvasRef.value?.setGlobalWspornikDistance(minDistanceMm, 1)
+  } else {
+    // Standardowe wsporniki - dostosuj do wymaganej odległości
+    setGlobalWspornikDistanceValue(minDistanceMm)
+  }
+}
+
+// Watcher dla zmian ocieplenia przedniej ściany
+watch(
+  () => [state.value.scheme, state.value.hasInsulation, state.value.insulationThickness],
+  () => {
+    updateWspornikDistanceForInsulation()
+  }
+)
+
+// Debug mode - controls visibility of advanced features (toggle with Ctrl+Shift+D)
+const debugMode = ref(false)
+
+function toggleDebugMode() {
+  debugMode.value = !debugMode.value
+  threeCanvasRef.value?.setDebugMode(debugMode.value)
+}
+
+function handleKeyDown(e: KeyboardEvent) {
+  // Ctrl+Shift+D to toggle debug mode
+  if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+    e.preventDefault()
+    toggleDebugMode()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleKeyDown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeyDown)
+})
+
+// Additional cage options
+const cageClosingEnabled = ref(false)
+
+// Collision warning state
+const collisionWarning = ref<{
+  expectedBrackets: number
+  actualBrackets: number
+  missingBrackets: number
+  message: string
+} | null>(null)
+
+function onCollisionWarning(data: {
+  expectedBrackets: number
+  actualBrackets: number
+  missingBrackets: number
+  message: string
+}) {
+  if (data.missingBrackets > 0) {
+    collisionWarning.value = data
+  } else {
+    collisionWarning.value = null
+  }
+}
+
+// Reset warningDismissed gdy zmieni się ostrzeżenie (żeby nowe ostrzeżenia były widoczne)
+watch([atticThicknessWarning, () => collisionWarning.value?.message], () => {
+  warningDismissed.value = false
+})
+
+function toggle3DWall() {
+  show3DWall.value = !show3DWall.value
+  // ThreeCanvas automatycznie się zaktualizuje przez props
+}
+
+function toggle3DGround() {
+  show3DGround.value = !show3DGround.value
+  // ThreeCanvas automatycznie się zaktualizuje przez props
+}
+
+function toggle3DInsulation() {
+  show3DInsulation.value = !show3DInsulation.value
+  // ThreeCanvas automatycznie się zaktualizuje przez props
+}
+
+// Measurement tool
+function toggleMeasureMode() {
+  measureModeActive.value = !measureModeActive.value
+  measureResult.value = null
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.setMeasureMode(measureModeActive.value)
+  }
+  // Turn off tech drawing when enabling measure
+  if (measureModeActive.value && techDrawingActive.value) {
+    toggleTechDrawing()
+  }
+}
+
+function setMeasureAxis(mode: '3d' | 'x' | 'y' | 'z') {
+  measureAxisMode.value = mode
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.setMeasureAxisMode(mode)
+  }
+}
+
+function onMeasureResult(data: { distanceMm: number; axisMode: string }) {
+  measureResult.value = data
+}
+
+function closeMeasureResult() {
+  measureResult.value = null
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.clearMeasureLine()
+  }
+}
+
+// Technical drawing
+function toggleTechDrawing() {
+  techDrawingActive.value = !techDrawingActive.value
+  if (threeCanvasRef.value) {
+    if (techDrawingActive.value) {
+      threeCanvasRef.value.enterTechDrawingMode('front')
+      // Turn off measure when enabling tech drawing
+      if (measureModeActive.value) {
+        measureModeActive.value = false
+        threeCanvasRef.value.setMeasureMode(false)
+      }
+    } else {
+      threeCanvasRef.value.exitTechDrawingMode()
+    }
+  }
+}
+
+function switchTechDrawingView() {
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.toggleTechDrawingView()
+  }
+}
+
+function onTechDrawingChange(data: { enabled: boolean; view: string; totalHeightMm: number }) {
+  techDrawingActive.value = data.enabled
+  techDrawingView.value = data.view
+}
+
+// Sciskane mode (edit handles) - delegated to ThreeCanvas
+function toggleSciskaneMode() {
+  sciskaneModeActive.value = !sciskaneModeActive.value
+  // Turn off other modes
+  if (sciskaneModeActive.value) {
+    if (measureModeActive.value) {
+      measureModeActive.value = false
+      threeCanvasRef.value?.setMeasureMode(false)
+    }
+    if (techDrawingActive.value) {
+      techDrawingActive.value = false
+      threeCanvasRef.value?.exitTechDrawingMode()
+    }
+  } else {
+    // Close edit panel when exiting sciskane mode
+    sciskaneEditPanelActive.value = false
+    sciskaneEditData.value = null
+  }
+  // Call ThreeCanvas method
+  threeCanvasRef.value?.toggleSciskaneMode()
+}
+
+// Sciskane handle edit handlers
+function onEditSciskaneHandle(data: {
+  offsetFromBottom: number
+  ladderNum: number
+  connType: string
+  wspornikType: string
+  wspornikDistance: number
+  isMidRung?: boolean
+  isJointConnector?: boolean
+  pairIndex?: number
+}) {
+  sciskaneEditData.value = {
+    offsetFromBottom: data.offsetFromBottom,
+    ladderNum: data.ladderNum,
+    connType: data.connType,
+    wspornikType: data.wspornikType,
+    wspornikDistance: data.wspornikDistance,
+    isMidRung: data.isMidRung || false,
+    isJointConnector: data.isJointConnector || false,
+    pairIndex: data.pairIndex
+  }
+  sciskaneEditPanelActive.value = true
+}
+
+function setSciskaneConnType(type: string) {
+  if (!sciskaneEditData.value) return
+  sciskaneEditData.value.connType = type
+
+  if (sciskaneEditData.value.isMidRung) {
+    // Update mid-rung bracket
+    threeCanvasRef.value?.updateMidRungBracket(
+      sciskaneEditData.value.ladderNum,
+      { connType: type }
+    )
+  } else if (sciskaneEditData.value.isJointConnector && sciskaneEditData.value.pairIndex !== undefined) {
+    // Update joint connector
+    threeCanvasRef.value?.updateJointConnector(
+      sciskaneEditData.value.pairIndex,
+      sciskaneEditData.value.ladderNum,
+      { connType: type }
+    )
+  } else {
+    // Update regular sciskane handle
+    threeCanvasRef.value?.updateSciskaneHandle(
+      sciskaneEditData.value.offsetFromBottom,
+      sciskaneEditData.value.ladderNum,
+      { connType: type }
+    )
+  }
+}
+
+// Domyślne odległości dla typów wsporników
+const wspornikDefaultDistances: Record<string, number> = {
+  krotki: 215,
+  sredni: 315,
+  dlugi: 415
+}
+
+function setSciskaneWspornikType(type: string) {
+  if (!sciskaneEditData.value) return
+
+  sciskaneEditData.value.wspornikType = type
+
+  // Ustaw domyślną odległość dla nowego typu jeśli aktualna jest poza zakresem
+  const newRange = wspornikDistanceRanges[type] || wspornikDistanceRanges['krotki']
+  const currentDistance = sciskaneEditData.value.wspornikDistance
+
+  let newDistance = currentDistance
+  if (currentDistance < newRange.min || currentDistance > newRange.max) {
+    // Aktualna odległość poza zakresem - użyj domyślnej
+    newDistance = wspornikDefaultDistances[type] || newRange.min
+  }
+  sciskaneEditData.value.wspornikDistance = newDistance
+
+  if (sciskaneEditData.value.isMidRung) {
+    // Update mid-rung bracket
+    threeCanvasRef.value?.updateMidRungBracket(
+      sciskaneEditData.value.ladderNum,
+      { wspornikType: type, wspornikDistance: newDistance }
+    )
+  } else if (sciskaneEditData.value.isJointConnector && sciskaneEditData.value.pairIndex !== undefined) {
+    // Update joint connector
+    threeCanvasRef.value?.updateJointConnector(
+      sciskaneEditData.value.pairIndex,
+      sciskaneEditData.value.ladderNum,
+      { wspornikType: type, wspornikDistance: newDistance }
+    )
+  } else {
+    // Update regular sciskane handle
+    threeCanvasRef.value?.updateSciskaneHandle(
+      sciskaneEditData.value.offsetFromBottom,
+      sciskaneEditData.value.ladderNum,
+      { wspornikType: type, wspornikDistance: newDistance }
+    )
+  }
+}
+
+function setSciskaneWspornikDistance(distance: number) {
+  if (!sciskaneEditData.value) return
+
+  // Clamp distance to current type range
+  const range = currentWspornikRange.value
+  distance = Math.max(range.min, Math.min(range.max, distance))
+  sciskaneEditData.value.wspornikDistance = distance
+
+  if (sciskaneEditData.value.isMidRung) {
+    // Update mid-rung bracket
+    threeCanvasRef.value?.updateMidRungBracket(
+      sciskaneEditData.value.ladderNum,
+      { wspornikDistance: distance }
+    )
+  } else if (sciskaneEditData.value.isJointConnector && sciskaneEditData.value.pairIndex !== undefined) {
+    // Update joint connector
+    threeCanvasRef.value?.updateJointConnector(
+      sciskaneEditData.value.pairIndex,
+      sciskaneEditData.value.ladderNum,
+      { wspornikDistance: distance }
+    )
+  } else {
+    // Update regular sciskane handle
+    threeCanvasRef.value?.updateSciskaneHandle(
+      sciskaneEditData.value.offsetFromBottom,
+      sciskaneEditData.value.ladderNum,
+      { wspornikDistance: distance }
+    )
+  }
+}
+
+function removeCurrentSciskaneHandle() {
+  if (!sciskaneEditData.value) return
+
+  if (sciskaneEditData.value.isMidRung) {
+    // Remove mid-rung bracket
+    threeCanvasRef.value?.removeMidRungBracket(
+      sciskaneEditData.value.ladderNum
+    )
+  } else if (sciskaneEditData.value.isJointConnector) {
+    // Joint connectors cannot be removed, only changed to lacznik
+    // This effectively "removes" the wspornik
+    if (sciskaneEditData.value.pairIndex !== undefined) {
+      threeCanvasRef.value?.updateJointConnector(
+        sciskaneEditData.value.pairIndex,
+        sciskaneEditData.value.ladderNum,
+        { connType: 'lacznik' }
+      )
+    }
+  } else {
+    // Remove regular sciskane handle
+    threeCanvasRef.value?.removeSciskaneHandle(
+      sciskaneEditData.value.offsetFromBottom,
+      sciskaneEditData.value.ladderNum
+    )
+  }
+  closeSciskaneEditPanel()
+}
+
+function closeSciskaneEditPanel() {
+  sciskaneEditPanelActive.value = false
+  sciskaneEditData.value = null
+}
+
+// Cage correction
+function addCageHoop() {
+  cageCorrection.value = Math.min(cageCorrection.value + 1, 5)
+}
+
+function removeCageHoop() {
+  cageCorrection.value = Math.max(cageCorrection.value - 1, -5)
+}
+
+function toggleCageClosing() {
+  cageClosingEnabled.value = !cageClosingEnabled.value
+  state.value.cageClosing = cageClosingEnabled.value
+}
+</script>
+
+<template>
+  <div class="app-container">
+    <!-- Debug mode indicator -->
+    <div v-if="debugMode" id="debugIndicator">DEBUG MODE (Ctrl+Shift+D)</div>
+
+    <!-- ============================================
+         NAGŁÓWEK GLOBALNY
+         ============================================ -->
+    <header class="app-header">
+      <button
+        class="back-button"
+        :disabled="!canGoBack"
+        @click="goBack"
+        title="Wróć"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 12H5M12 19l-7-7 7-7"/>
+        </svg>
+      </button>
+      <div class="header-title">
+        <h1>{{ screenTitle }}</h1>
+        <div class="step-indicator">{{ stepIndicator }}</div>
+      </div>
+    </header>
+
+    <!-- ============================================
+         GŁÓWNA ZAWARTOŚĆ
+         ============================================ -->
+    <main class="app-content">
+
+      <!-- ========== EKRAN 1: Wybór przeznaczenia ========== -->
+      <div v-if="currentScreen === 'purpose'" class="screen">
+        <div class="fullscreen-layout">
+          <div class="screen-intro">
+            <h2>Wybierz przeznaczenie drabiny</h2>
+            <p>Określ, gdzie będzie zamontowana Twoja drabina techniczna</p>
+          </div>
+
+          <div class="choice-grid-fullscreen cols-2">
+            <div
+              class="choice-card-large"
+              :class="{ selected: state.purpose === 'internal' }"
+              @click="selectPurpose('internal')"
+            >
+              <div class="card-image">&#127968;</div>
+              <div class="card-body">
+                <div class="card-title">Wewnętrzna</div>
+                <div class="card-description">
+                  Drabiny do użytku wewnątrz budynków - do pomieszczeń technicznych, maszynowni, poddaszy
+                </div>
+              </div>
+            </div>
+
+            <div
+              class="choice-card-large"
+              :class="{ selected: state.purpose === 'external' }"
+              @click="selectPurpose('external')"
+            >
+              <div class="card-image">&#127981;</div>
+              <div class="card-body">
+                <div class="card-title">Zewnętrzna</div>
+                <div class="card-description">
+                  Drabiny fasadowe i ewakuacyjne - montowane na zewnątrz budynków, zgodne z przepisami BHP
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== EKRAN 2: Parametry (SPLIT LAYOUT z iframe) ========== -->
+      <div v-if="currentScreen === 'params'" class="screen">
+        <div class="split-layout">
+          <!-- Lewa strona - wizualizacja 3D (bezpośrednia integracja Three.js) -->
+          <div class="visualization-panel">
+            <div class="viewer3d-container">
+              <ThreeCanvas
+                ref="threeCanvasRef"
+                v-bind="threeCanvasProps"
+                @ready="onThreeReady"
+                @update="onThreeUpdate"
+                @measureResult="onMeasureResult"
+                @techDrawingChange="onTechDrawingChange"
+                @editSciskaneHandle="onEditSciskaneHandle"
+                @collisionWarning="onCollisionWarning"
+              />
+
+              <!-- Lekki popup ostrzeżenia u góry modelu 3D (tylko jeden na raz, priorytet: thickness > collision) -->
+              <div v-if="(atticThicknessWarning || collisionWarning) && !warningDismissed" class="model-toast">
+                <div class="model-toast-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                </div>
+                <div class="model-toast-content">
+                  <template v-if="atticThicknessWarning">
+                    {{ atticThicknessWarning }}
+                  </template>
+                  <template v-else-if="collisionWarning">
+                    <strong>Kolizja z przeszkodą:</strong> {{ collisionWarning.message }}
+                  </template>
+                </div>
+                <button class="model-toast-close" @click="warningDismissed = true">&times;</button>
+              </div>
+
+              <!-- Kontrolki widoczności 3D (prawy górny róg) -->
+              <div class="viewer3d-visibility">
+                <button
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: show3DWall }"
+                  @click="toggle3DWall"
+                  title="Pokaż/ukryj ścianę"
+                >
+                  Ściana: {{ show3DWall ? 'ON' : 'OFF' }}
+                </button>
+                <button
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: show3DGround }"
+                  @click="toggle3DGround"
+                  title="Pokaż/ukryj podłogę"
+                >
+                  Podłoga: {{ show3DGround ? 'ON' : 'OFF' }}
+                </button>
+                <button
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: show3DInsulation }"
+                  @click="toggle3DInsulation"
+                  title="Pokaż/ukryj ocieplenie"
+                >
+                  Ocieplenie: {{ show3DInsulation ? 'ON' : 'OFF' }}
+                </button>
+              </div>
+
+              <!-- GŁÓWNE KONTROLKI (lewy górny róg) - exact copy from original -->
+              <div id="controls">
+                <button
+                  class="btn btn-tech btn-with-tooltip"
+                  :class="{ 'btn-active': techDrawingActive }"
+                  @click="toggleTechDrawing"
+                >
+                  📐<span class="btn-tooltip">Rysunek techniczny</span>
+                </button>
+                <button
+                  class="btn btn-tech btn-with-tooltip"
+                  :class="{ 'btn-active': measureModeActive }"
+                  @click="toggleMeasureMode"
+                >
+                  📏<span class="btn-tooltip">Miarka</span>
+                </button>
+                <button
+                  class="btn btn-tech btn-with-tooltip"
+                  :class="{ 'btn-active': sciskaneModeActive }"
+                  @click="toggleSciskaneMode"
+                >
+                  🔧<span class="btn-tooltip">Edytuj uchwyty</span>
+                </button>
+              </div>
+
+              <!-- TOOLBAR MIARKI (środek góry) -->
+              <div id="measureToolbar" :class="{ active: measureModeActive }">
+                <span class="measure-toolbar-label">Tryb:</span>
+                <button
+                  class="measure-mode-btn"
+                  :class="{ active: measureAxisMode === '3d' }"
+                  @click="setMeasureAxis('3d')"
+                >
+                  3D
+                  <span class="tooltip">Odległość przestrzenna</span>
+                </button>
+                <button
+                  class="measure-mode-btn"
+                  :class="{ active: measureAxisMode === 'x' }"
+                  @click="setMeasureAxis('x')"
+                >
+                  X
+                  <span class="tooltip">Tylko szerokość</span>
+                </button>
+                <button
+                  class="measure-mode-btn"
+                  :class="{ active: measureAxisMode === 'y' }"
+                  @click="setMeasureAxis('y')"
+                >
+                  Y
+                  <span class="tooltip">Tylko wysokość</span>
+                </button>
+                <button
+                  class="measure-mode-btn"
+                  :class="{ active: measureAxisMode === 'z' }"
+                  @click="setMeasureAxis('z')"
+                >
+                  Z
+                  <span class="tooltip">Tylko głębokość</span>
+                </button>
+                <div class="measure-toolbar-divider"></div>
+                <button class="measure-close-btn" @click="toggleMeasureMode" title="Zamknij miarkę">✕</button>
+              </div>
+
+              <!-- WYNIK POMIARU (środek ekranu) -->
+              <div v-if="measureResult" id="measureResultPopup">
+                {{ measureResult.distanceMm.toFixed(1) }} mm
+                <button class="measure-result-close-btn" @click="closeMeasureResult">×</button>
+              </div>
+
+              <!-- PANEL EDYCJI UCHWYTU SCISKANE (środek ekranu) -->
+              <div v-if="sciskaneEditPanelActive && sciskaneEditData" id="connectionPanel" class="active">
+                <h3>{{ sciskaneEditData.isJointConnector ? 'Edycja łącznika' : (sciskaneEditData.isMidRung ? 'Edycja uchwytu (środkowy)' : 'Edycja uchwytu') }}</h3>
+
+                <div class="connection-row">
+                  <label>Typ połączenia</label>
+                  <div class="connection-types">
+                    <button
+                      class="connection-type-btn"
+                      :class="{ active: sciskaneEditData.connType === 'uchwyt' }"
+                      @click="setSciskaneConnType('uchwyt')"
+                    >Uchwyt</button>
+                    <!-- Ściskany - tylko dla midRung i sciskane (nie dla joint connectors) -->
+                    <button
+                      v-if="!sciskaneEditData.isJointConnector"
+                      class="connection-type-btn"
+                      :class="{ active: sciskaneEditData.connType === 'sciskany' }"
+                      @click="setSciskaneConnType('sciskany')"
+                    >Ściskany</button>
+                    <!-- Łącznik - tylko dla joint connectors -->
+                    <button
+                      v-if="sciskaneEditData.isJointConnector"
+                      class="connection-type-btn"
+                      :class="{ active: sciskaneEditData.connType === 'lacznik' }"
+                      @click="setSciskaneConnType('lacznik')"
+                    >Łącznik</button>
+                  </div>
+                </div>
+
+                <div class="wspornik-row">
+                  <label>Typ wspornika</label>
+                  <div class="wspornik-types">
+                    <button
+                      class="wspornik-type-btn"
+                      :class="{ active: sciskaneEditData.wspornikType === 'krotki' }"
+                      @click="setSciskaneWspornikType('krotki')"
+                    >Krótki</button>
+                    <button
+                      class="wspornik-type-btn"
+                      :class="{ active: sciskaneEditData.wspornikType === 'sredni' }"
+                      @click="setSciskaneWspornikType('sredni')"
+                    >Średni</button>
+                    <button
+                      class="wspornik-type-btn"
+                      :class="{ active: sciskaneEditData.wspornikType === 'dlugi' }"
+                      @click="setSciskaneWspornikType('dlugi')"
+                    >Długi</button>
+                  </div>
+                </div>
+
+                <!-- Slider tylko w trybie debug -->
+                <div v-if="debugMode" class="wspornik-row">
+                  <label>Odległość od ściany</label>
+                  <input
+                    type="range"
+                    class="wspornik-slider"
+                    :min="currentWspornikRange.min"
+                    :max="currentWspornikRange.max"
+                    step="5"
+                    :value="sciskaneEditData.wspornikDistance"
+                    @input="setSciskaneWspornikDistance(Number(($event.target as HTMLInputElement).value))"
+                  >
+                  <div class="wspornik-value">{{ sciskaneEditData.wspornikDistance }} mm ({{ currentWspornikRange.min }}-{{ currentWspornikRange.max }})</div>
+                </div>
+
+                <div class="connection-actions">
+                  <button class="remove-btn" @click="removeCurrentSciskaneHandle">Usuń uchwyt</button>
+                  <button class="close-btn" @click="closeSciskaneEditPanel">Zamknij</button>
+                </div>
+              </div>
+
+              <!-- PANEL KOREKTY KOSZA (lewy dolny róg) - w trybie debug lub edycji uchwytów -->
+              <div v-if="(debugMode || sciskaneModeActive) && state.cage === 'with-cage'" id="safetyCageControls">
+                <div class="cage-panel cage-panel-1">
+                  <span class="cage-label cage-label-1">Korekta kosza</span>
+                  <button class="cage-btn cage-btn-add" @click="addCageHoop">+</button>
+                  <span class="cage-count">{{ threeState.safetyCageCount + cageCorrection }}/{{ threeState.safetyCageCount + 5 }}</span>
+                  <button class="cage-btn cage-btn-remove" @click="removeCageHoop">-</button>
+                  <label class="cage-checkbox-label cage-checkbox-label-1">
+                    <input type="checkbox" class="cage-checkbox" v-model="cageClosingEnabled" @change="toggleCageClosing"> Zamknij
+                  </label>
+                </div>
+              </div>
+
+              <!-- PANEL ODLEGŁOŚCI WSPORNIKÓW (lewy dolny róg) - w trybie edycji uchwwtów -->
+              <div v-if="sciskaneModeActive" id="globalSettingsPanel" :class="{ 'with-cage': state.cage === 'with-cage' }">
+                <label>Odl. wsporników</label>
+                <input
+                  type="range"
+                  class="global-slider"
+                  min="160"
+                  max="460"
+                  step="5"
+                  :value="globalWspornikDistance"
+                  @input="setGlobalWspornikDistanceValue(Number(($event.target as HTMLInputElement).value))"
+                >
+                <span class="global-value">{{ globalWspornikDistance }} mm</span>
+                <span class="global-type">{{ globalWspornikType }}</span>
+              </div>
+
+              <!-- Panel rysunku technicznego (dół środek) -->
+              <div v-if="techDrawingActive" id="techDrawingPanel">
+                <span class="tech-label">Rysunek techniczny</span>
+                <span class="tech-view">Widok: {{ techDrawingView }}</span>
+                <button class="tech-switch-btn" @click="switchTechDrawingView">Zmień widok</button>
+                <button class="tech-close-btn" @click="toggleTechDrawing">✕</button>
+              </div>
+
+              <!-- WATCHDOG PANEL (prawy dolny róg) -->
+              <div class="watchdog-panel">
+                <div class="watchdog-item">
+                  <span class="watchdog-label">Ostatni szczebel → ziemia:</span>
+                  <span class="watchdog-value">{{ threeState.lastRungToGround }} mm</span>
+                </div>
+                <div v-if="state.cage === 'with-cage' && threeState.lastHoopToGround > 0" class="watchdog-item">
+                  <span class="watchdog-label">Ostatnia obręcz → ziemia:</span>
+                  <span class="watchdog-value">{{ threeState.lastHoopToGround }} mm</span>
+                </div>
+                <div v-if="state.scheme === 'attic-passage' && descentLadderData?.lastRungToRoof !== undefined" class="watchdog-item">
+                  <span class="watchdog-label">Ostatni szczebel → dach:</span>
+                  <span class="watchdog-value">{{ descentLadderData.lastRungToRoof }} mm</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Prawa strona - panel konfiguracji -->
+          <div class="config-panel-wrapper">
+            <div class="config-panel">
+              <div class="config-panel-header">
+                <h2>Parametry drabiny</h2>
+                <p>Wprowadź szczegółowe wymiary i opcje montażu</p>
+              </div>
+
+              <div class="config-panel-content">
+                <!-- Typ drabiny (read-only info) -->
+                <div class="config-type-badge">
+                  <span class="type-label">Typ drabiny:</span>
+                  <span class="type-value">{{ state.purpose === 'external' ? 'Zewnętrzna' : 'Wewnętrzna' }}</span>
+                </div>
+
+                <!-- Schemat zakończenia (tylko dla zewnętrznej) -->
+                <div v-if="state.purpose === 'external'" class="form-group">
+                  <label>Schemat zakończenia drabiny</label>
+                  <div class="scheme-selector">
+                    <div
+                      class="scheme-option"
+                      :class="{ selected: state.scheme === 'no-platform' }"
+                      @click="selectScheme('no-platform')"
+                    >
+                      <div class="scheme-icon">&#128270;</div>
+                      <div class="scheme-label">Klasyczna</div>
+                      <div class="scheme-desc">Z poręczami asekuracyjnymi</div>
+                    </div>
+                    <div
+                      class="scheme-option"
+                      :class="{ selected: state.scheme === 'with-platform' }"
+                      @click="selectScheme('with-platform')"
+                    >
+                      <div class="scheme-icon">&#128187;</div>
+                      <div class="scheme-label">Z podestem</div>
+                      <div class="scheme-desc">Platforma wyjściowa na dachu</div>
+                    </div>
+                    <div
+                      class="scheme-option"
+                      :class="{ selected: state.scheme === 'attic-passage' }"
+                      @click="selectScheme('attic-passage')"
+                    >
+                      <div class="scheme-icon">&#127970;</div>
+                      <div class="scheme-label">Przejście przez attykę</div>
+                      <div class="scheme-desc">Do budynków z attyką</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ============================================ -->
+                <!-- STRONA WEJŚCIA (tylko dla attic-passage) -->
+                <!-- ============================================ -->
+                <div v-if="state.scheme === 'attic-passage'" class="form-section attic-entry-section">
+                  <div class="form-section-title">Strona wejścia</div>
+
+                  <!-- Wysokość ściany (strona wejścia) -->
+                  <div class="form-group">
+                    <label for="wallHeightEntry">Wysokość ściany</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="wallHeightEntry"
+                        v-model.number="state.wallHeight"
+                        min="0.6"
+                        max="30"
+                        step="0.1"
+                        class="form-input"
+                        @blur="validateWallHeight"
+                      />
+                      <span class="unit">m</span>
+                    </div>
+                    <div class="hint">Zakres: 0.6 - 30 m</div>
+                  </div>
+
+                  <!-- Grubość ściany -->
+                  <div class="form-group">
+                    <label for="atticWallThickness">Grubość ściany</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="atticWallThickness"
+                        v-model.number="state.atticWallThickness"
+                        min="10"
+                        :max="atticWallThicknessMax"
+                        step="1"
+                        class="form-input input-small"
+                        placeholder="25"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">Grubość ściany attyki (10-{{ atticWallThicknessMax }} cm)</div>
+                  </div>
+
+                  <!-- Rodzaj wsporników (tylko debug) -->
+                  <div v-if="debugMode" class="form-group">
+                    <label for="bracketTypeEntry">Rodzaj wsporników</label>
+                    <select id="bracketTypeEntry" v-model="state.bracketType" class="form-select" @change="onBracketChange">
+                      <option value="short">Krótkie (16-26 cm)</option>
+                      <option value="medium">Średnie (26-36 cm)</option>
+                      <option value="long">Długie (36-46 cm)</option>
+                    </select>
+                  </div>
+
+                  <!-- Ocieplenie strona wejścia -->
+                  <div class="form-group">
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.atticHasInsulation">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Ocieplenie</span>
+                        <span class="label-description">Warstwa izolacji od strony drabiny</span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <!-- Grubość ocieplenia - tylko gdy włączone -->
+                  <div v-if="state.atticHasInsulation" class="form-group">
+                    <label for="atticInsulationThickness">Grubość ocieplenia</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="atticInsulationThickness"
+                        v-model.number="state.atticInsulationThickness"
+                        min="1"
+                        :max="atticInsulationMax"
+                        step="1"
+                        class="form-input input-small"
+                        placeholder="10"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">Grubość ocieplenia (1-{{ atticInsulationMax }} cm)</div>
+                  </div>
+
+                  <!-- Kosz ochronny -->
+                  <div class="form-group">
+                    <label>Kosz ochronny</label>
+                    <div class="cage-selector">
+                      <div
+                        class="cage-option"
+                        :class="{ selected: state.cage === 'no-cage' }"
+                        @click="selectCage('no-cage')"
+                      >
+                        <div class="cage-icon">&#10060;</div>
+                        <div class="cage-content">
+                          <div class="cage-label">Bez kosza</div>
+                          <div class="cage-desc">Drabina bez zabezpieczenia bocznego</div>
+                        </div>
+                      </div>
+                      <div
+                        class="cage-option"
+                        :class="{ selected: state.cage === 'with-cage' }"
+                        @click="selectCage('with-cage')"
+                      >
+                        <div class="cage-icon">&#128737;</div>
+                        <div class="cage-content">
+                          <div class="cage-label">Z koszem ochronnym</div>
+                          <div class="cage-desc">Obowiązkowy przy wysokości powyżej 3m (wg przepisów BHP)</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Dodatkowe opcje kosza (widoczne gdy kosz wybrany) -->
+                    <div v-if="state.cage === 'with-cage'" class="cage-options">
+                      <label class="checkbox-wrapper-styled">
+                        <input type="checkbox" v-model="state.accessLock">
+                        <span class="checkbox-custom-styled">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                            <path d="M5 12l5 5L20 7"/>
+                          </svg>
+                        </span>
+                        <span class="checkbox-label-styled">
+                          <span class="label-title">Blokada dostępu</span>
+                          <span class="label-description">Zamykana klapka uniemożliwiająca wejście osobom niepowołanym</span>
+                        </span>
+                      </label>
+                      <label class="checkbox-wrapper-styled">
+                        <input type="checkbox" v-model="state.restingPlatform">
+                        <span class="checkbox-custom-styled">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                            <path d="M5 12l5 5L20 7"/>
+                          </svg>
+                        </span>
+                        <span class="checkbox-label-styled">
+                          <span class="label-title">Podest spoczynkowy</span>
+                          <span class="label-description">Platforma do odpoczynku przy długich drabinach</span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- ============================================ -->
+                <!-- OPCJE DODATKOWE (tylko dla attic-passage) -->
+                <!-- ============================================ -->
+                <div v-if="state.scheme === 'attic-passage'" class="form-section attic-options-section">
+                  <div class="form-section-title">Opcje dodatkowe</div>
+
+                  <!-- Drabina zawieszona -->
+                  <div class="form-group">
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.suspended" @change="toggleSuspended">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Drabina zawieszona nad ziemią</span>
+                        <span class="label-description">Drabina nie sięga poziomu gruntu</span>
+                      </span>
+                    </label>
+
+                    <div v-if="state.suspended" class="conditional-field">
+                      <label for="suspendedHeightAttic">Wysokość zawieszenia nad ziemią</label>
+                      <div class="input-with-unit">
+                        <input
+                          type="number"
+                          id="suspendedHeightAttic"
+                          v-model.number="state.suspendedHeight"
+                          min="0"
+                          :max="maxSuspendedHeight"
+                          step="0.1"
+                          class="form-input"
+                        >
+                        <span class="unit">m</span>
+                      </div>
+                      <div class="hint">Maksymalnie: {{ maxSuspendedHeight.toFixed(1) }} m</div>
+                    </div>
+                  </div>
+
+                  <!-- Przeszkody w miejscu montażu -->
+                  <div class="form-group">
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.hasObstacles">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Przeszkody w miejscu montażu</span>
+                        <span class="label-description">Okna lub inne elementy uniemożliwiające montaż</span>
+                      </span>
+                    </label>
+
+                    <!-- Wybór typu przeszkody -->
+                    <div v-if="state.hasObstacles" class="conditional-field">
+                      <div class="obstacle-type-selector">
+                        <!-- Okno / miejsce bez wsporników -->
+                        <div class="obstacle-type-card obstacle-type-card--window" @click="addObstacle">
+                          <div class="obstacle-type-photo">
+                            <svg viewBox="0 0 80 60" fill="none" class="window-svg">
+                              <!-- Wall (side view) -->
+                              <rect x="5" y="5" width="14" height="50" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                              <!-- Window area on wall - nice blue -->
+                              <rect x="5" y="18" width="14" height="20" fill="#3b82f6" fill-opacity="0.4" stroke="#60a5fa" stroke-width="1.5"/>
+                              <!-- Window cross -->
+                              <line x1="12" y1="18" x2="12" y2="38" stroke="#93c5fd" stroke-width="1"/>
+                              <line x1="5" y1="28" x2="19" y2="28" stroke="#93c5fd" stroke-width="1"/>
+                              <!-- Bracket above window -->
+                              <line x1="19" y1="12" x2="35" y2="12" stroke="#6b7280" stroke-width="3"/>
+                              <circle cx="35" cy="12" r="2" fill="#4b5563"/>
+                              <!-- Bracket below window -->
+                              <line x1="19" y1="48" x2="35" y2="48" stroke="#6b7280" stroke-width="3"/>
+                              <circle cx="35" cy="48" r="2" fill="#4b5563"/>
+                              <!-- Dimension arrows - blue -->
+                              <line x1="42" y1="18" x2="42" y2="38" stroke="#60a5fa" stroke-width="1.5"/>
+                              <polygon points="39,20 42,15 45,20" fill="#60a5fa"/>
+                              <polygon points="39,36 42,41 45,36" fill="#60a5fa"/>
+                            </svg>
+                          </div>
+                          <div class="obstacle-type-label">Okno / miejsce bez wsporników</div>
+                          <div class="obstacle-type-desc">Obszar gdzie nie można zamontować uchwytów</div>
+                        </div>
+
+                        <!-- Punkt na ścianie - tylko w debug mode -->
+                        <div v-if="debugMode" class="obstacle-type-card obstacle-type-card--wall-point" @click="addWallPoint">
+                          <div class="obstacle-type-photo">
+                            <svg viewBox="0 0 80 60" fill="none" class="wall-point-svg">
+                              <!-- Wall (side view) -->
+                              <rect x="5" y="5" width="14" height="50" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                              <!-- Green point area on wall -->
+                              <rect x="5" y="18" width="14" height="20" fill="#22c55e" fill-opacity="0.4" stroke="#16a34a" stroke-width="1.5"/>
+                              <!-- Crosshair -->
+                              <line x1="12" y1="23" x2="12" y2="33" stroke="#15803d" stroke-width="1.5"/>
+                              <line x1="7" y1="28" x2="17" y2="28" stroke="#15803d" stroke-width="1.5"/>
+                              <!-- Brackets still visible -->
+                              <line x1="19" y1="12" x2="35" y2="12" stroke="#6b7280" stroke-width="3"/>
+                              <circle cx="35" cy="12" r="2" fill="#4b5563"/>
+                              <line x1="19" y1="28" x2="35" y2="28" stroke="#6b7280" stroke-width="3"/>
+                              <circle cx="35" cy="28" r="2" fill="#4b5563"/>
+                              <line x1="19" y1="48" x2="35" y2="48" stroke="#6b7280" stroke-width="3"/>
+                              <circle cx="35" cy="48" r="2" fill="#4b5563"/>
+                            </svg>
+                          </div>
+                          <div class="obstacle-type-label">Punkt na ścianie</div>
+                          <div class="obstacle-type-desc">Zaznaczenie bez wpływu na uchwyty</div>
+                        </div>
+
+                        <!-- Okap -->
+                        <div
+                          class="obstacle-type-card obstacle-type-card--eave"
+                          :class="{ 'is-active': state.hasEave, 'is-disabled': state.hasEave }"
+                          @click="!state.hasEave && toggleEave()"
+                        >
+                          <div class="obstacle-type-photo">
+                            <svg viewBox="0 0 80 60" fill="none" class="eave-svg">
+                              <!-- Wall (side view) -->
+                              <rect x="5" y="18" width="14" height="40" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                              <!-- Eave/okap -->
+                              <rect x="5" y="8" width="55" height="12" fill="#d1d5db" stroke="#9ca3af" stroke-width="1"/>
+                              <!-- Eave shadow/depth -->
+                              <rect x="19" y="18" width="41" height="3" fill="rgba(0,0,0,0.15)"/>
+                              <!-- Depth arrow -->
+                              <line x1="19" y1="3" x2="60" y2="3" stroke="#f59e0b" stroke-width="2"/>
+                              <polygon points="57,0 62,3 57,6" fill="#f59e0b"/>
+                              <line x1="19" y1="0" x2="19" y2="6" stroke="#f59e0b" stroke-width="1"/>
+                              <!-- Height arrow -->
+                              <line x1="68" y1="8" x2="68" y2="20" stroke="#60a5fa" stroke-width="2"/>
+                              <polygon points="65,10 68,5 71,10" fill="#60a5fa"/>
+                              <polygon points="65,18 68,23 71,18" fill="#60a5fa"/>
+                              <!-- Label hints -->
+                              <text x="38" y="3" font-size="6" fill="#f59e0b" text-anchor="middle">głęb.</text>
+                              <text x="75" y="16" font-size="6" fill="#60a5fa" text-anchor="middle">wys.</text>
+                            </svg>
+                          </div>
+                          <div class="obstacle-type-label">
+                            Okap/rynna
+                            <span v-if="state.hasEave" class="badge-added">Dodano</span>
+                          </div>
+                          <div class="obstacle-type-desc">Wystający dach lub rynna nad drabiną</div>
+                        </div>
+                      </div>
+
+                      <!-- Okap/rynna - parametry -->
+                      <div v-if="state.hasEave" class="eave-settings">
+                        <div class="eave-settings-header">
+                          <span class="eave-title">Parametry okapu/rynny</span>
+                          <button class="btn-remove-eave" @click="toggleEave" title="Usuń okap/rynnę">×</button>
+                        </div>
+                        <div class="eave-inputs">
+                          <div class="input-group-small">
+                            <label>Głębokość (cm)</label>
+                            <input
+                              type="number"
+                              v-model.number="state.eaveDepth"
+                              min="1"
+                              max="80"
+                              step="1"
+                              class="form-input-small"
+                              title="Jak daleko okap wystaje w stronę drabiny"
+                            >
+                          </div>
+                          <div class="input-group-small">
+                            <label>Wysokość (cm)</label>
+                            <input
+                              type="number"
+                              v-model.number="state.eaveHeight"
+                              min="1"
+                              max="200"
+                              step="1"
+                              class="form-input-small"
+                              title="Wysokość okapu"
+                            >
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Lista okien/przeszkód -->
+                      <div v-if="state.obstacles.length > 0" class="obstacles-list">
+                        <div class="obstacles-list-header">Okna i przeszkody</div>
+                        <div v-for="obstacle in state.obstacles" :key="obstacle.id" class="obstacle-item">
+                          <div class="obstacle-inputs">
+                            <div class="input-group-small">
+                              <label>Od ziemi (m)</label>
+                              <input type="number" v-model.number="obstacle.heightFrom" min="0" :max="state.wallHeight" step="0.1" class="form-input-small" title="Odległość od ziemi do dolnej krawędzi przeszkody">
+                            </div>
+                            <div class="input-group-small">
+                              <label>Wysokość (m)</label>
+                              <input type="number" v-model.number="obstacle.height" min="0.1" :max="state.wallHeight - obstacle.heightFrom" step="0.1" class="form-input-small" title="Wysokość przeszkody">
+                            </div>
+                            <button class="btn-remove-obstacle" @click="removeObstacle(obstacle.id)" title="Usuń">×</button>
+                          </div>
+                          <div class="obstacle-preview">
+                            <span :class="['obstacle-badge', obstacle.type === 'wall-point' ? 'type-wall-point' : 'type-window']">{{ obstacle.type === 'wall-point' ? 'Punkt' : 'Okno' }}</span>
+                            <span class="obstacle-range">{{ obstacle.heightFrom.toFixed(1) }}m - {{ (obstacle.heightFrom + obstacle.height).toFixed(1) }}m</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Ostrzeżenie o przeszkodzie ponad ścianą -->
+                      <div v-if="obstacleAboveWallWarning" class="obstacle-above-wall-warning">
+                        <div class="obstacle-warning-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                          </svg>
+                        </div>
+                        <div class="obstacle-warning-text">{{ obstacleAboveWallWarning }}</div>
+                      </div>
+
+                      <!-- Ostrzeżenie o kolizji uchwytów -->
+                      <div v-if="collisionWarning" class="collision-warning">
+                        <div class="collision-warning-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                          </svg>
+                        </div>
+                        <div class="collision-warning-text">
+                          <strong>Kolizja z przeszkodą</strong>
+                          <p>{{ collisionWarning.message }}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ============================================ -->
+                <!-- STRONA ZEJŚCIA (tylko dla attic-passage) -->
+                <!-- ============================================ -->
+                <div v-if="state.scheme === 'attic-passage'" class="form-section attic-descent-section">
+                  <div class="form-section-title">Strona zejścia</div>
+
+                  <!-- Wysokość ściany -->
+                  <div class="form-group">
+                    <label for="atticWallHeight">Wysokość ściany</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="atticWallHeight"
+                        v-model.number="state.atticWallHeight"
+                        :min="0"
+                        :max="atticWallHeightMax"
+                        step="0.01"
+                        class="form-input"
+                        placeholder="np. 0.5"
+                      />
+                      <span class="unit">m</span>
+                    </div>
+                    <div v-if="state.descentMountType === 'bigfoot' || state.descentMountType === 'custom-base'" class="hint">
+                      Max. {{ atticWallHeightMax.toFixed(3) }} m dla {{ state.descentMountType === 'bigfoot' ? 'BIGFOOT' : 'podłoża ' + state.customBaseHeight + 'cm' }}
+                    </div>
+                  </div>
+
+                  <!-- Ocieplenie strona zejścia -->
+                  <div class="form-group">
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.atticBackHasInsulation">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Ocieplenie</span>
+                        <span class="label-description">Warstwa izolacji od strony dachu</span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <!-- Grubość ocieplenia - tylko gdy włączone -->
+                  <div v-if="state.atticBackHasInsulation" class="form-group">
+                    <label for="atticBackInsulationThickness">Grubość ocieplenia</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="atticBackInsulationThickness"
+                        v-model.number="state.atticBackInsulationThickness"
+                        min="1"
+                        :max="atticBackInsulationMax"
+                        step="1"
+                        class="form-input input-small"
+                        placeholder="10"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">Grubość ocieplenia (1-{{ atticBackInsulationMax }} cm)</div>
+                  </div>
+
+                  <!-- Typ montażu strona zejścia -->
+                  <div class="form-group">
+                    <label for="descentMountType">Typ montażu</label>
+                    <select id="descentMountType" v-model="state.descentMountType" class="form-select">
+                      <option value="bigfoot">Na BIGFOOT</option>
+                      <option value="custom-base">Własne podłoże (bloczki/podkładki)</option>
+                      <option value="brackets">Na Wspornikach</option>
+                      <option value="self">Montaż na własną rękę</option>
+                    </select>
+                  </div>
+
+                  <!-- Wysokość podłoża - tylko dla custom-base -->
+                  <div v-if="state.descentMountType === 'custom-base'" class="form-group">
+                    <label for="customBaseHeight">Wysokość podłoża (bloczków/podkładek)</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="customBaseHeight"
+                        v-model.number="state.customBaseHeight"
+                        :min="Math.max(0, customBaseHeightMin)"
+                        max="40"
+                        step="0.5"
+                        class="form-input input-small"
+                        placeholder="np. 9"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">
+                      Wysokość podłoża (0-40 cm).
+                      <span v-if="customBaseHeightMin > 0" class="warning-hint">
+                        Min. {{ customBaseHeightMin.toFixed(1) }} cm dla tej konfiguracji.
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Wsporniki - tylko dla brackets -->
+                  <div v-if="state.descentMountType === 'brackets'" class="form-group">
+                    <label for="descentBracketType">Rodzaj wsporników</label>
+                    <select id="descentBracketType" v-model="state.descentBracketType" class="form-select">
+                      <option value="short">Krótkie (16-26 cm)</option>
+                      <option value="medium">Średnie (26-36 cm)</option>
+                      <option value="long">Długie (36-46 cm)</option>
+                    </select>
+                  </div>
+
+                  <!-- Kosz ochronny - dla brackets i self -->
+                  <div v-if="state.descentMountType === 'brackets' || state.descentMountType === 'self'" class="form-group">
+                    <label for="descentCageType">Kosz ochronny</label>
+                    <select id="descentCageType" v-model="state.descentCageType" class="form-select">
+                      <option value="no-cage">Bez kosza</option>
+                      <option value="with-cage">Z koszem ochronnym</option>
+                    </select>
+
+                    <!-- Blokada dostępu - gdy kosz wybrany -->
+                    <div v-if="state.descentCageType === 'with-cage'" class="checkbox-group" style="margin-top: 15px;">
+                      <label class="checkbox-label">
+                        <input type="checkbox" v-model="state.descentAccessLock" />
+                        <span>Blokada dostępu (1 szt.)</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- Wybór uchwytu - tylko dla self -->
+                  <div v-if="state.descentMountType === 'self'" class="form-group">
+                    <label for="selfBracketType">Wybierz uchwyt</label>
+                    <select id="selfBracketType" v-model="state.selfBracketType" class="form-select">
+                      <option value="ready">Gotowe uchwyty (bez wsporników)</option>
+                      <option value="connecting">Uchwyt łączący (łączy tylko drabiny ze sobą)</option>
+                    </select>
+                  </div>
+
+                  <!-- PARAMETRY ATTYKI -->
+                  <div class="form-section-title" style="margin-top: 20px;">Parametry attyki</div>
+
+                  <!-- Aktualny dystans podest-attyka (wyliczony) - dla bigfoot i custom-base -->
+                  <div v-if="state.descentMountType === 'bigfoot' || state.descentMountType === 'custom-base'" class="form-group">
+                    <div class="attic-info-box">
+                      <span class="attic-info-label">Aktualny dystans podest-attyka:</span>
+                      <span class="attic-info-value">{{ actualPlatformDistance.toFixed(1) }} cm</span>
+                    </div>
+                  </div>
+
+                  <!-- Dystans pomiędzy podestem a attyką (input) -->
+                  <div class="form-group">
+                    <label for="atticMinDistance">
+                      {{ state.descentMountType === 'bigfoot' || state.descentMountType === 'custom-base'
+                         ? 'Minimalny dystans pomiędzy podestem a attyką'
+                         : 'Dystans pomiędzy podestem a attyką' }}
+                    </label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="atticMinDistance"
+                        v-model.number="state.atticMinDistance"
+                        min="0"
+                        max="60"
+                        step="1"
+                        class="form-input input-small"
+                        placeholder="0"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">Standardowo: 5 cm. Max: 60 cm</div>
+                  </div>
+
+                  <!-- Checkbox: pozwól na mniejszy dystans (bigfoot/custom-base) -->
+                  <div v-if="showLowDistanceCheckbox" class="form-group">
+                    <label class="checkbox-wrapper-styled">
+                      <input
+                        type="checkbox"
+                        :checked="state.descentMountType === 'bigfoot' ? state.bigfootAllowLowDistance : state.customBaseAllowLowDistance"
+                        @change="handleLowDistanceCheckbox(($event.target as HTMLInputElement).checked)"
+                      >
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Pozwól na mniejszy dystans niż {{ (minDistanceThresholdMm / 10).toFixed(1) }} cm</span>
+                        <span class="label-description">
+                          Aktualnie: {{ ((state.atticMinDistance || 0) + (state.atticWallHeight || 0) * 100).toFixed(1) }} cm
+                          <span v-if="hiddenDistanceMm > 0">
+                            (+ ukryty: {{ (hiddenDistanceMm / 10).toFixed(1) }} cm)
+                          </span>
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <!-- Info o szerokości murka - dla brackets -->
+                  <div v-if="state.descentMountType === 'brackets'" class="form-group">
+                    <div class="attic-info-box">
+                      <div class="attic-info-title">Dopuszczalna szerokość murka:</div>
+                      <div class="attic-info-row">
+                        <span>Min:</span>
+                        <span class="attic-info-value">{{ wallThicknessMin }} cm</span>
+                      </div>
+                      <div class="attic-info-row">
+                        <span>Max:</span>
+                        <span class="attic-info-value">{{ wallThicknessMax }} cm</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+
+
+                <!-- Kosz ochronny (tylko dla zewnętrznej i nie-attyki) -->
+                <div v-if="state.purpose === 'external' && state.scheme !== 'attic-passage'" class="form-group">
+                  <label>Kosz ochronny</label>
+                  <div class="cage-selector">
+                    <div
+                      class="cage-option"
+                      :class="{ selected: state.cage === 'no-cage' }"
+                      @click="selectCage('no-cage')"
+                    >
+                      <div class="cage-icon">&#10060;</div>
+                      <div class="cage-content">
+                        <div class="cage-label">Bez kosza</div>
+                        <div class="cage-desc">Drabina bez zabezpieczenia bocznego</div>
+                      </div>
+                    </div>
+                    <div
+                      class="cage-option"
+                      :class="{ selected: state.cage === 'with-cage' }"
+                      @click="selectCage('with-cage')"
+                    >
+                      <div class="cage-icon">&#128737;</div>
+                      <div class="cage-content">
+                        <div class="cage-label">Z koszem ochronnym</div>
+                        <div class="cage-desc">Obowiązkowy przy wysokości powyżej 3m (wg przepisów BHP)</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Dodatkowe opcje kosza (widoczne gdy kosz wybrany) -->
+                  <div v-if="state.cage === 'with-cage'" class="cage-options">
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.accessLock">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Blokada dostępu</span>
+                        <span class="label-description">Zamykana klapka uniemożliwiająca wejście osobom niepowołanym</span>
+                      </span>
+                    </label>
+                    <label class="checkbox-wrapper-styled">
+                      <input type="checkbox" v-model="state.restingPlatform">
+                      <span class="checkbox-custom-styled">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                          <path d="M5 12l5 5L20 7"/>
+                        </svg>
+                      </span>
+                      <span class="checkbox-label-styled">
+                        <span class="label-title">Podest spoczynkowy</span>
+                        <span class="label-description">Platforma do odpoczynku przy długich drabinach</span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Progress bar -->
+                <div class="progress-bar">
+                  <div class="progress-bar-fill" :style="{ width: formProgress + '%' }"></div>
+                </div>
+
+                <!-- Wysokość ściany (nie dla attyki - jest w Strona wejścia) -->
+                <div v-if="state.scheme !== 'attic-passage'" class="form-group">
+                  <div v-if="wallHeightWarning" class="form-warning">{{ wallHeightWarning }}</div>
+                  <label for="wallHeight">Wysokość ściany</label>
+                  <div class="input-with-unit">
+                    <input
+                      type="number"
+                      id="wallHeight"
+                      v-model.number="state.wallHeight"
+                      min="0.6"
+                      max="30"
+                      step="0.1"
+                      class="form-input"
+                      :class="{ invalid: wallHeightWarning }"
+                      @input="validateWallHeight"
+                      @blur="validateWallHeight"
+                    >
+                    <span class="unit">m</span>
+                  </div>
+                  <div class="hint">Zakres: 0.6 - 30 m</div>
+                </div>
+
+                <!-- Rodzaj wsporników (tylko debug, zewnętrzna, nie dla attic-passage) -->
+                <div v-if="debugMode && state.purpose === 'external' && state.scheme !== 'attic-passage'" class="form-group bracket-group">
+                  <label for="bracketType">Rodzaj wsporników</label>
+                  <select
+                    id="bracketType"
+                    v-model="state.bracketType"
+                    class="form-select"
+                    @change="onBracketChange"
+                  >
+                    <option value="short">Krótkie (16-26 cm) - ściany bez lub z minimalnym ociepleniem do 5 cm</option>
+                    <option value="medium">Średnie (26-36 cm) - ocieplenie do 10 cm</option>
+                    <option value="long">Długie (36-46 cm) - ocieplenie do 20 cm</option>
+                    <option value="none">Bez wsporników (montaż po mojej stronie)</option>
+                    <option value="custom">Inne - potrzebuję dłuższe</option>
+                  </select>
+                  <a href="#" class="bracket-help-link" @click.prevent="showBracketInfo = !showBracketInfo">
+                    Nie wiesz który wybrać?
+                  </a>
+
+                  <!-- Popup z informacją o wspornikach -->
+                  <div v-if="showBracketInfo" class="bracket-info-popup">
+                    <div class="bracket-info-content">
+                      <button type="button" class="popup-close" @click="showBracketInfo = false">&times;</button>
+                      <h4>Jak dobrać wsporniki?</h4>
+                      <p class="popup-intro">
+                        Wartość w centymetrach oznacza <strong>zakres regulacji odległości</strong> od ściany do drabiny.
+                      </p>
+                      <ul>
+                        <li><strong>16-26 cm</strong> - budynki <em>bez ocieplenia</em> lub z minimalnym</li>
+                        <li><strong>26-36 cm</strong> - budynki z ociepleniem <em>do 10-15 cm</em></li>
+                        <li><strong>36-46 cm</strong> - budynki z ociepleniem <em>20-30 cm</em></li>
+                      </ul>
+                      <p class="popup-note">
+                        Wybierz wsporniki tak, aby zakres regulacji pokrywał grubość ocieplenia + minimum 15 cm odstępu.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div v-if="state.bracketType === 'custom'" class="hint warning">
+                    <template v-if="state.hasEave && requiredCustomBracketLength > 46">
+                      Okap/rynna wymaga wsporników o długości min. <strong>{{ requiredCustomBracketLength }} cm</strong>
+                      (drabina 15cm od okapu). Skontaktuj się z nami.
+                    </template>
+                    <template v-else>
+                      Skontaktuj się z nami w sprawie niestandardowych wsporników
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Ocieplenie przedniej ściany (tylko klasyczna/z podestem) -->
+                <div v-if="state.purpose === 'external' && state.scheme !== 'attic-passage'" class="form-group">
+                  <label class="checkbox-wrapper-styled">
+                    <input type="checkbox" v-model="state.hasInsulation">
+                    <span class="checkbox-custom-styled">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                        <path d="M5 12l5 5L20 7"/>
+                      </svg>
+                    </span>
+                    <span class="checkbox-label-styled">
+                      <span class="label-title">Ocieplenie</span>
+                      <span class="label-description">Warstwa izolacji na przedniej ścianie</span>
+                    </span>
+                  </label>
+
+                  <!-- Grubość ocieplenia - tylko gdy włączone -->
+                  <div v-if="state.hasInsulation" class="conditional-field">
+                    <label for="insulationThickness">Grubość ocieplenia</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="insulationThickness"
+                        v-model.number="state.insulationThickness"
+                        min="1"
+                        max="30"
+                        step="1"
+                        class="form-input input-small"
+                        placeholder="10"
+                      />
+                      <span class="unit">cm</span>
+                    </div>
+                    <div class="hint">Grubość ocieplenia (1-30 cm)</div>
+                  </div>
+                </div>
+
+                <!-- Drabina zawieszona (tylko zewnętrzna, nie attyka) -->
+                <div v-if="state.purpose === 'external' && state.scheme !== 'attic-passage'" class="form-group">
+                  <label class="checkbox-wrapper-styled">
+                    <input type="checkbox" v-model="state.suspended" @change="toggleSuspended">
+                    <span class="checkbox-custom-styled">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                        <path d="M5 12l5 5L20 7"/>
+                      </svg>
+                    </span>
+                    <span class="checkbox-label-styled">
+                      <span class="label-title">Drabina zawieszona nad ziemią</span>
+                      <span class="label-description">Drabina nie sięga poziomu gruntu</span>
+                    </span>
+                  </label>
+
+                  <!-- Pole warunkowe - wysokość zawieszenia -->
+                  <div v-if="state.suspended" class="conditional-field">
+                    <label for="suspendedHeight">Wysokość zawieszenia nad ziemią</label>
+                    <div class="input-with-unit">
+                      <input
+                        type="number"
+                        id="suspendedHeight"
+                        v-model.number="state.suspendedHeight"
+                        min="0"
+                        :max="maxSuspendedHeight"
+                        step="0.1"
+                        class="form-input"
+                      >
+                      <span class="unit">m</span>
+                    </div>
+                    <div class="hint">Maksymalnie: {{ maxSuspendedHeight.toFixed(1) }} m</div>
+                  </div>
+                </div>
+
+                <!-- Przeszkody w miejscu montażu (tylko zewnętrzna, nie attyka) -->
+                <div v-if="state.purpose === 'external' && state.scheme !== 'attic-passage'" class="form-group">
+                  <label class="checkbox-wrapper-styled">
+                    <input type="checkbox" v-model="state.hasObstacles">
+                    <span class="checkbox-custom-styled">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3">
+                        <path d="M5 12l5 5L20 7"/>
+                      </svg>
+                    </span>
+                    <span class="checkbox-label-styled">
+                      <span class="label-title">Przeszkody w miejscu montażu</span>
+                      <span class="label-description">Okna lub inne elementy uniemożliwiające montaż</span>
+                    </span>
+                  </label>
+
+                  <!-- Wybór typu przeszkody -->
+                  <div v-if="state.hasObstacles" class="conditional-field">
+                    <div class="obstacle-type-selector">
+                      <!-- Okno / miejsce bez wsporników -->
+                      <div class="obstacle-type-card obstacle-type-card--window" @click="addObstacle">
+                        <div class="obstacle-type-photo">
+                          <svg viewBox="0 0 80 60" fill="none" class="window-svg">
+                            <!-- Wall (side view) -->
+                            <rect x="5" y="5" width="14" height="50" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                            <!-- Window area on wall - nice blue -->
+                            <rect x="5" y="18" width="14" height="20" fill="#3b82f6" fill-opacity="0.4" stroke="#60a5fa" stroke-width="1.5"/>
+                            <!-- Window cross -->
+                            <line x1="12" y1="18" x2="12" y2="38" stroke="#93c5fd" stroke-width="1"/>
+                            <line x1="5" y1="28" x2="19" y2="28" stroke="#93c5fd" stroke-width="1"/>
+                            <!-- Bracket above window -->
+                            <line x1="19" y1="12" x2="35" y2="12" stroke="#6b7280" stroke-width="3"/>
+                            <circle cx="35" cy="12" r="2" fill="#4b5563"/>
+                            <!-- Bracket below window -->
+                            <line x1="19" y1="48" x2="35" y2="48" stroke="#6b7280" stroke-width="3"/>
+                            <circle cx="35" cy="48" r="2" fill="#4b5563"/>
+                            <!-- Dimension arrows - blue -->
+                            <line x1="42" y1="18" x2="42" y2="38" stroke="#60a5fa" stroke-width="1.5"/>
+                            <polygon points="39,20 42,15 45,20" fill="#60a5fa"/>
+                            <polygon points="39,36 42,41 45,36" fill="#60a5fa"/>
+                          </svg>
+                        </div>
+                        <div class="obstacle-type-label">Okno / miejsce bez wsporników</div>
+                        <div class="obstacle-type-desc">Obszar gdzie nie można zamontować uchwytów</div>
+                      </div>
+
+                      <!-- Punkt na ścianie - tylko w debug mode -->
+                      <div v-if="debugMode" class="obstacle-type-card obstacle-type-card--wall-point" @click="addWallPoint">
+                        <div class="obstacle-type-photo">
+                          <svg viewBox="0 0 80 60" fill="none" class="wall-point-svg">
+                            <!-- Wall (side view) -->
+                            <rect x="5" y="5" width="14" height="50" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                            <!-- Green point area on wall -->
+                            <rect x="5" y="18" width="14" height="20" fill="#22c55e" fill-opacity="0.4" stroke="#16a34a" stroke-width="1.5"/>
+                            <!-- Crosshair -->
+                            <line x1="12" y1="23" x2="12" y2="33" stroke="#15803d" stroke-width="1.5"/>
+                            <line x1="7" y1="28" x2="17" y2="28" stroke="#15803d" stroke-width="1.5"/>
+                            <!-- Brackets still visible -->
+                            <line x1="19" y1="12" x2="35" y2="12" stroke="#6b7280" stroke-width="3"/>
+                            <circle cx="35" cy="12" r="2" fill="#4b5563"/>
+                            <line x1="19" y1="28" x2="35" y2="28" stroke="#6b7280" stroke-width="3"/>
+                            <circle cx="35" cy="28" r="2" fill="#4b5563"/>
+                            <line x1="19" y1="48" x2="35" y2="48" stroke="#6b7280" stroke-width="3"/>
+                            <circle cx="35" cy="48" r="2" fill="#4b5563"/>
+                          </svg>
+                        </div>
+                        <div class="obstacle-type-label">Punkt na ścianie</div>
+                        <div class="obstacle-type-desc">Zaznaczenie bez wpływu na uchwyty</div>
+                      </div>
+
+                      <!-- Okap -->
+                      <div
+                        class="obstacle-type-card obstacle-type-card--eave"
+                        :class="{ 'is-active': state.hasEave, 'is-disabled': state.hasEave }"
+                        @click="!state.hasEave && toggleEave()"
+                      >
+                        <div class="obstacle-type-photo">
+                          <svg viewBox="0 0 80 60" fill="none" class="eave-svg">
+                            <!-- Wall (side view) -->
+                            <rect x="5" y="18" width="14" height="40" fill="#9ca3af" stroke="#6b7280" stroke-width="1"/>
+                            <!-- Eave/okap -->
+                            <rect x="5" y="8" width="55" height="12" fill="#d1d5db" stroke="#9ca3af" stroke-width="1"/>
+                            <!-- Eave shadow/depth -->
+                            <rect x="19" y="18" width="41" height="3" fill="rgba(0,0,0,0.15)"/>
+                            <!-- Depth arrow -->
+                            <line x1="19" y1="3" x2="60" y2="3" stroke="#f59e0b" stroke-width="2"/>
+                            <polygon points="57,0 62,3 57,6" fill="#f59e0b"/>
+                            <line x1="19" y1="0" x2="19" y2="6" stroke="#f59e0b" stroke-width="1"/>
+                            <!-- Height arrow -->
+                            <line x1="68" y1="8" x2="68" y2="20" stroke="#60a5fa" stroke-width="2"/>
+                            <polygon points="65,10 68,5 71,10" fill="#60a5fa"/>
+                            <polygon points="65,18 68,23 71,18" fill="#60a5fa"/>
+                            <!-- Label hints -->
+                            <text x="38" y="3" font-size="6" fill="#f59e0b" text-anchor="middle">głęb.</text>
+                            <text x="75" y="16" font-size="6" fill="#60a5fa" text-anchor="middle">wys.</text>
+                          </svg>
+                        </div>
+                        <div class="obstacle-type-label">
+                          Okap/rynna
+                          <span v-if="state.hasEave" class="badge-added">Dodano</span>
+                        </div>
+                        <div class="obstacle-type-desc">Wystający dach lub rynna nad drabiną</div>
+                      </div>
+                    </div>
+
+                    <!-- Okap/rynna - parametry -->
+                    <div v-if="state.hasEave" class="eave-settings">
+                      <div class="eave-settings-header">
+                        <span class="eave-title">Parametry okapu/rynny</span>
+                        <button class="btn-remove-eave" @click="toggleEave" title="Usuń okap/rynnę">×</button>
+                      </div>
+                      <div class="eave-inputs">
+                        <div class="input-group-small">
+                          <label>Głębokość (cm)</label>
+                          <input
+                            type="number"
+                            v-model.number="state.eaveDepth"
+                            min="1"
+                            max="80"
+                            step="1"
+                            class="form-input-small"
+                            title="Jak daleko okap wystaje w stronę drabiny"
+                          >
+                        </div>
+                        <div class="input-group-small">
+                          <label>Wysokość (cm)</label>
+                          <input
+                            type="number"
+                            v-model.number="state.eaveHeight"
+                            min="1"
+                            max="200"
+                            step="1"
+                            class="form-input-small"
+                            title="Wysokość okapu"
+                          >
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Lista okien/przeszkód -->
+                    <div v-if="state.obstacles.length > 0" class="obstacles-list">
+                      <div class="obstacles-list-header">Okna i przeszkody</div>
+                      <div v-for="obstacle in state.obstacles" :key="obstacle.id" class="obstacle-item">
+                        <div class="obstacle-inputs">
+                          <div class="input-group-small">
+                            <label>Od ziemi (m)</label>
+                            <input type="number" v-model.number="obstacle.heightFrom" min="0" :max="state.wallHeight" step="0.1" class="form-input-small" title="Odległość od ziemi do dolnej krawędzi przeszkody">
+                          </div>
+                          <div class="input-group-small">
+                            <label>Wysokość (m)</label>
+                            <input type="number" v-model.number="obstacle.height" min="0.1" :max="state.wallHeight - obstacle.heightFrom" step="0.1" class="form-input-small" title="Wysokość przeszkody">
+                          </div>
+                          <button class="btn-remove-obstacle" @click="removeObstacle(obstacle.id)" title="Usuń">×</button>
+                        </div>
+                        <div class="obstacle-preview">
+                          <span :class="['obstacle-badge', obstacle.type === 'wall-point' ? 'type-wall-point' : 'type-window']">{{ obstacle.type === 'wall-point' ? 'Punkt' : 'Okno' }}</span>
+                          <span class="obstacle-range">{{ obstacle.heightFrom.toFixed(1) }}m - {{ (obstacle.heightFrom + obstacle.height).toFixed(1) }}m</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Ostrzeżenie o przeszkodzie ponad ścianą -->
+                    <div v-if="obstacleAboveWallWarning" class="obstacle-above-wall-warning">
+                      <div class="obstacle-warning-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="obstacle-warning-text">{{ obstacleAboveWallWarning }}</div>
+                    </div>
+
+                    <!-- Ostrzeżenie o kolizji uchwytów -->
+                    <div v-if="collisionWarning" class="collision-warning">
+                      <div class="collision-warning-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="collision-warning-text">
+                        <strong>Kolizja z przeszkodą</strong>
+                        <p>{{ collisionWarning.message }}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Info z iframe -->
+                <div class="config-summary" style="margin-top: 20px;">
+                  <div class="config-summary-title">Podgląd konfiguracji 3D</div>
+                  <div class="config-summary-row">
+                    <span class="label">Moduły X7:</span>
+                    <span class="value">{{ threeState.numX7Ladders }} szt.</span>
+                  </div>
+                  <div class="config-summary-row">
+                    <span class="label">Moduł końcowy:</span>
+                    <span class="value">{{ threeState.finalLadderRungs }} szczebli</span>
+                  </div>
+                  <div class="config-summary-row">
+                    <span class="label">Razem szczebli:</span>
+                    <span class="value">{{ threeState.totalRungs }} szt.</span>
+                  </div>
+                  <div v-if="state.cage === 'with-cage'" class="config-summary-row">
+                    <span class="label">Segmenty kosza:</span>
+                    <span class="value">{{ threeState.safetyCageCount }} szt.</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-panel-footer">
+                <button class="btn btn-secondary" @click="goBack">Wstecz</button>
+                <button class="btn btn-primary" @click="currentScreen = 'summary'">Dalej</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ========== EKRAN 5: Podsumowanie (FULLSCREEN) ========== -->
+      <div v-if="currentScreen === 'summary'" class="screen">
+        <div class="summary-full-layout">
+          <div class="config-panel summary-panel">
+            <div class="config-panel-header">
+              <h2>Podsumowanie zamówienia</h2>
+              <p>Twoja konfiguracja drabiny technicznej</p>
+            </div>
+
+            <div class="config-panel-content">
+              <!-- Konfiguracja drabiny -->
+              <div class="summary-section">
+                <div class="summary-section-title">Konfiguracja drabiny</div>
+                <div class="summary-card">
+                  <div class="summary-row">
+                    <span class="label">Typ:</span>
+                    <span class="value">{{ state.purpose === 'external' ? 'Zewnętrzna' : 'Wewnętrzna' }}</span>
+                  </div>
+                  <div class="summary-row">
+                    <span class="label">Schemat:</span>
+                    <span class="value">
+                      {{ state.scheme === 'no-platform' ? 'Klasyczna' :
+                         state.scheme === 'with-platform' ? 'Z podestem' : 'Przejście przez attykę' }}
+                    </span>
+                  </div>
+                  <div class="summary-row">
+                    <span class="label">Wysokość ściany:</span>
+                    <span class="value highlight">{{ state.wallHeight }} m</span>
+                  </div>
+                  <div v-if="state.purpose === 'external'" class="summary-row">
+                    <span class="label">Wsporniki:</span>
+                    <span class="value">{{ bracketTypeLabel }}</span>
+                  </div>
+                  <div class="summary-row">
+                    <span class="label">Kosz ochronny:</span>
+                    <span class="value">{{ state.cage === 'with-cage' ? 'Tak' : 'Nie' }}</span>
+                  </div>
+                  <div v-if="state.cage === 'with-cage'" class="summary-row">
+                    <span class="label">Wysokość kosza od ziemi:</span>
+                    <span class="value">2.2 - 3.0 m</span>
+                  </div>
+                  <div v-if="state.accessLock" class="summary-row">
+                    <span class="label">Blokada dostępu:</span>
+                    <span class="value">Tak</span>
+                  </div>
+                  <div v-if="state.restingPlatform" class="summary-row">
+                    <span class="label">Podest spoczynkowy:</span>
+                    <span class="value">Tak</span>
+                  </div>
+                  <div v-if="state.suspended" class="summary-row">
+                    <span class="label">Zawieszenie:</span>
+                    <span class="value">{{ state.suspendedHeight }} m nad ziemią</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Specyfikacja techniczna -->
+              <div class="summary-section">
+                <div class="summary-section-title">Specyfikacja techniczna</div>
+                <div class="summary-card">
+                  <div class="summary-row">
+                    <span class="label">Moduły X7 (7 szczebli):</span>
+                    <span class="value">{{ threeState.numX7Ladders }} szt.</span>
+                  </div>
+                  <div class="summary-row">
+                    <span class="label">Moduł końcowy:</span>
+                    <span class="value">{{ threeState.finalLadderRungs }} szczebli</span>
+                  </div>
+                  <div class="summary-row highlight-row">
+                    <span class="label">Całkowita liczba szczebli:</span>
+                    <span class="value">{{ threeState.totalRungs }} szt.</span>
+                  </div>
+                  <div v-if="state.cage === 'with-cage'" class="summary-row">
+                    <span class="label">Segmenty kosza:</span>
+                    <span class="value">{{ threeState.safetyCageCount }} szt.</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Lista komponentów -->
+              <div class="summary-section">
+                <div class="summary-section-title">
+                  Lista komponentów
+                  <span v-if="apiLoading" class="loading-indicator">Ładowanie...</span>
+                </div>
+                <div class="summary-card components-list">
+                  <div v-if="componentsList.length === 0 && !apiLoading" class="components-empty">
+                    Brak danych o komponentach
+                  </div>
+                  <div v-for="component in componentsList" :key="component.id" class="component-row">
+                    <span class="component-name">{{ component.name }}</span>
+                    <span class="component-qty">{{ component.quantity }} szt.</span>
+                    <span v-if="component.unitPrice > 0" class="component-price">
+                      {{ (component.totalPrice).toFixed(2) }} zł
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Podsumowanie ceny -->
+              <div v-if="pricing.total > 0" class="summary-section">
+                <div class="summary-section-title">Podsumowanie ceny</div>
+                <div class="summary-card pricing-card">
+                  <div class="summary-row">
+                    <span class="label">Suma częściowa:</span>
+                    <span class="value">{{ pricing.subtotal.toFixed(2) }} zł</span>
+                  </div>
+                  <div v-if="pricing.discount > 0" class="summary-row discount-row">
+                    <span class="label">Rabat ({{ pricing.discountPercent }}%):</span>
+                    <span class="value">-{{ pricing.discount.toFixed(2) }} zł</span>
+                  </div>
+                  <div class="summary-row">
+                    <span class="label">Suma netto:</span>
+                    <span class="value">{{ pricing.total.toFixed(2) }} zł</span>
+                  </div>
+                  <div class="summary-row total-row">
+                    <span class="label">Suma brutto ({{ pricing.vatRate }}% VAT):</span>
+                    <span class="value highlight">{{ pricing.totalWithVat.toFixed(2) }} zł</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Przycisk dodania kolejnej drabiny -->
+              <div class="add-ladder-section">
+                <button class="btn btn-outline-dashed btn-block" @click="addAnotherLadder">
+                  + Dodaj kolejną drabinę do zamówienia
+                </button>
+              </div>
+
+              <!-- Kod promocyjny -->
+              <div class="summary-section">
+                <div class="summary-section-title">Kod promocyjny</div>
+                <div class="promo-code-input">
+                  <input
+                    type="text"
+                    v-model="promoCode"
+                    placeholder="Wpisz kod promocyjny"
+                    class="form-input"
+                  >
+                  <button class="btn btn-accent" @click="applyPromoCode">
+                    Zastosuj
+                  </button>
+                </div>
+                <div v-if="promoMessage" class="promo-message" :class="{ success: promoSuccess }">
+                  {{ promoMessage }}
+                </div>
+              </div>
+
+              <!-- Przyciski akcji -->
+              <div class="summary-actions">
+                <button class="btn btn-outline btn-block" @click="generateOffer">
+                  <span>&#128196;</span> Wygeneruj ofertę
+                </button>
+                <button class="btn btn-success btn-block" @click="addToCart">
+                  <span>&#128722;</span> Dodaj do koszyka
+                </button>
+              </div>
+            </div>
+
+            <div class="config-panel-footer">
+              <button class="btn btn-secondary" @click="currentScreen = 'params'">Wstecz</button>
+              <button class="btn btn-primary" @click="addToCart">Zamów teraz</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</template>
+
+<style>
+/* ============================================
+   RESET I ZMIENNE CSS (1:1 z oryginału)
+   ============================================ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2d2d2d;
+  --bg-card: #3a3a3a;
+  --bg-card-hover: #4a4a4a;
+  --text-primary: #ffffff;
+  --text-secondary: #b0b0b0;
+  --text-muted: #808080;
+  --accent: #4a9eff;
+  --accent-hover: #6bb3ff;
+  --accent-dark: #2d7cd6;
+  --border: #505050;
+  --success: #4caf50;
+  --warning: #ff9800;
+  --error: #f44336;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  --transition: all 0.3s ease;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  min-height: 100%;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+#app {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Debug indicator */
+#debugIndicator {
+  position: fixed;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 152, 0, 0.9);
+  color: #000;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: bold;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+/* ============================================
+   LAYOUT APLIKACJI
+   ============================================ */
+.app-container {
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ============================================
+   NAGŁÓWEK
+   ============================================ */
+.app-header {
+  padding: 15px 30px;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex-shrink: 0;
+}
+
+.back-button {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background-color: var(--bg-card);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+
+.back-button:hover:not(:disabled) {
+  background-color: var(--accent);
+}
+
+.back-button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.back-button svg {
+  width: 22px;
+  height: 22px;
+}
+
+.header-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.header-title h1 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.header-title .step-indicator {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+/* ============================================
+   GŁÓWNA ZAWARTOŚĆ
+   ============================================ */
+.app-content {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.screen {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================
+   EKRANY PEŁNOEKRANOWE
+   ============================================ */
+.fullscreen-layout {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 30px 20px;
+  overflow-y: auto;
+}
+
+.screen-intro {
+  text-align: center;
+  margin-bottom: 30px;
+  max-width: 600px;
+}
+
+.screen-intro h2 {
+  font-size: 1.8rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.screen-intro p {
+  color: var(--text-secondary);
+  font-size: 1.1rem;
+}
+
+/* Siatka kafelków */
+.choice-grid-fullscreen {
+  display: grid;
+  gap: 25px;
+  width: 100%;
+  max-width: 900px;
+}
+
+.choice-grid-fullscreen.cols-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.choice-grid-fullscreen.cols-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Kafelki wyboru */
+.choice-card-large {
+  background-color: var(--bg-card);
+  border: 2px solid transparent;
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+  transition: var(--transition);
+  overflow: hidden;
+}
+
+.choice-card-large:hover {
+  border-color: var(--accent);
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+
+.choice-card-large.selected {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.15) 0%, rgba(74, 158, 255, 0.05) 100%);
+  box-shadow: 0 0 20px rgba(74, 158, 255, 0.3);
+}
+
+.choice-card-large.selected .card-title {
+  color: var(--accent);
+}
+
+.choice-card-large .card-image {
+  width: 100%;
+  height: 180px;
+  background-color: var(--bg-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.choice-card-large .card-body {
+  padding: 20px 25px 25px;
+  text-align: center;
+}
+
+.choice-card-large .card-title {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.choice-card-large .card-description {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ============================================
+   SPLIT LAYOUT (ekran params)
+   ============================================ */
+.split-layout {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.visualization-panel {
+  flex: 1;
+  height: 100%;
+  min-width: 300px;
+  position: relative;
+  overflow: hidden;
+  background: #1a1a1a;
+}
+
+.viewer3d-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.viewer3d-container iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.config-panel-wrapper {
+  position: relative;
+  height: 100%;
+  width: 520px;
+  max-width: 50%;
+  flex-shrink: 0;
+}
+
+.config-panel {
+  width: 100%;
+  height: 100%;
+  background-color: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.config-panel-header {
+  padding: 25px 30px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-panel-header h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+
+.config-panel-header p {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.config-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 25px 30px;
+  min-height: 0;
+}
+
+.config-panel-footer {
+  padding: 20px 30px;
+  border-top: 1px solid var(--border);
+  background-color: var(--bg-primary);
+  display: flex;
+  gap: 12px;
+}
+
+/* ============================================
+   PODSUMOWANIE KONFIGURACJI
+   ============================================ */
+.config-summary {
+  background-color: var(--bg-primary);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  margin-bottom: 25px;
+}
+
+.config-summary-title {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.config-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-summary-row:last-child {
+  border-bottom: none;
+}
+
+.config-summary-row .label {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.config-summary-row .value {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+/* ============================================
+   FORMULARZE
+   ============================================ */
+.form-group {
+  margin-bottom: 24px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.form-group .hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.form-group .hint.warning-hint {
+  color: #e67e22;
+  background: rgba(230, 126, 34, 0.1);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border-left: 3px solid #e67e22;
+}
+
+/* ============================================
+   SEKCJA STRONY ZEJŚCIA (ATTYKA)
+   ============================================ */
+.attic-entry-section {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+}
+
+.attic-entry-section .form-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.attic-descent-section {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+}
+
+.attic-descent-section .form-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.attic-options-section {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+}
+
+.attic-options-section .form-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.attic-info-box {
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--primary);
+}
+
+.attic-info-title {
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.attic-info-label {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.attic-info-value {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.attic-info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.attic-info-row span:first-child {
+  color: var(--text-muted);
+}
+
+.input-small {
+  max-width: 120px;
+}
+
+.input-with-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-with-unit .form-input {
+  flex: 1;
+}
+
+.input-with-unit .unit {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  min-width: 30px;
+}
+
+.checkbox-group {
+  padding: 10px 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+
+.input-with-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.input-field {
+  flex: 1;
+  height: 52px;
+  padding: 0 16px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 1.2rem;
+  font-weight: 600;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.input-btn {
+  width: 52px;
+  height: 52px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--accent);
+  font-size: 1.5rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-btn:hover {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+/* ============================================
+   PRZYCISKI
+   ============================================ */
+.btn {
+  padding: 14px 28px;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+  color: white;
+  flex: 1;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(74, 158, 255, 0.3);
+}
+
+.btn-secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-card-hover);
+}
+
+/* ============================================
+   PROGRESS BAR
+   ============================================ */
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--success) 100%);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* ============================================
+   INPUT Z JEDNOSTKĄ
+   ============================================ */
+.input-with-unit {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.input-with-unit .form-input {
+  flex: 1;
+  height: 48px;
+  padding: 0 16px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  font-weight: 500;
+  transition: border-color 0.2s;
+}
+
+.input-with-unit .form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.input-with-unit .form-input.invalid {
+  border-color: var(--error);
+}
+
+.input-with-unit .unit {
+  height: 48px;
+  padding: 0 16px;
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  border-left: none;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+}
+
+/* ============================================
+   OSTRZEŻENIA FORMULARZA
+   ============================================ */
+.form-warning {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  background: rgba(244, 67, 54, 0.1);
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  color: var(--error);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ============================================
+   SELECT
+   ============================================ */
+.form-select {
+  width: 100%;
+  height: 48px;
+  padding: 0 16px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ============================================
+   CHECKBOX
+   ============================================ */
+.checkbox-wrapper {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+  padding: 14px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: all 0.2s;
+}
+
+.checkbox-wrapper:hover {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.05);
+}
+
+.checkbox-wrapper input[type="checkbox"] {
+  display: none;
+}
+
+.checkbox-custom {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.checkbox-wrapper input[type="checkbox"]:checked + .checkbox-custom {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.checkbox-custom svg {
+  width: 16px;
+  height: 16px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.checkbox-wrapper input[type="checkbox"]:checked + .checkbox-custom svg {
+  opacity: 1;
+}
+
+.checkbox-label {
+  flex: 1;
+}
+
+.checkbox-label .label-title {
+  display: block;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.checkbox-label .label-description {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ============================================
+   POLE WARUNKOWE
+   ============================================ */
+.conditional-field {
+  margin-top: 15px;
+  padding: 15px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+}
+
+.conditional-field label {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+/* ============================================
+   LISTA PRZESZKÓD
+   ============================================ */
+/* Obstacle type selector */
+.obstacle-type-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.obstacle-type-card {
+  background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  text-align: center;
+}
+
+.obstacle-type-card:hover:not(.is-disabled) {
+  border-color: rgba(74, 158, 255, 0.5);
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.1) 0%, rgba(74, 158, 255, 0.03) 100%);
+  transform: translateY(-2px);
+}
+
+.obstacle-type-card.is-active {
+  border-color: rgba(76, 175, 80, 0.6);
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
+}
+
+.obstacle-type-card.is-disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.obstacle-type-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
+  color: rgba(255,255,255,0.7);
+}
+
+.obstacle-type-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.obstacle-type-card:hover:not(.is-disabled) .obstacle-type-icon {
+  color: #4a9eff;
+}
+
+.obstacle-type-card.is-active .obstacle-type-icon {
+  color: #4CAF50;
+}
+
+.obstacle-type-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #fff;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.badge-added {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  background: #4CAF50;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.obstacle-type-desc {
+  font-size: 0.8rem;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.4;
+}
+
+/* Photo placeholder for eave card */
+.obstacle-type-photo {
+  width: 100%;
+  height: 70px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+
+.eave-svg {
+  width: 100%;
+  height: 100%;
+  opacity: 0.9;
+  transition: all 0.25s ease;
+}
+
+.obstacle-type-card--eave:hover:not(.is-disabled) .eave-svg {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+.obstacle-type-card--eave.is-active .obstacle-type-photo {
+  background: linear-gradient(180deg, #1e3a2f 0%, #14532d 100%);
+  border: 1px solid rgba(76, 175, 80, 0.4);
+}
+
+.obstacle-type-card--eave.is-active .eave-svg {
+  opacity: 1;
+}
+
+.window-svg {
+  width: 100%;
+  height: 100%;
+  opacity: 0.9;
+  transition: all 0.25s ease;
+}
+
+.obstacle-type-card--window:hover .window-svg {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+/* Eave settings */
+.eave-settings {
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(76, 175, 80, 0.03) 100%);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.eave-settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.eave-title {
+  font-weight: 600;
+  color: #81c784;
+  font-size: 0.9rem;
+}
+
+.btn-remove-eave {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: rgba(244, 67, 54, 0.2);
+  color: #f44336;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  transition: all 0.2s;
+}
+
+.btn-remove-eave:hover {
+  background: rgba(244, 67, 54, 0.4);
+}
+
+.eave-inputs {
+  display: flex;
+  gap: 12px;
+}
+
+.eave-inputs .input-group-small {
+  flex: 1;
+}
+
+.obstacles-list-header {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.6);
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.obstacles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.obstacle-item {
+  background: var(--bg-card);
+  padding: 12px;
+  border-radius: var(--radius-md);
+}
+
+.obstacle-inputs {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.input-group-small {
+  flex: 1;
+}
+
+.input-group-small label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.form-input-small {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.btn-remove-obstacle {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--error);
+  color: white;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn-remove-obstacle:hover {
+  opacity: 0.8;
+}
+
+.btn-add-obstacle {
+  width: 100%;
+  padding: 10px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-add-obstacle:hover {
+  background: rgba(74, 158, 255, 0.1);
+}
+
+/* Collision warning */
+.collision-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(255, 152, 0, 0.1);
+  border: 1px solid rgba(255, 152, 0, 0.3);
+  border-radius: 8px;
+  color: #ff9800;
+}
+
+.collision-warning-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+}
+
+.collision-warning-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.collision-warning-text {
+  flex: 1;
+}
+
+.collision-warning-text strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+.collision-warning-text p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: rgba(255, 152, 0, 0.85);
+  line-height: 1.4;
+}
+
+/* Lekki toast ostrzeżenia u góry modelu 3D */
+.model-toast {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 90%;
+  padding: 10px 16px;
+  background: rgba(239, 68, 68, 0.95);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  color: white;
+  font-size: 0.85rem;
+  z-index: 100;
+}
+
+.model-toast-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+}
+
+.model-toast-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.model-toast-content {
+  flex: 1;
+  line-height: 1.4;
+}
+
+.model-toast-content strong {
+  font-weight: 600;
+}
+
+.model-toast-close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 18px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.model-toast-close:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* ============================================
+   KONTROLKI 3D - EXACT COPY FROM ORIGINAL
+   ============================================ */
+
+/* Visibility controls (prawy górny róg) */
+.viewer3d-visibility {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.viewer3d-visibility-btn {
+  padding: 8px 12px;
+  background: rgba(50, 50, 50, 0.8);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+  backdrop-filter: blur(5px);
+}
+
+.viewer3d-visibility-btn.active {
+  background: rgba(76, 175, 80, 0.9);
+  border-color: #6fcf7c;
+}
+
+.viewer3d-visibility-btn:hover {
+  background: rgba(80, 80, 80, 0.9);
+}
+
+/* MAIN CONTROLS - exact from original */
+#controls {
+  position: fixed;
+  top: 80px;
+  left: 12px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: linear-gradient(165deg, rgba(30,35,45,0.9) 0%, rgba(18,22,28,0.95) 100%);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  backdrop-filter: blur(10px);
+}
+
+#controls .btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+  padding: 0;
+}
+
+#controls .btn:hover {
+  background: linear-gradient(145deg, #66bb6a 0%, #43a047 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15);
+}
+
+#controls .btn:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 3px rgba(0,0,0,0.2);
+}
+
+#controls .btn-tech {
+  background: linear-gradient(145deg, #3d5a80 0%, #293d52 100%);
+  font-size: 20px;
+  width: 46px;
+  height: 46px;
+  border: 1px solid rgba(255,255,255,0.15);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+  transition: all 0.25s ease;
+}
+
+#controls .btn-tech:hover {
+  background: linear-gradient(145deg, #4a6d96 0%, #344c66 100%);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15);
+  transform: translateY(-2px);
+}
+
+#controls .btn-tech:active {
+  background: linear-gradient(145deg, #293d52 0%, #1e2d3d 100%);
+  transform: translateY(0) scale(0.96);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 3px rgba(0,0,0,0.2);
+}
+
+#controls .btn-active {
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%) !important;
+  border-color: #6fcf7c !important;
+  box-shadow: 0 0 12px rgba(76,175,80,0.5), 0 4px 12px rgba(0,0,0,0.4) !important;
+}
+
+#controls .btn-with-tooltip {
+  position: relative;
+}
+
+#controls .btn-tooltip {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: linear-gradient(165deg, rgba(30,35,45,0.98) 0%, rgba(18,22,28,0.99) 100%);
+  color: rgba(255,255,255,0.9);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.1);
+  font-family: 'Segoe UI', Arial, sans-serif;
+  z-index: 200;
+}
+
+#controls .btn-tooltip::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 6px solid transparent;
+  border-right-color: rgba(30,35,45,0.98);
+}
+
+#controls .btn-with-tooltip:hover .btn-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(4px);
+}
+
+/* MEASURE TOOLBAR - exact from original */
+#measureToolbar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 150;
+  display: none;
+  background: linear-gradient(165deg, rgba(30,35,45,0.95) 0%, rgba(18,22,28,0.98) 100%);
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  backdrop-filter: blur(10px);
+  gap: 6px;
+  align-items: center;
+}
+
+#measureToolbar.active {
+  display: flex;
+}
+
+.measure-toolbar-label {
+  color: rgba(255,255,255,0.6);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-right: 6px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+
+#measureToolbar .measure-mode-btn {
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.7);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  padding: 0;
+}
+
+#measureToolbar .measure-mode-btn:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  color: white;
+  transform: translateY(-2px);
+}
+
+#measureToolbar .measure-mode-btn.active {
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  color: white;
+  border-color: rgba(255,255,255,0.2);
+  box-shadow: 0 4px 12px rgba(76,175,80,0.4);
+}
+
+#measureToolbar .measure-mode-btn .tooltip {
+  position: absolute;
+  bottom: -32px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.9);
+  color: white;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+#measureToolbar .measure-mode-btn:hover .tooltip {
+  opacity: 1;
+}
+
+.measure-toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: rgba(255,255,255,0.15);
+  margin: 0 6px;
+}
+
+#measureToolbar .measure-close-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: linear-gradient(145deg, #e53935 0%, #c62828 100%);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 0;
+}
+
+#measureToolbar .measure-close-btn:hover {
+  background: linear-gradient(145deg, #ef5350 0%, #d32f2f 100%);
+  transform: scale(1.05);
+}
+
+/* MEASURE RESULT POPUP - exact from original */
+#measureResultPopup {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(165deg, rgba(30,35,45,0.98) 0%, rgba(18,22,28,0.99) 100%);
+  color: #6fcf7c;
+  padding: 24px 32px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-top: 3px solid #4CAF50;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+  font-size: 28px;
+  font-weight: 700;
+  font-family: 'Consolas', 'Monaco', monospace;
+  z-index: 300;
+  backdrop-filter: blur(12px);
+}
+
+#measureResultPopup .measure-result-close-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: rgba(255,255,255,0.5);
+  font-size: 18px;
+  cursor: pointer;
+  transition: color 0.2s;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#measureResultPopup .measure-result-close-btn:hover {
+  color: white;
+}
+
+/* CONNECTION PANEL - exact from original */
+#connectionPanel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(165deg, rgba(28,32,40,0.98) 0%, rgba(18,20,26,0.99) 100%);
+  padding: 28px 32px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-top: 3px solid #4CAF50;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.7), 0 0 1px rgba(255,255,255,0.1);
+  z-index: 300;
+  display: none;
+  color: white;
+  font-size: 14px;
+  min-width: 320px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  backdrop-filter: blur(12px);
+}
+
+#connectionPanel.active {
+  display: block;
+}
+
+#connectionPanel h3 {
+  margin: 0 0 22px 0;
+  text-align: center;
+  color: #6fcf7c;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.connection-row {
+  margin: 14px 0;
+}
+
+.connection-row label {
+  display: block;
+  margin-bottom: 10px;
+  color: rgba(255,255,255,0.6);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.connection-types {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.connection-type-btn {
+  padding: 12px 22px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.85);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.connection-type-btn:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.connection-type-btn.active {
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  border-color: rgba(255,255,255,0.2);
+  color: white;
+  box-shadow: 0 4px 12px rgba(76,175,80,0.4);
+}
+
+.wspornik-row {
+  margin: 16px 0;
+}
+
+.wspornik-row label {
+  display: block;
+  margin-bottom: 10px;
+  color: rgba(255,255,255,0.6);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.wspornik-slider {
+  width: 100%;
+  height: 6px;
+  -webkit-appearance: none;
+  background: linear-gradient(90deg, #2a2f3a 0%, #363c4a 100%);
+  border-radius: 3px;
+  outline: none;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.wspornik-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(76,175,80,0.4);
+  border: 2px solid rgba(255,255,255,0.2);
+  transition: transform 0.15s ease;
+}
+
+.wspornik-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.wspornik-value {
+  text-align: center;
+  font-size: 20px;
+  font-weight: 700;
+  margin-top: 8px;
+  color: #6fcf7c;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.wspornik-types {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.wspornik-type-btn {
+  padding: 10px 16px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.85);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+
+.wspornik-type-btn:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  transform: translateY(-1px);
+}
+
+.wspornik-type-btn.active {
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  border-color: rgba(255,255,255,0.2);
+  color: white;
+  box-shadow: 0 3px 10px rgba(76,175,80,0.4);
+}
+
+#connectionPanel .close-btn {
+  width: 100%;
+  margin-top: 22px;
+  padding: 12px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.8);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+#connectionPanel .close-btn:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  color: white;
+}
+
+.connection-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.connection-actions .remove-btn {
+  flex: 1;
+  padding: 12px;
+  background: linear-gradient(145deg, #e53935 0%, #c62828 100%);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.connection-actions .remove-btn:hover {
+  background: linear-gradient(145deg, #ef5350 0%, #d32f2f 100%);
+}
+
+.connection-actions .close-btn {
+  flex: 1;
+  padding: 12px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.8);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  margin-top: 0;
+  width: auto;
+}
+
+.connection-actions .close-btn:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  color: white;
+}
+
+/* SAFETY CAGE CONTROLS - exact from original */
+#safetyCageControls {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  z-index: 100;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+
+.cage-panel {
+  background: linear-gradient(165deg, rgba(30,35,45,0.95) 0%, rgba(18,22,28,0.98) 100%);
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  backdrop-filter: blur(10px);
+}
+
+.cage-panel-1 {
+  border-left: 3px solid #4CAF50;
+}
+
+.cage-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+
+.cage-label-1 {
+  color: #6fcf7c;
+}
+
+.cage-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 18px;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  padding: 0;
+}
+
+.cage-btn-add {
+  background: linear-gradient(145deg, #4caf50 0%, #388e3c 100%);
+  color: white;
+}
+
+.cage-btn-add:hover {
+  background: linear-gradient(145deg, #66bb6a 0%, #43a047 100%);
+  transform: scale(1.08);
+}
+
+.cage-btn-add:active {
+  transform: scale(0.95);
+}
+
+.cage-btn-remove {
+  background: linear-gradient(145deg, #e53935 0%, #c62828 100%);
+  color: white;
+}
+
+.cage-btn-remove:hover {
+  background: linear-gradient(145deg, #ef5350 0%, #d32f2f 100%);
+  transform: scale(1.08);
+}
+
+.cage-btn-remove:active {
+  transform: scale(0.95);
+}
+
+.cage-count {
+  color: white;
+  font-size: 14px;
+  font-weight: 700;
+  min-width: 45px;
+  text-align: center;
+  font-family: 'Consolas', 'Monaco', monospace;
+  letter-spacing: 1px;
+}
+
+.cage-checkbox-label {
+  font-size: 10px;
+  margin-left: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.85;
+  transition: opacity 0.2s;
+}
+
+.cage-checkbox-label:hover {
+  opacity: 1;
+}
+
+.cage-checkbox-label-1 {
+  color: #81c784;
+}
+
+.cage-checkbox {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #4CAF50;
+}
+
+/* GLOBAL SETTINGS PANEL */
+#globalSettingsPanel {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  z-index: 100;
+  background: linear-gradient(165deg, rgba(30,35,45,0.95) 0%, rgba(18,22,28,0.98) 100%);
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-left: 3px solid #2196F3;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);
+  backdrop-filter: blur(10px);
+  font-family: 'Segoe UI', Arial, sans-serif;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#globalSettingsPanel.with-cage {
+  bottom: 70px;
+}
+
+#globalSettingsPanel label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #90caf9;
+  opacity: 0.9;
+  white-space: nowrap;
+}
+
+.global-slider {
+  width: 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.1);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.global-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #2196F3 0%, #1976D2 100%);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  transition: transform 0.15s ease;
+}
+
+.global-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.global-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #2196F3 0%, #1976D2 100%);
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+
+.global-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: white;
+  font-family: 'Consolas', 'Monaco', monospace;
+  min-width: 65px;
+}
+
+.global-type {
+  font-size: 10px;
+  font-weight: 600;
+  color: #90caf9;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  background: rgba(33, 150, 243, 0.2);
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+/* TECH DRAWING PANEL */
+#techDrawingPanel {
+  position: fixed;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  background: linear-gradient(165deg, rgba(255,255,255,0.98) 0%, rgba(240,240,245,0.99) 100%);
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,0.1);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+
+#techDrawingPanel .tech-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+#techDrawingPanel .tech-view {
+  font-size: 13px;
+  color: #666;
+}
+
+#techDrawingPanel .tech-switch-btn {
+  padding: 8px 15px;
+  border: none;
+  border-radius: 6px;
+  background: linear-gradient(145deg, #3d5a80 0%, #293d52 100%);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+#techDrawingPanel .tech-switch-btn:hover {
+  background: linear-gradient(145deg, #4a6d96 0%, #344c66 100%);
+}
+
+#techDrawingPanel .tech-close-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: linear-gradient(145deg, #e53935 0%, #c62828 100%);
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+#techDrawingPanel .tech-close-btn:hover {
+  background: linear-gradient(145deg, #ef5350 0%, #d32f2f 100%);
+  transform: scale(1.05);
+}
+
+/* WATCHDOG PANEL (prawy dolny róg) */
+.watchdog-panel {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 100;
+  background: linear-gradient(165deg, rgba(30,30,40,0.95) 0%, rgba(20,20,30,0.98) 100%);
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  font-family: 'Consolas', 'Monaco', monospace;
+  min-width: 200px;
+}
+
+.watchdog-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.watchdog-item:not(:last-child) {
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+
+.watchdog-label {
+  font-size: 11px;
+  color: rgba(255,255,255,0.7);
+  white-space: nowrap;
+}
+
+.watchdog-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #4ade80;
+  text-shadow: 0 0 8px rgba(74,222,128,0.3);
+}
+
+
+/* ============================================
+   HINT (uzupełnienie)
+   ============================================ */
+.hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* ============================================
+   SUMMARY
+   ============================================ */
+.summary-section {
+  margin-bottom: 24px;
+}
+
+.summary-section-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-card {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-row:last-child {
+  border-bottom: none;
+}
+
+.summary-row .label {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.summary-row .value {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.summary-row .value.highlight {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.summary-row.highlight-row {
+  background: rgba(74, 158, 255, 0.1);
+  margin: 8px -16px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border-bottom: none;
+}
+
+.summary-row.highlight-row .value {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Promo code */
+.promo-code-input {
+  display: flex;
+  gap: 10px;
+}
+
+.promo-code-input .form-input {
+  flex: 1;
+  height: 44px;
+  padding: 0 14px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  text-transform: uppercase;
+}
+
+.promo-code-input .form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn-accent {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 0 20px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-accent:hover {
+  background: var(--accent-hover);
+}
+
+.promo-message {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  background: rgba(244, 67, 54, 0.1);
+  color: var(--error);
+  border: 1px solid var(--error);
+}
+
+.promo-message.success {
+  background: rgba(76, 175, 80, 0.1);
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
+/* Cage options (checkboxes) */
+.cage-options {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Styled checkbox like original configurator */
+.checkbox-wrapper-styled {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  gap: 14px;
+  cursor: pointer;
+  padding: 16px 18px;
+  margin-bottom: 0 !important;
+  background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.checkbox-wrapper-styled::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.1) 0%, rgba(74, 158, 255, 0.02) 100%);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.checkbox-wrapper-styled:hover {
+  border-color: rgba(74, 158, 255, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.checkbox-wrapper-styled:hover::before {
+  opacity: 1;
+}
+
+.checkbox-wrapper-styled input[type="checkbox"] {
+  display: none;
+}
+
+.checkbox-custom-styled {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(255, 255, 255, 0.05);
+  position: relative;
+  z-index: 1;
+  margin-top: 2px;
+}
+
+.checkbox-custom-styled svg {
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.checkbox-wrapper-styled:hover .checkbox-custom-styled {
+  border-color: rgba(74, 158, 255, 0.5);
+}
+
+.checkbox-wrapper-styled input[type="checkbox"]:checked + .checkbox-custom-styled {
+  background: linear-gradient(135deg, #4a9eff 0%, #2d7cd6 100%);
+  border-color: #4a9eff;
+  box-shadow: 0 2px 8px rgba(74, 158, 255, 0.4);
+}
+
+.checkbox-wrapper-styled input[type="checkbox"]:checked + .checkbox-custom-styled svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.checkbox-label-styled {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.checkbox-label-styled .label-title {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #ffffff;
+  letter-spacing: 0.01em;
+}
+
+.checkbox-label-styled .label-description {
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.5;
+}
+
+/* Active state styling */
+.checkbox-wrapper-styled:has(input[type="checkbox"]:checked) {
+  border-color: rgba(74, 158, 255, 0.5);
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.12) 0%, rgba(74, 158, 255, 0.04) 100%);
+}
+
+.checkbox-wrapper-styled:has(input[type="checkbox"]:checked) .label-title {
+  color: #6bb3ff;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  display: none;
+}
+
+.checkbox-label .checkmark {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.checkbox-label input[type="checkbox"]:checked + .checkmark {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.checkbox-label input[type="checkbox"]:checked + .checkmark::after {
+  content: '✓';
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+/* Obstacle type selector */
+.obstacle-type {
+  min-width: 100px;
+}
+
+.form-select-small {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.obstacle-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.obstacle-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.obstacle-badge.type-window {
+  background: rgba(33, 150, 243, 0.2);
+  color: #2196f3;
+}
+
+.obstacle-badge.type-recess {
+  background: rgba(255, 152, 0, 0.2);
+  color: #ff9800;
+}
+
+.obstacle-badge.type-groove {
+  background: rgba(156, 39, 176, 0.2);
+  color: #9c27b0;
+}
+
+.obstacle-badge.type-other {
+  background: rgba(158, 158, 158, 0.2);
+  color: #9e9e9e;
+}
+
+.obstacle-range {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* Components list */
+.components-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.components-empty {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 20px;
+  font-style: italic;
+}
+
+.component-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.component-row:last-child {
+  border-bottom: none;
+}
+
+.component-name {
+  flex: 1;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.component-qty {
+  min-width: 60px;
+  text-align: center;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.component-price {
+  min-width: 80px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* Pricing card */
+.pricing-card .discount-row {
+  color: var(--success);
+}
+
+.pricing-card .discount-row .value {
+  color: var(--success);
+}
+
+.pricing-card .total-row {
+  background: rgba(74, 158, 255, 0.15);
+  margin: 12px -16px -16px;
+  padding: 16px;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  border-bottom: none;
+}
+
+.pricing-card .total-row .label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pricing-card .total-row .value {
+  font-size: 1.2rem;
+}
+
+/* Loading indicator */
+.loading-indicator {
+  display: inline-block;
+  margin-left: 10px;
+  font-size: 0.8rem;
+  color: var(--accent);
+  font-weight: normal;
+}
+
+/* Summary actions */
+.summary-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 2px solid var(--border);
+}
+
+.btn-block {
+  width: 100%;
+  justify-content: center;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 2px solid var(--accent);
+  color: var(--accent);
+}
+
+.btn-outline:hover {
+  background: rgba(74, 158, 255, 0.1);
+}
+
+.btn-success {
+  background: #10b981;
+  color: white;
+  border: none;
+}
+
+.btn-success:hover {
+  background: #059669;
+}
+
+/* ============================================
+   SUMMARY FULLSCREEN LAYOUT
+   ============================================ */
+.summary-full-layout {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 30px 20px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.summary-panel {
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.add-ladder-section {
+  margin: 24px 0;
+}
+
+.btn-outline-dashed {
+  background: transparent;
+  border: 2px dashed var(--accent);
+  color: var(--accent);
+  padding: 20px;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn-outline-dashed:hover {
+  background: rgba(74, 158, 255, 0.1);
+  border-color: var(--accent-hover);
+}
+
+/* ============================================
+   BRACKET INFO POPUP
+   ============================================ */
+.bracket-group {
+  position: relative;
+}
+
+.bracket-help-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.bracket-help-link:hover {
+  text-decoration: underline;
+}
+
+.bracket-info-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  margin-top: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: popupFadeIn 0.2s ease;
+}
+
+@keyframes popupFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.bracket-info-content {
+  position: relative;
+  padding: 20px;
+}
+
+.bracket-info-content h4 {
+  color: var(--accent);
+  font-size: 1rem;
+  margin-bottom: 12px;
+}
+
+.popup-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.popup-close:hover {
+  color: var(--text-primary);
+}
+
+.popup-intro {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.bracket-info-content ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px 0;
+}
+
+.bracket-info-content li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.bracket-info-content li:last-child {
+  border-bottom: none;
+}
+
+.popup-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(74, 158, 255, 0.1);
+  border-radius: var(--radius-sm);
+}
+
+.hint.warning {
+  color: var(--warning);
+  background: rgba(255, 152, 0, 0.1);
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  margin-top: 8px;
+}
+
+/* ============================================
+   CONFIG TYPE BADGE
+   ============================================ */
+.config-type-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  margin-bottom: 20px;
+  border-left: 3px solid var(--accent);
+}
+
+.config-type-badge .type-label {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.config-type-badge .type-value {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+/* ============================================
+   SCHEME SELECTOR (inline cards)
+   ============================================ */
+.scheme-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.scheme-option {
+  background: var(--bg-primary);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.scheme-option:hover {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.05);
+}
+
+.scheme-option.selected {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.15);
+  box-shadow: 0 0 12px rgba(74, 158, 255, 0.2);
+}
+
+.scheme-option .scheme-icon {
+  font-size: 1.8rem;
+  margin-bottom: 8px;
+}
+
+.scheme-option .scheme-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.scheme-option.selected .scheme-label {
+  color: var(--accent);
+}
+
+.scheme-option .scheme-desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+/* ============================================
+   CAGE SELECTOR (horizontal cards)
+   ============================================ */
+.cage-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cage-option {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cage-option:hover {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.05);
+}
+
+.cage-option.selected {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.15);
+  box-shadow: 0 0 12px rgba(74, 158, 255, 0.2);
+}
+
+.cage-option .cage-icon {
+  font-size: 1.5rem;
+  min-width: 40px;
+  text-align: center;
+}
+
+.cage-option .cage-content {
+  flex: 1;
+}
+
+.cage-option .cage-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.cage-option.selected .cage-label {
+  color: var(--accent);
+}
+
+.cage-option .cage-desc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ============================================
+   RESPONSIVE
+   ============================================ */
+@media (max-width: 900px) {
+  .split-layout {
+    flex-direction: column;
+  }
+
+  .visualization-panel {
+    height: 40vh;
+    min-height: 250px;
+  }
+
+  .config-panel-wrapper {
+    width: 100%;
+    max-width: 100%;
+    flex: 1;
+  }
+
+  .choice-grid-fullscreen.cols-2,
+  .choice-grid-fullscreen.cols-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer3d-controls {
+    top: 5px;
+    right: 5px;
+  }
+
+  .viewer3d-visibility-btn {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  /* Scheme selector - stack on mobile */
+  .scheme-selector {
+    grid-template-columns: 1fr;
+  }
+
+  .scheme-option {
+    display: flex;
+    align-items: center;
+    text-align: left;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .scheme-option .scheme-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0;
+    min-width: 40px;
+    text-align: center;
+  }
+
+  .scheme-option .scheme-label {
+    margin-bottom: 2px;
+  }
+}
+
+/* Ostrzeżenie o przeszkodzie ponad ścianą */
+.obstacle-above-wall-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  margin-top: 12px;
+  animation: fadeIn 0.3s ease;
+}
+
+.obstacle-warning-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  color: #d97706;
+}
+
+.obstacle-warning-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.obstacle-warning-text {
+  color: #92400e;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Wall point obstacle type */
+.obstacle-type-card--wall-point:hover .wall-point-svg rect:nth-child(2) {
+  fill: #22c55e;
+  fill-opacity: 0.6;
+}
+
+.obstacle-badge.type-wall-point {
+  background: #22c55e;
+  color: white;
+}
+</style>
