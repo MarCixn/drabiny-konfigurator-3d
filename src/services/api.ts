@@ -375,7 +375,7 @@ export function calculateLocal(request: CalculateRequest): CalculateResponse {
     })
   }
 
-  if (request.scheme !== 'attic-passage') {
+  if (request.scheme !== 'attic-passage' && request.scheme !== 'none') {
     components.push({
       id: 'handrail',
       name: 'Poręcz bezpieczeństwa (para)',

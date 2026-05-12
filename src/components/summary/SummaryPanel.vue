@@ -55,7 +55,8 @@ const components = computed(() => {
       quantity: 1,
       unit: 'kpl.'
     })
-  } else {
+  } else if (configStore.config.scheme !== 'none') {
+    // Poręcze tylko dla drabin zewnętrznych (nie dla scheme 'none')
     list.push({
       id: '3',
       name: 'Poręcze asekuracyjne',

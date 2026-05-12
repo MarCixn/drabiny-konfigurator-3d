@@ -4,7 +4,7 @@
 
 export type LadderType = 'facade' | 'chimney'
 
-export type Scheme = 'with-platform' | 'no-platform'
+export type Scheme = 'none' | 'with-platform' | 'no-platform'
 
 export type CageOption = 'no-cage' | 'from-3m' | 'from-ground'
 

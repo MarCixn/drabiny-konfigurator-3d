@@ -10,7 +10,7 @@ const currentScreen = ref<'purpose' | 'params' | 'summary'>('purpose')
 
 const state = ref({
   purpose: '' as '' | 'internal' | 'external',
-  scheme: '' as '' | 'no-platform' | 'with-platform' | 'attic-passage',
+  scheme: '' as '' | 'none' | 'no-platform' | 'with-platform' | 'attic-passage',
   cage: '' as '' | 'no-cage' | 'with-cage',
   wallHeight: 5,
   bracketType: 'short' as 'short' | 'medium' | 'long' | 'none' | 'custom',
@@ -587,8 +587,8 @@ function goBack() {
 function selectPurpose(purpose: 'internal' | 'external') {
   state.value.purpose = purpose
   if (purpose === 'internal') {
-    // Wewnętrzna - domyślne ustawienia
-    state.value.scheme = 'no-platform'
+    // Wewnętrzna - bez poręczy i kosza
+    state.value.scheme = 'none'
     state.value.cage = 'no-cage'
   } else {
     // Zewnętrzna - domyślne ustawienia (użytkownik może zmienić w params)
@@ -3194,7 +3194,8 @@ function toggleCageClosing() {
                   <div class="summary-row">
                     <span class="label">Schemat:</span>
                     <span class="value">
-                      {{ state.scheme === 'no-platform' ? 'Klasyczna' :
+                      {{ state.scheme === 'none' ? 'Bez poręczy' :
+                         state.scheme === 'no-platform' ? 'Klasyczna' :
                          state.scheme === 'with-platform' ? 'Z podestem' : 'Przejście przez attykę' }}
                     </span>
                   </div>

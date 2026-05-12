@@ -285,7 +285,7 @@ export function useLadderCalculator() {
       })
     }
 
-    // Zakończenie drabiny
+    // Zakończenie drabiny (tylko dla drabin zewnętrznych - nie dla scheme 'none')
     if (scheme === 'with-platform') {
       components.push({
         id: `comp_${++id}`,
@@ -293,7 +293,7 @@ export function useLadderCalculator() {
         quantity: 1,
         unit: 'kpl.'
       })
-    } else {
+    } else if (scheme !== 'none') {
       components.push({
         id: `comp_${++id}`,
         name: 'Poręcze asekuracyjne',
