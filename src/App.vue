@@ -33,7 +33,7 @@ const state = ref({
   // PRZEJŚCIE PRZEZ ATTYKĘ (z oryginalnego konfiguratora)
   // ============================================
   // Strona zejścia
-  atticWallHeight: 0.2,              // Wysokość ściany zejścia (m) - domyślnie 20cm
+  atticWallHeight: 0.51,             // Wysokość ściany zejścia (m) - minimum 51cm
   atticMinDistance: 5,               // Dystans podest-attyka (cm) - domyślnie 5cm
   descentMountType: 'bigfoot' as 'bigfoot' | 'custom-base' | 'brackets' | 'self',
   descentBracketType: 'short' as 'short' | 'medium' | 'long',
@@ -2558,11 +2558,11 @@ function toggleCageClosing() {
                         type="number"
                         id="atticWallHeight"
                         v-model.number="state.atticWallHeight"
-                        :min="0"
+                        :min="0.51"
                         :max="atticWallHeightMax"
                         step="0.01"
                         class="form-input"
-                        placeholder="np. 0.5"
+                        placeholder="np. 0.6"
                       />
                       <span class="unit">m</span>
                     </div>
