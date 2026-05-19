@@ -13,11 +13,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Proxy do oryginalnego konfiguratora API
-      '/api': {
+      // Proxy do API drabiny (produkcja)
+      '/drabiny/api': {
         target: 'http://localhost',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '/drabiny_kalkulator/api')
+        changeOrigin: true
       },
       // Proxy do wizualizacji 3D (iframe)
       '/drabiny_3d': {

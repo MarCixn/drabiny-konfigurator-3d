@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { TransformControls } from 'three/addons/controls/TransformControls.js'
 
 // ============================================
 // PROPS - Configuration from parent component
@@ -48,6 +49,8 @@ const props = defineProps<{
   // Ocieplenie przedniej ściany (klasyczna/z podestem)
   hasInsulation?: boolean  // Czy jest ocieplenie przedniej ściany
   insulationThickness?: number  // Grubość ocieplenia w mm
+  // Ściana strony zejścia dla płaskiego/okapu
+  showDescentWall?: boolean  // Pokaż ścianę zejścia (dla płaskiego dachu)
 }>()
 
 // ============================================
@@ -105,6 +108,12 @@ const emit = defineEmits<{
     actualBrackets: number
     missingBrackets: number
     message: string
+  }): void
+  (e: 'debugObjectUpdated', data: {
+    id: string
+    position: { x: number; y: number; z: number }
+    rotation: { x: number; y: number; z: number }
+    scale?: { x: number; y: number; z: number }
   }): void
 }>()
 
@@ -178,45 +187,45 @@ const ladderGeometryConfig: Record<number, {
   }
 }> = {
   1: {
-    zOffset: 0,
+    zOffset: -3,  // Korekta -3mm
     rotationZ: 0,
     connector: {
       left: { x: Math.PI * 0.5, y: Math.PI, z: 0 },
       right: { x: Math.PI * 0.5, y: 0, z: 0 },
-      zOffset: 0,
-      uchwytZOffset: 0
+      zOffset: 3,  // Korekta +3mm (do przodu)
+      uchwytZOffset: 3  // Korekta +3mm (do przodu)
     },
     sciskane: {
       left: { x: Math.PI * 0.5, y: 0, z: Math.PI },
       right: { x: Math.PI * 0.5, y: Math.PI, z: Math.PI },
-      leftZOffset: -45,
-      rightZOffset: -45
+      leftZOffset: -42,  // -45 + 3mm korekta
+      rightZOffset: -42  // -45 + 3mm korekta
     },
     wspornik: {
       left: { x: 0, y: 0, z: 0 },
       right: { x: 0, y: Math.PI, z: 0 },
-      zOffset: -145
+      zOffset: -142  // -145 + 3mm korekta (do przodu)
     }
   },
   2: {
-    zOffset: -1070,
+    zOffset: -1070 - 3,  // Korekta -3mm
     rotationZ: Math.PI,
     connector: {
       left: { x: Math.PI * 1.5, y: Math.PI, z: 0 },
       right: { x: Math.PI * 1.5, y: 0, z: 0 },
-      zOffset: 0,
-      uchwytZOffset: 124
+      zOffset: -3,  // Korekta -3mm (do tyłu)
+      uchwytZOffset: 121  // 124 - 3mm korekta (do tyłu)
     },
     sciskane: {
       left: { x: Math.PI * 0.5, y: Math.PI, z: 0 },
       right: { x: Math.PI * 0.5, y: 0, z: 0 },
-      leftZOffset: 44,
-      rightZOffset: 44
+      leftZOffset: 41,  // 44 - 3mm korekta
+      rightZOffset: 41  // 44 - 3mm korekta
     },
     wspornik: {
       left: { x: 0, y: Math.PI, z: 0 },
       right: { x: 0, y: 0, z: 0 },
-      zOffset: 145
+      zOffset: 142  // 145 - 3mm korekta (do tyłu)
     }
   }
 }
@@ -249,6 +258,71 @@ let savedBackground: THREE.Color | null = null
 let debugMode = false
 let debugObjects: THREE.Object3D[] = []
 
+// Debug editor state
+interface DebugObject {
+  id: string
+  name: string
+  type: 'model' | 'box' | 'existing'
+  object: THREE.Object3D
+  position: { x: number; y: number; z: number }
+  rotation: { x: number; y: number; z: number }
+  scale: { x: number; y: number; z: number }
+  color?: string
+  dimensions?: { width: number; height: number; depth: number }
+}
+let debugEditorObjects: DebugObject[] = []
+let debugObjectIdCounter = 0
+let selectedDebugObject: DebugObject | null = null
+
+// Transform controls (CAD-like gizmo)
+let transformControls: TransformControls | null = null
+let transformMode: 'translate' | 'rotate' | 'scale' = 'translate'
+let transformControlsEnabled = false
+
+// Undo/Redo history
+interface HistoryAction {
+  type: 'move' | 'delete' | 'add'
+  objectId: string
+  objectData?: {
+    name: string
+    type: 'model' | 'box' | 'existing'
+    object: THREE.Object3D
+    position: { x: number; y: number; z: number }
+    rotation: { x: number; y: number; z: number }
+    scale: { x: number; y: number; z: number }
+    color?: string
+    dimensions?: { width: number; height: number; depth: number }
+  }
+  previousPosition?: { x: number; y: number; z: number }
+  previousRotation?: { x: number; y: number; z: number }
+  newPosition?: { x: number; y: number; z: number }
+  newRotation?: { x: number; y: number; z: number }
+}
+let undoStack: HistoryAction[] = []
+let redoStack: HistoryAction[] = []
+const MAX_HISTORY = 50
+let isUndoingOrRedoing = false
+let lastRecordedPosition: { x: number; y: number; z: number } | null = null
+let lastRecordedRotation: { x: number; y: number; z: number } | null = null
+
+// Align mode (Fusion-style snap/align)
+let alignMode = false
+let alignStep: 'select-face' | 'select-target' | 'done' = 'done'
+let alignSelectedFace: { axis: 'x' | 'y' | 'z'; side: 'min' | 'max'; position: number } | null = null
+let alignFaceHelper: THREE.Mesh | null = null  // Visual helper for selected face
+let alignPreviewSphere: THREE.Mesh | null = null  // Snap point preview sphere
+let alignCurrentSnapPoint: THREE.Vector3 | null = null  // Current snap point from preview (world coords)
+
+// Extrude mode (Fusion-style push/pull)
+let extrudeMode = false
+let extrudeActive = false  // Is currently dragging to extrude
+let extrudeFace: { axis: 'x' | 'y' | 'z'; side: 'min' | 'max' } | null = null
+let extrudeStartPoint: THREE.Vector3 | null = null
+let extrudeStartSize: { x: number; y: number; z: number } | null = null
+let extrudeStartPos: { x: number; y: number; z: number } | null = null
+let extrudeFaceHelper: THREE.Mesh | null = null
+let extrudeAxisHelper: THREE.Line | null = null
+
 // Model material with texture
 let modelMaterial: THREE.MeshStandardMaterial
 let galvanizedTexture: THREE.Texture | null = null
@@ -267,12 +341,15 @@ let outlineDelayTimer: ReturnType<typeof setTimeout> | null = null
 let isDragging = false
 let isPanning = false
 let previousPosition = { x: 0, y: 0 }
-let targetRotation = { x: 0, y: 0.3 }
-let currentRotation = { x: 0, y: 0.3 }
+let targetRotation = { x: 0.35, y: -0.785 }
+let currentRotation = { x: 0.35, y: -0.785 }
 let cameraOffset = { x: 0, y: 0, z: 0 }
 let initialPinchDistance: number | null = null
-let lastZoom = 50
+let lastZoom = 80
 let lastPanCenter = { x: 0, y: 0 }
+let needsRender = true  // Flag for on-demand rendering
+let isAnimating = false // Flag for smooth rotation animation
+let animationFrameId: number | null = null
 let clickStartPosition = { x: 0, y: 0 }
 let clickStartTime = 0
 const CLICK_THRESHOLD = 5
@@ -345,6 +422,7 @@ let sciskaneHandles2: Array<{
 let globalWspornikDistance2 = 215
 let defaultWspornik2 = 'krotki'
 let wspornikDisabled2 = false
+let descentLadderZPosition = 0  // Z position of descent ladder in brackets mode
 
 // Safety cage state
 let safetyCageCount1 = 0
@@ -391,6 +469,7 @@ let obstaclesFromConfigurator: Array<{ id: number; bottomHeightMm: number; heigh
 // Green collision boxes (wspornik positions)
 let greenCollisionBoxes: THREE.Object3D[] = []
 let savedGreenBoxPositions: Record<number, { y: number; z: number; type: string }> = {}
+let savedGreenBoxPositions2: Record<number, { y: number; z: number; type: string }> = {}  // For ladder 2 (descent)
 
 // Collision tracking
 let obstacleCollisions: number[] = []  // pairIndex of connectors colliding with obstacles
@@ -492,13 +571,19 @@ onMounted(() => {
   loadTextures()
   loadModels()
   setupControls()
-  animate()
+  requestRender() // Initial render (on-demand rendering system)
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
   isDisposed = true
   window.removeEventListener('resize', handleResize)
+
+  // Cancel pending animation frame
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
 
   if (renderer) {
     renderer.dispose()
@@ -527,7 +612,9 @@ watch(() => [
   props.restingPlatform,
   props.distanceFromGround,
   props.showWsporniki,
-  props.eave
+  props.eave,
+  props.descentLadder,
+  props.descentMountType
 ], () => {
   syncPropsToState()
   if (modelsLoaded) {
@@ -541,6 +628,19 @@ watch(() => props.obstacles, () => {
     createLadder()
   }
 }, { deep: true })
+
+// Auto-scale camera zoom based on wall height (55 for 3m, 80 for 5m)
+watch(() => props.wallHeight, (newHeight) => {
+  if (perspectiveCamera && newHeight > 0) {
+    // Linear: 3m→55, 5m→80 (12.5 per meter)
+    const scaledZoom = 17.5 + newHeight * 12.5
+    // Clamp between 40 and 200
+    const clampedZoom = Math.max(40, Math.min(200, scaledZoom))
+    perspectiveCamera.position.z = clampedZoom
+    lastZoom = clampedZoom
+    requestRender() // Render after zoom change
+  }
+}, { immediate: true })
 
 // ============================================
 // SYNC PROPS TO INTERNAL STATE
@@ -591,8 +691,28 @@ function syncPropsToState() {
     }
   }
 
+  // Remove sciskane handles that are outside the current ladder height
+  removeOutOfBoundsSciskaneHandles(1)
+  if (props.descentMountType === 'brackets' && props.descentLadder) {
+    removeOutOfBoundsSciskaneHandles(2)
+  }
+
   // Auto-add sciskane handle for final ladders x4-x7 (between last two rungs)
   autoAddSciskaneForKoncowa(finalLadderRungs1, 1)
+
+  // Auto-add sciskane handle for descent ladder (ladder 2) in brackets mode
+  if (props.descentMountType === 'brackets' && props.descentLadder) {
+    const descentEndRungs = props.descentLadder.endLadderRungs || 0
+    // If no end section (x4-x7), clear all sciskane handles for ladder 2
+    if (descentEndRungs === 0 || (descentEndRungs !== 4 && descentEndRungs !== 5 && descentEndRungs !== 6 && descentEndRungs !== 7)) {
+      sciskaneHandles2.length = 0  // Clear all handles - no place for them without end section
+    } else {
+      autoAddSciskaneForKoncowa(descentEndRungs, 2)
+    }
+  } else {
+    // Clean up all sciskane handles when not in brackets mode
+    sciskaneHandles2.length = 0
+  }
 }
 
 // ============================================
@@ -608,7 +728,7 @@ function initScene() {
   // Cameras
   const aspect = container.clientWidth / container.clientHeight
   perspectiveCamera = new THREE.PerspectiveCamera(60, aspect, 0.1, 500)
-  perspectiveCamera.position.set(0, 0, 50)
+  perspectiveCamera.position.set(0, 0, 80)
 
   // Orthographic camera for technical drawing mode
   const orthoSize = 30
@@ -666,6 +786,65 @@ function initScene() {
 
   // Raycaster for click detection
   raycaster = new THREE.Raycaster()
+
+  // Transform controls for debug editor (CAD-like gizmo)
+  transformControls = new TransformControls(camera, renderer.domElement)
+  transformControls.setSize(0.8)
+  transformControls.setSpace('local')  // Axes relative to object/ladder container
+  transformControls.enabled = false
+  const transformHelper = transformControls.getHelper()
+  transformHelper.visible = false
+  scene.add(transformHelper)
+
+  // Update debug object position when transform controls change
+  transformControls.addEventListener('change', () => {
+    if (selectedDebugObject && transformControls) {
+      const obj = selectedDebugObject.object
+      selectedDebugObject.position = {
+        x: obj.position.x / SCALE,
+        y: obj.position.y / SCALE,
+        z: obj.position.z / SCALE
+      }
+      selectedDebugObject.rotation = {
+        x: obj.rotation.x * 180 / Math.PI,
+        y: obj.rotation.y * 180 / Math.PI,
+        z: obj.rotation.z * 180 / Math.PI
+      }
+      // Emit update event
+      emit('debugObjectUpdated', {
+        id: selectedDebugObject.id,
+        position: selectedDebugObject.position,
+        rotation: selectedDebugObject.rotation
+      })
+    }
+  })
+
+  // Disable camera rotation while using transform controls + record history
+  transformControls.addEventListener('dragging-changed', (event) => {
+    const isDragging = (event as { value: boolean }).value
+    transformControlsEnabled = isDragging
+
+    if (selectedDebugObject) {
+      if (isDragging) {
+        // Start dragging - save current position for undo
+        lastRecordedPosition = { ...selectedDebugObject.position }
+        lastRecordedRotation = { ...selectedDebugObject.rotation }
+      } else {
+        // End dragging - record move action if position changed
+        if (lastRecordedPosition && lastRecordedRotation) {
+          recordMoveAction(
+            selectedDebugObject.id,
+            lastRecordedPosition,
+            lastRecordedRotation,
+            selectedDebugObject.position,
+            selectedDebugObject.rotation
+          )
+        }
+        lastRecordedPosition = null
+        lastRecordedRotation = null
+      }
+    }
+  })
 }
 
 // ============================================
@@ -701,10 +880,11 @@ function setupControls() {
     previousPosition = { x, y }
     clickStartPosition = { x, y }
     clickStartTime = Date.now()
+    startAnimation() // Start render loop when dragging begins
   }
 
   function onPointerMove(x: number, y: number) {
-    if (!isDragging || isTechDrawingMode) return
+    if (!isDragging || isTechDrawingMode || transformControlsEnabled) return
 
     const deltaX = x - previousPosition.x
     const deltaY = y - previousPosition.y
@@ -713,10 +893,15 @@ function setupControls() {
     targetRotation.x += deltaY * 0.005
 
     previousPosition = { x, y }
+    requestRender() // Request render on each movement
   }
 
   function onPointerEnd() {
     isDragging = false
+    // Continue animation for smooth deceleration
+    if (isAnimating) {
+      scheduleFrame()
+    }
   }
 
   function handlePotentialClick(x: number, y: number) {
@@ -774,8 +959,84 @@ function setupControls() {
       return
     }
 
-    // Sciskane mode - click on preview to add new handle
+    // Align mode - two step process
+    if (alignMode && selectedDebugObject) {
+      const intersects = raycaster.intersectObjects(ladderContainer.children, true)
+
+      for (const intersect of intersects) {
+        const obj = intersect.object
+        if (obj.userData.isMeasureObject) continue
+        if (obj.userData.isOutline) continue
+        if (!obj.visible) continue
+        if (obj === alignFaceHelper) continue  // Skip the helper plane
+
+        // Check if clicking on selected object (for face selection)
+        let isSelectedObj = false
+        let checkObj: THREE.Object3D | null = obj
+        while (checkObj) {
+          if (checkObj === selectedDebugObject.object) {
+            isSelectedObj = true
+            break
+          }
+          checkObj = checkObj.parent
+        }
+
+        if (alignStep === 'select-face') {
+          // Step 1: Select face on the object
+          if (isSelectedObj) {
+            handleAlignFaceSelection(intersect.point, intersect.face?.normal || null, intersect.object)
+            return
+          }
+        } else if (alignStep === 'select-target') {
+          // Step 2: Select target point (skip selected object)
+          if (isSelectedObj) continue
+
+          // Use the stored snap point from preview (more accurate than recalculating)
+          // This ensures the alignment uses exactly the point shown by the preview sphere
+          if (alignCurrentSnapPoint) {
+            performAlignment(alignCurrentSnapPoint)
+          } else {
+            // Fallback: calculate snap point if not available
+            const snapPoint = findSnapPoint(intersect.point, intersect.object)
+            performAlignment(snapPoint || intersect.point)
+          }
+          alignCurrentSnapPoint = null
+          return
+        }
+      }
+      return
+    }
+
+    // Extrude mode - click to start extruding a face
+    if (extrudeMode && selectedDebugObject && !extrudeActive) {
+      const intersects = raycaster.intersectObjects(ladderContainer.children, true)
+
+      for (const intersect of intersects) {
+        const obj = intersect.object
+        if (obj.userData.isMeasureObject) continue
+        if (obj.userData.isOutline) continue
+        if (!obj.visible) continue
+        if (obj === extrudeFaceHelper || obj === extrudeAxisHelper) continue
+
+        if (handleExtrudeMouseDown(event as MouseEvent, intersect)) {
+          return
+        }
+      }
+      return
+    }
+
+    // Sciskane mode - compare distances to find closest clickable object
     if (sciskaneMode) {
+      // Collect all potential hits with their distances
+      type ClickCandidate = {
+        type: 'preview' | 'placed' | 'connector' | 'wspornik'
+        distance: number
+        obj: THREE.Object3D
+        intersect: THREE.Intersection
+      }
+      const candidates: ClickCandidate[] = []
+
+      // Check sciskane preview objects (green models)
       const previewIntersects = raycaster.intersectObjects(sciskanePreviewObjects, true)
       for (const intersect of previewIntersects) {
         let obj = intersect.object as THREE.Object3D
@@ -783,24 +1044,65 @@ function setupControls() {
           obj = obj.parent
         }
         if (obj.userData.isSciskanePreview) {
-          addSciskaneHandle(obj.userData.previewY, obj.userData.ladderNum || 1)
-          return
+          candidates.push({ type: 'preview', distance: intersect.distance, obj, intersect })
+          break
         }
       }
-      // Don't return - continue to check existing handles
-    }
 
-    // Always check for existing sciskane handles (can be edited anytime in sciskane mode)
-    if (sciskaneMode && sciskanePlacedObjects.length > 0) {
-      const placedIntersects = raycaster.intersectObjects(sciskanePlacedObjects, true)
-      for (const intersect of placedIntersects) {
+      // Check placed sciskane handles
+      if (sciskanePlacedObjects.length > 0) {
+        const placedIntersects = raycaster.intersectObjects(sciskanePlacedObjects, true)
+        for (const intersect of placedIntersects) {
+          let obj = intersect.object as THREE.Object3D
+          while (obj.parent && !obj.userData.isSciskanePlaced) {
+            obj = obj.parent
+          }
+          if (obj.userData.isSciskanePlaced) {
+            candidates.push({ type: 'placed', distance: intersect.distance, obj, intersect })
+            break
+          }
+        }
+      }
+
+      // Check connectors
+      const connIntersects = raycaster.intersectObjects(connectorObjects, true)
+      for (const intersect of connIntersects) {
         let obj = intersect.object as THREE.Object3D
-        while (obj.parent && !obj.userData.isSciskanePlaced) {
+        while (obj.parent && connectorObjects.indexOf(obj) === -1) {
           obj = obj.parent
         }
-        if (obj.userData.isSciskanePlaced) {
-          const offsetFromBottom = obj.userData.offsetFromBottom
-          const ladderNum = obj.userData.ladderNum || 1
+        if (obj.userData.isConnector) {
+          candidates.push({ type: 'connector', distance: intersect.distance, obj, intersect })
+          break
+        }
+      }
+
+      // Check wsporniki
+      const wspIntersects = raycaster.intersectObjects(wspornikObjects, true)
+      for (const intersect of wspIntersects) {
+        let obj = intersect.object as THREE.Object3D
+        while (obj.parent && wspornikObjects.indexOf(obj) === -1) {
+          obj = obj.parent
+        }
+        if (obj.userData.isWspornik) {
+          candidates.push({ type: 'wspornik', distance: intersect.distance, obj, intersect })
+          break
+        }
+      }
+
+      // Sort by distance and handle the closest one
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.distance - b.distance)
+        const closest = candidates[0]
+
+        if (closest.type === 'preview') {
+          addSciskaneHandle(closest.obj.userData.previewY, closest.obj.userData.ladderNum || 1)
+          return
+        }
+
+        if (closest.type === 'placed') {
+          const offsetFromBottom = closest.obj.userData.offsetFromBottom
+          const ladderNum = closest.obj.userData.ladderNum || 1
           const handles = ladderNum === 1 ? sciskaneHandles1 : sciskaneHandles2
           const handle = handles.find(h => h.offsetFromBottom === offsetFromBottom)
           if (handle) {
@@ -814,31 +1116,19 @@ function setupControls() {
           }
           return
         }
-      }
-    }
 
-    // Check for mid-rung bracket or joint connectors (in sciskane mode)
-    if (sciskaneMode) {
-      // Check connectors for mid-rung bracket AND joint connectors
-      const connIntersects = raycaster.intersectObjects(connectorObjects, true)
-      for (const intersect of connIntersects) {
-        let obj = intersect.object as THREE.Object3D
-        // Find root model that is in connectorObjects array (has pairIndex set)
-        while (obj.parent && connectorObjects.indexOf(obj) === -1) {
-          obj = obj.parent
-        }
-        if (obj.userData.isConnector) {
+        if (closest.type === 'connector') {
+          const obj = closest.obj
           const ladderNum = obj.userData.ladderNum || 1
           const isMidRung = obj.userData.isMidRungBracket || false
           const pairIndex = obj.userData.pairIndex
 
           if (isMidRung) {
-            // Mid-rung bracket
             const connType = (ladderNum === 1) ? midRungBracketConnType1 : midRungBracketConnType2
             const wspornikType = (ladderNum === 1) ? midRungBracketWspornikType1 : midRungBracketWspornikType2
             const wspornikDistance = (ladderNum === 1) ? midRungBracketDistance1 : midRungBracketDistance2
             emit('editSciskaneHandle', {
-              offsetFromBottom: -1, // Special marker for mid-rung
+              offsetFromBottom: -1,
               ladderNum,
               connType,
               wspornikType,
@@ -846,7 +1136,6 @@ function setupControls() {
               isMidRung: true
             } as any)
           } else {
-            // Joint connector - read from arrays
             const connectorTypes = ladderNum === 1 ? connectorTypes1 : connectorTypes2
             const wspornikTypes = ladderNum === 1 ? wspornikTypes1 : wspornikTypes2
             const wspornikDistances = ladderNum === 1 ? wspornikDistances1 : wspornikDistances2
@@ -862,7 +1151,7 @@ function setupControls() {
               : (ladderNum === 1 ? globalWspornikDistance1 : globalWspornikDistance2)
 
             emit('editSciskaneHandle', {
-              offsetFromBottom: -1, // Special marker for joint connector
+              offsetFromBottom: -1,
               ladderNum,
               connType,
               wspornikType,
@@ -874,22 +1163,13 @@ function setupControls() {
           }
           return
         }
-      }
 
-      // Also check wsporniki in sciskane mode
-      const wspIntersects = raycaster.intersectObjects(wspornikObjects, true)
-      for (const intersect of wspIntersects) {
-        let obj = intersect.object as THREE.Object3D
-        // Find root model that is in wspornikObjects array (has pairIndex set)
-        while (obj.parent && wspornikObjects.indexOf(obj) === -1) {
-          obj = obj.parent
-        }
-        if (obj.userData.isWspornik) {
+        if (closest.type === 'wspornik') {
+          const obj = closest.obj
           const pairIndex = obj.userData.pairIndex
           const ladderNum = obj.userData.ladderNum || 1
           const isMidRung = obj.userData.isMidRungBracket || false
 
-          // Get data from arrays
           const connectorTypes = ladderNum === 1 ? connectorTypes1 : connectorTypes2
           const wspornikTypes = ladderNum === 1 ? wspornikTypes1 : wspornikTypes2
           const wspornikDistances = ladderNum === 1 ? wspornikDistances1 : wspornikDistances2
@@ -905,13 +1185,13 @@ function setupControls() {
             : (ladderNum === 1 ? globalWspornikDistance1 : globalWspornikDistance2)
 
           emit('editSciskaneHandle', {
-            offsetFromBottom: -1,  // Special marker for joint connector
+            offsetFromBottom: -1,
             ladderNum,
             connType,
             wspornikType,
             wspornikDistance,
             isMidRung,
-            isJointConnector: !isMidRung,  // Only joint connector if not midRung
+            isJointConnector: !isMidRung,
             pairIndex
           })
           return
@@ -1034,22 +1314,49 @@ function setupControls() {
 
   // Mouse events
   dom.addEventListener('mousedown', (e) => {
-    if (e.shiftKey || e.button === 1) {
-      // Shift or middle button = pan
+    if (e.shiftKey || e.button === 1 || (isTechDrawingMode && e.button === 0)) {
+      // Shift or middle button = pan, also left click in tech drawing mode
       isPanning = true
       previousPosition = { x: e.clientX, y: e.clientY }
       e.preventDefault()
+      startAnimation() // Start render loop for panning
     } else {
       onPointerStart(e.clientX, e.clientY)
     }
   })
 
   dom.addEventListener('mousemove', (e) => {
-    if (isTechDrawingMode) return  // Block in tech drawing mode
+    // Handle panning in tech drawing mode (ortho camera)
+    if (isTechDrawingMode) {
+      if (isPanning) {
+        const deltaX = e.clientX - previousPosition.x
+        const deltaY = e.clientY - previousPosition.y
+
+        // Pan ortho camera - adjust position based on current zoom level
+        const panScale = (orthoCamera.right - orthoCamera.left) / containerRef.value!.clientWidth
+        orthoCamera.position.x -= deltaX * panScale
+        orthoCamera.position.y += deltaY * panScale
+
+        previousPosition = { x: e.clientX, y: e.clientY }
+        requestRender() // Render during pan
+      }
+      return
+    }
 
     // Update measure preview when in measure mode
     if (measureMode && !isPanning && !isDragging) {
       updateMeasurePreview(e.clientX, e.clientY)
+    }
+
+    // Update align preview when in align mode (step 2 - select target)
+    if (alignMode && alignStep === 'select-target' && !isPanning && !isDragging) {
+      updateAlignPreview(e.clientX, e.clientY)
+    }
+
+    // Handle extrude dragging
+    if (extrudeActive && !isPanning) {
+      handleExtrudeMouseMove(e)
+      return
     }
 
     if (isPanning) {
@@ -1061,12 +1368,19 @@ function setupControls() {
       cameraOffset.y += deltaY * panScale
 
       previousPosition = { x: e.clientX, y: e.clientY }
+      startAnimation() // Render during pan
     } else {
       onPointerMove(e.clientX, e.clientY)
     }
   })
 
   dom.addEventListener('mouseup', (e) => {
+    // Handle extrude finish
+    if (extrudeActive) {
+      handleExtrudeMouseUp()
+      return
+    }
+
     if (!isPanning) {
       handlePotentialClick(e.clientX, e.clientY)
     }
@@ -1075,16 +1389,42 @@ function setupControls() {
   })
 
   dom.addEventListener('mouseleave', () => {
+    const wasInteracting = isPanning || isDragging
     isPanning = false
     onPointerEnd()
+    // Continue animation for smooth deceleration
+    if (wasInteracting && isAnimating) {
+      scheduleFrame()
+    }
   })
 
   // Wheel zoom
   dom.addEventListener('wheel', (e) => {
-    if (isTechDrawingMode) return  // Block in tech drawing mode
     e.preventDefault()
+
+    if (isTechDrawingMode) {
+      // Zoom ortho camera by adjusting the ortho size
+      const zoomFactor = 1 + e.deltaY * 0.001
+      const currentSize = orthoCamera.top
+
+      // Clamp zoom between 1 and 50
+      const newSize = Math.max(1, Math.min(50, currentSize * zoomFactor))
+
+      const container = containerRef.value!
+      const aspect = container.clientWidth / container.clientHeight
+
+      orthoCamera.left = -newSize * aspect
+      orthoCamera.right = newSize * aspect
+      orthoCamera.top = newSize
+      orthoCamera.bottom = -newSize
+      orthoCamera.updateProjectionMatrix()
+      requestRender() // Render after zoom
+      return
+    }
+
     perspectiveCamera.position.z *= (1 + e.deltaY * 0.001)
     perspectiveCamera.position.z = Math.max(3, Math.min(300, perspectiveCamera.position.z))
+    requestRender() // Render after zoom
   }, { passive: false })
 
   // Touch events
@@ -1135,6 +1475,8 @@ function setupControls() {
         camera.position.z = lastZoom * (1 + delta * 0.005)
         camera.position.z = Math.max(3, Math.min(300, camera.position.z))
       }
+
+      startAnimation() // Render during pinch/pan
     }
   }, { passive: false })
 
@@ -1335,6 +1677,43 @@ function removeAutoAddedSciskane(ladderNum: number): void {
 }
 
 /**
+ * Remove sciskane handles that are outside the current ladder height
+ * Called when ladder configuration changes (e.g., wall height decreased)
+ */
+function removeOutOfBoundsSciskaneHandles(ladderNum: number): void {
+  const handles = (ladderNum === 1) ? sciskaneHandles1 : sciskaneHandles2
+  const hiddenHandles = (ladderNum === 1) ? hiddenSciskaneHandles1 : []
+  const currentHeight = getTotalHeightForLadder(ladderNum)
+
+  // Margin from top - handles must be at least 100mm below the top
+  const maxOffset = currentHeight - 100
+
+  // Remove from main handles array
+  for (let i = handles.length - 1; i >= 0; i--) {
+    const handle = handles[i]
+    // Skip auto-added handles (they will be recalculated anyway)
+    if (handle.autoAdded) continue
+
+    const offset = handle.offsetFromBottom
+    if (offset > maxOffset || offset < 100) {
+      console.log(`[removeOutOfBoundsSciskane] Removing handle at offset ${offset} (max: ${maxOffset})`)
+      handles.splice(i, 1)
+    }
+  }
+
+  // Also remove from hidden handles array
+  for (let j = hiddenHandles.length - 1; j >= 0; j--) {
+    const handle = hiddenHandles[j]
+    if (handle.autoAdded) continue
+
+    const offset = handle.originalOffsetFromBottom || handle.offsetFromBottom
+    if (offset > maxOffset || offset < 100) {
+      hiddenHandles.splice(j, 1)
+    }
+  }
+}
+
+/**
  * Automatically add a sciskane handle for final ladders x4, x5, x6, x7, x7alt
  * between the last and second-to-last rungs
  */
@@ -1373,8 +1752,22 @@ function autoAddSciskaneForKoncowa(rungs: number | string, ladderNum: number): v
 }
 
 function getTotalHeightForLadder(ladderNum: number): number {
-  const x7Count = (ladderNum === 1) ? numX7Ladders1 : numX7Ladders2
-  const finalRungs = (ladderNum === 1) ? finalLadderRungs1 : finalLadderRungs2
+  let x7Count: number
+  let finalRungs: number | string
+
+  if (ladderNum === 1) {
+    x7Count = numX7Ladders1
+    finalRungs = finalLadderRungs1
+  } else {
+    // For ladder 2, check if we should use props.descentLadder (brackets mode) or internal variables (attic mode)
+    if (props.descentMountType === 'brackets' && props.descentLadder) {
+      x7Count = props.descentLadder.repeatLadder7 || 0
+      finalRungs = props.descentLadder.endLadderRungs || 0
+    } else {
+      x7Count = numX7Ladders2
+      finalRungs = finalLadderRungs2
+    }
+  }
 
   let total = x7Count * getLadderHeight(7)
   let sectionCount = x7Count
@@ -1396,8 +1789,23 @@ function getTotalHeightForLadder(ladderNum: number): number {
 }
 
 function getLadderSectionsForLadder(ladderNum: number): Array<{ rungs: number; type: string }> {
-  const x7Count = (ladderNum === 1) ? numX7Ladders1 : numX7Ladders2
-  const finalRungs = (ladderNum === 1) ? finalLadderRungs1 : finalLadderRungs2
+  let x7Count: number
+  let finalRungs: number | string
+
+  if (ladderNum === 1) {
+    x7Count = numX7Ladders1
+    finalRungs = finalLadderRungs1
+  } else {
+    // For ladder 2, check if we should use props.descentLadder (brackets mode) or internal variables (attic mode)
+    if (props.descentMountType === 'brackets' && props.descentLadder) {
+      x7Count = props.descentLadder.repeatLadder7 || 0
+      finalRungs = props.descentLadder.endLadderRungs || 0
+    } else {
+      x7Count = numX7Ladders2
+      finalRungs = finalLadderRungs2
+    }
+  }
+
   const sections: Array<{ rungs: number; type: string }> = []
 
   for (let i = 0; i < x7Count; i++) {
@@ -1648,6 +2056,7 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   model.userData.isWspornik = true
   model.userData.wspornikType = type
   model.userData.ladderNum = ladderNum
+  model.userData.side = side
   model.userData.isMidRungBracket = isMidRung
   model.userData.extraXOffset = extraXOffset
   model.userData.extraYOffset = extraYOffset
@@ -1656,6 +2065,7 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   model.traverse((child) => {
     child.userData.isWspornik = true
     child.userData.ladderNum = ladderNum
+    child.userData.side = side
     child.userData.isMidRungBracket = isMidRung
   })
 
@@ -2171,37 +2581,58 @@ function createGreenCollisionBoxes() {
 
   // Clear cached positions - always get fresh positions from wspornikObjects
   savedGreenBoxPositions = {}
+  savedGreenBoxPositions2 = {}
 
   const height1 = getTotalHeightForLadder(1)
   const height2 = getTotalHeightForLadder(2)
   const maxHeight = Math.max(height1, height2)
+  const isAtticMode = handrailType === 'attic'
 
   // === STEP 1: Get fresh positions from existing wspornikObjects ===
   for (const wsp of wspornikObjects) {
-    if (wsp.userData.isWspornik && wsp.userData.ladderNum === 1 && wsp.userData.side === 'left') {
+    if (wsp.userData.isWspornik && wsp.userData.side === 'left') {
       const pairIndex = wsp.userData.pairIndex
       const type = wsp.userData.wspornikType || 'krotki'
+      const ladderNum = wsp.userData.ladderNum || 1
+
       // Save position for this pairIndex
-      savedGreenBoxPositions[pairIndex] = {
-        y: wsp.position.y,
-        z: wsp.position.z,
-        type
+      if (ladderNum === 1) {
+        savedGreenBoxPositions[pairIndex] = {
+          y: wsp.position.y,
+          z: wsp.position.z,
+          type
+        }
+      } else if (ladderNum === 2) {
+        savedGreenBoxPositions2[pairIndex] = {
+          y: wsp.position.y,
+          z: wsp.position.z,
+          type
+        }
       }
     }
   }
 
-  // === STEP 2: Collect ALL pairIndex by traversing ladderContainer (like original) ===
-  const allPairIndices: number[] = []
+  // === STEP 2: Collect ALL pairIndex by traversing ladderContainer (for each ladder) ===
+  const pairIndicesLadder1: number[] = []
+  const pairIndicesLadder2: number[] = []
+
   ladderContainer.traverse((child) => {
     if (child.userData && child.userData.pairIndex !== undefined &&
         !child.userData.isGreenCollisionBox && !child.userData.isSciskaneWspornik) {
-      if (!allPairIndices.includes(child.userData.pairIndex)) {
-        allPairIndices.push(child.userData.pairIndex)
+      const ladderNum = child.userData.ladderNum || 1
+      if (ladderNum === 1) {
+        if (!pairIndicesLadder1.includes(child.userData.pairIndex)) {
+          pairIndicesLadder1.push(child.userData.pairIndex)
+        }
+      } else if (ladderNum === 2) {
+        if (!pairIndicesLadder2.includes(child.userData.pairIndex)) {
+          pairIndicesLadder2.push(child.userData.pairIndex)
+        }
       }
     }
   })
 
-  if (allPairIndices.length === 0) {
+  if (pairIndicesLadder1.length === 0 && pairIndicesLadder2.length === 0) {
     console.log('[ThreeCanvas] No joints found for green boxes')
   }
 
@@ -2218,32 +2649,38 @@ function createGreenCollisionBoxes() {
     side: THREE.DoubleSide
   })
 
-  for (const pairIndex of allPairIndices) {
+  // Helper function to create green box for a joint
+  const createGreenBoxForJoint = (
+    pairIndex: number,
+    ladderNum: number,
+    savedPositions: Record<number, { y: number; z: number; type: string }>,
+    wspornikTypesArr: string[],
+    globalDistance: number,
+    defaultWsp: string
+  ) => {
     // Skip top handrail connector (pairIndex=0) ONLY for 'safety' handrail type
-    // This is the handrail mount - not a wall bracket
-    // For 'platform' and 'none' pairIndex=0 is a normal section connector
     if (handrailType === 'safety' && pairIndex === 0) {
-      continue
+      return
     }
 
     // Get wspornik type for this pairIndex
-    const wspornikType = wspornikTypes1[pairIndex] || 'krotki'
+    const wspornikType = wspornikTypesArr[pairIndex] || defaultWsp
     const isLargerWspornik = wspornikType === 'sredni' || wspornikType === 'dlugi'
     const boxHeight = (boxHeightBase + (isLargerWspornik ? boxHeightExtra : 0)) * SCALE
     const yOffset = isLargerWspornik ? -20 * SCALE : 0
 
     // Check if we have saved position from wspornik
-    const savedPos = savedGreenBoxPositions[pairIndex]
+    const savedPos = savedPositions[pairIndex]
 
     if (savedPos) {
-      // Use saved position (yOffset is already baked into savedPos.y)
+      // Use saved position
       const boxGeometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth)
       const greenBox = new THREE.Mesh(boxGeometry, greenMaterial.clone())
       greenBox.position.set(0, savedPos.y, savedPos.z)
       greenBox.userData.isGreenCollisionBox = true
       greenBox.userData.pairIndex = pairIndex
       greenBox.userData.wspornikType = wspornikType
-      greenBox.userData.ladderNum = 1
+      greenBox.userData.ladderNum = ladderNum
       greenBox.visible = showDebugBboxes
 
       ladderContainer.add(greenBox)
@@ -2263,17 +2700,26 @@ function createGreenCollisionBoxes() {
 
       for (const conn of connectorObjects) {
         if (conn.userData && conn.userData.pairIndex === pairIndex &&
-            !conn.userData.isGreenCollisionBox && conn.userData.ladderNum === 1) {
+            !conn.userData.isGreenCollisionBox && conn.userData.ladderNum === ladderNum) {
           connY = conn.position.y
           break
         }
       }
 
       if (connY !== null) {
-        // Calculate Z position (close to wall where wspornik would be)
+        // Calculate Z position based on ladder number
         const wallThickness = 250
-        const wallZ = -(globalWspornikDistance1 + (wallThickness / 2) + 33)
-        const wspornikZ = (wallZ + wallThickness / 2 + 150) * SCALE
+        const geoConfig = ladderGeometryConfig[ladderNum]
+        let wspornikZ: number
+
+        if (ladderNum === 1) {
+          const wallZ = -(globalDistance + (wallThickness / 2) + 33)
+          wspornikZ = (wallZ + wallThickness / 2 + 150) * SCALE
+        } else {
+          // Ladder 2 - wsporniki go in opposite direction (positive Z)
+          const wallZ = geoConfig.zOffset + globalDistance + (wallThickness / 2) + 33
+          wspornikZ = (wallZ - wallThickness / 2 - 150) * SCALE
+        }
 
         const boxGeometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth)
         const greenBox = new THREE.Mesh(boxGeometry, greenMaterial.clone())
@@ -2281,11 +2727,11 @@ function createGreenCollisionBoxes() {
         greenBox.userData.isGreenCollisionBox = true
         greenBox.userData.pairIndex = pairIndex
         greenBox.userData.wspornikType = wspornikType
-        greenBox.userData.ladderNum = 1
+        greenBox.userData.ladderNum = ladderNum
         greenBox.visible = showDebugBboxes
 
         // Save calculated position for future rebuilds
-        savedGreenBoxPositions[pairIndex] = {
+        savedPositions[pairIndex] = {
           y: connY + yOffset,
           z: wspornikZ,
           type: wspornikType
@@ -2303,6 +2749,25 @@ function createGreenCollisionBoxes() {
           greenCollisionBoxes.push(wireframe)
         }
       }
+    }
+  }
+
+  // Create green boxes for ladder 1
+  for (const pairIndex of pairIndicesLadder1) {
+    createGreenBoxForJoint(
+      pairIndex, 1, savedGreenBoxPositions,
+      wspornikTypes1, globalWspornikDistance1, defaultWspornik1
+    )
+  }
+
+  // Create green boxes for ladder 2 (in attic mode OR when descent mount type is 'brackets')
+  const shouldCreateGreenBoxesForLadder2 = isAtticMode || props.descentMountType === 'brackets'
+  if (shouldCreateGreenBoxesForLadder2) {
+    for (const pairIndex of pairIndicesLadder2) {
+      createGreenBoxForJoint(
+        pairIndex, 2, savedGreenBoxPositions2,
+        wspornikTypes2, globalWspornikDistance2, defaultWspornik2
+      )
     }
   }
 
@@ -2389,6 +2854,54 @@ function createGreenCollisionBoxes() {
       wireframe.position.copy(greenBox.position)
       ladderContainer.add(wireframe)
       greenCollisionBoxes.push(wireframe)
+    }
+  }
+
+  // === STEP 6: Create green boxes for sciskane handles D2 (only in attic mode) ===
+  if (isAtticMode) {
+    for (let i = 0; i < sciskaneHandles2.length; i++) {
+      const handle = sciskaneHandles2[i]
+      if (handle.hiddenByCollision) continue
+
+      const handleY = (maxHeight / 2) - height2 + handle.offsetFromBottom
+      const wspType = handle.wspornikType || defaultWspornik2
+      const isLong = wspType === 'sredni' || wspType === 'dlugi'
+      const boxH = (isLong ? 215 : 180) * SCALE
+      const yOff = isLong ? -18 * SCALE : 0
+
+      // Position Z for ladder 2 (opposite side)
+      const wallThickness = 250
+      const geoConfig2 = ladderGeometryConfig[2]
+      const wallZ2 = geoConfig2.zOffset + globalWspornikDistance2 + (wallThickness / 2) + 33
+      const boxZ2 = (wallZ2 - wallThickness / 2 - 100) * SCALE
+
+      const boxGeometry = new THREE.BoxGeometry(120 * SCALE, boxH, 200 * SCALE)
+      const sciskaneMaterial = new THREE.MeshBasicMaterial({
+        color: 0x66ff66,
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.DoubleSide
+      })
+      const greenBox = new THREE.Mesh(boxGeometry, sciskaneMaterial)
+      greenBox.position.set(0, handleY * SCALE + yOff, boxZ2)
+      greenBox.userData.isGreenCollisionBox = true
+      greenBox.userData.isSciskaneBox = true
+      greenBox.userData.sciskaneIndex = i
+      greenBox.userData.wspornikType = wspType
+      greenBox.userData.ladderNum = 2
+      greenBox.visible = showDebugBboxes
+
+      ladderContainer.add(greenBox)
+      greenCollisionBoxes.push(greenBox)
+
+      if (showDebugBboxes) {
+        const edges = new THREE.EdgesGeometry(boxGeometry)
+        const edgesMat = new THREE.LineBasicMaterial({ color: 0x66ff66, linewidth: 2 })
+        const wireframe = new THREE.LineSegments(edges, edgesMat)
+        wireframe.position.copy(greenBox.position)
+        ladderContainer.add(wireframe)
+        greenCollisionBoxes.push(wireframe)
+      }
     }
   }
 }
@@ -3286,8 +3799,13 @@ function renderSciskaneHandles() {
     }
   }
 
-  // Render for ladder 2 (attic mode)
-  if (handrailType === 'attic') {
+  // Render for ladder 2 (attic mode or brackets mode)
+  const shouldRenderLadder2Handles = handrailType === 'attic' || (props.descentMountType === 'brackets' && props.descentLadder)
+  if (shouldRenderLadder2Handles) {
+    // Use correct Z base position depending on mode
+    const isBracketsMode = props.descentMountType === 'brackets' && props.descentLadder
+    const baseZForLadder2 = isBracketsMode ? descentLadderZPosition : ladderGeometryConfig[2].zOffset
+
     for (const handle of sciskaneHandles2) {
       const yPos = (maxHeight / 2) - (height2 - handle.offsetFromBottom)
       const geoConfig = ladderGeometryConfig[2]
@@ -3296,7 +3814,7 @@ function renderSciskaneHandles() {
       const leftConn = createConnector(connType, 'left', 2, false)
       leftConn.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
       leftConn.position.y = yPos * SCALE
-      leftConn.position.z = (geoConfig.sciskane.leftZOffset + geoConfig.zOffset) * SCALE
+      leftConn.position.z = (geoConfig.sciskane.leftZOffset + baseZForLadder2) * SCALE
       leftConn.userData.isSciskaneHandle = true
       leftConn.userData.isSciskanePlaced = true
       leftConn.userData.offsetFromBottom = handle.offsetFromBottom
@@ -3307,13 +3825,47 @@ function renderSciskaneHandles() {
       const rightConn = createConnector(connType, 'right', 2, false)
       rightConn.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
       rightConn.position.y = yPos * SCALE
-      rightConn.position.z = (geoConfig.sciskane.rightZOffset + geoConfig.zOffset) * SCALE
+      rightConn.position.z = (geoConfig.sciskane.rightZOffset + baseZForLadder2) * SCALE
       rightConn.userData.isSciskaneHandle = true
       rightConn.userData.isSciskanePlaced = true
       rightConn.userData.offsetFromBottom = handle.offsetFromBottom
       rightConn.userData.ladderNum = 2
       ladderContainer.add(rightConn)
       sciskanePlacedObjects.push(rightConn)
+
+      // Wsporniki for sciskane handles on ladder 2
+      if (handle.wspornikType && handle.wspornikType !== 'none') {
+        const customDistance = handle.wspornikDistance || wspornikDefaultDistances[handle.wspornikType]
+        const defaultDist = wspornikDefaultDistances[handle.wspornikType]
+        const distanceOffset = customDistance - defaultDist
+        const distanceZOffset = distanceOffset  // Positive for ladder 2 (opposite direction)
+
+        const leftWsp = createWspornik(handle.wspornikType, 'left', 2, false)
+        if (leftWsp) {
+          leftWsp.position.x = (-RAIL_OFFSET + leftWsp.userData.extraXOffset) * SCALE
+          leftWsp.position.y = (yPos + leftWsp.userData.extraYOffset) * SCALE
+          leftWsp.position.z = (geoConfig.wspornik.zOffset + baseZForLadder2 + leftWsp.userData.extraZOffset + distanceZOffset) * SCALE
+          leftWsp.userData.isSciskaneWspornik = true
+          leftWsp.userData.isSciskanePlaced = true
+          leftWsp.userData.offsetFromBottom = handle.offsetFromBottom
+          leftWsp.userData.ladderNum = 2
+          ladderContainer.add(leftWsp)
+          sciskanePlacedObjects.push(leftWsp)
+        }
+
+        const rightWsp = createWspornik(handle.wspornikType, 'right', 2, false)
+        if (rightWsp) {
+          rightWsp.position.x = (RAIL_OFFSET - rightWsp.userData.extraXOffset) * SCALE
+          rightWsp.position.y = (yPos + rightWsp.userData.extraYOffset) * SCALE
+          rightWsp.position.z = (geoConfig.wspornik.zOffset + baseZForLadder2 + rightWsp.userData.extraZOffset + distanceZOffset) * SCALE
+          rightWsp.userData.isSciskaneWspornik = true
+          rightWsp.userData.isSciskanePlaced = true
+          rightWsp.userData.offsetFromBottom = handle.offsetFromBottom
+          rightWsp.userData.ladderNum = 2
+          ladderContainer.add(rightWsp)
+          sciskanePlacedObjects.push(rightWsp)
+        }
+      }
     }
   }
 }
@@ -3339,7 +3891,9 @@ function createLadder() {
 
   // Determine which ladders to render
   const laddersToRender = [1]
-  if (handrailType === 'attic') {
+  // Only add ladder 2 to laddersToRender for attic mode when NOT using brackets
+  // (brackets mode uses renderDescentLadderConnectors instead of renderConnectorsForLadder)
+  if (handrailType === 'attic' && props.descentMountType !== 'brackets') {
     laddersToRender.push(2)
   }
 
@@ -3380,6 +3934,9 @@ function createLadder() {
         model.position.y = yPos * SCALE
         model.position.z = geoConfig.zOffset * SCALE
         model.userData.ladderNum = ladderNum
+        model.userData.isLadderModule = true
+        model.userData.rungs = section.rungs
+        model.userData.moduleType = section.type // 'standard', 'alt', 'final'
 
         addOutlineToModel(model)
         ladderContainer.add(model)
@@ -3461,7 +4018,9 @@ function renderSafetyHandrails(totalHeight: number) {
     leftPorecz.rotation.set(Math.PI * 1.5, 0, Math.PI)
     leftPorecz.position.x = -RAIL_OFFSET * SCALE
     leftPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
-    leftPorecz.position.z = -245.5 * SCALE
+    leftPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
+    leftPorecz.userData.isHandrail = true
+    leftPorecz.userData.ladderNum = 1
     addOutlineToModel(leftPorecz)
     ladderContainer.add(leftPorecz)
 
@@ -3471,7 +4030,9 @@ function renderSafetyHandrails(totalHeight: number) {
     rightPorecz.rotation.set(Math.PI * 1.5, 0, Math.PI)
     rightPorecz.position.x = RAIL_OFFSET * SCALE
     rightPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
-    rightPorecz.position.z = -245.5 * SCALE
+    rightPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
+    rightPorecz.userData.isHandrail = true
+    rightPorecz.userData.ladderNum = 1
     addOutlineToModel(rightPorecz)
     ladderContainer.add(rightPorecz)
   }
@@ -3490,7 +4051,7 @@ function renderPlatformHandrails(totalHeight: number) {
     leftPorecz.rotation.set(Math.PI * 1.5, 0, Math.PI)
     leftPorecz.position.x = -RAIL_OFFSET * SCALE
     leftPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
-    leftPorecz.position.z = -245.5 * SCALE
+    leftPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
     addOutlineToModel(leftPorecz)
     ladderContainer.add(leftPorecz)
 
@@ -3499,7 +4060,7 @@ function renderPlatformHandrails(totalHeight: number) {
     rightPorecz.rotation.set(Math.PI * 1.5, 0, Math.PI)
     rightPorecz.position.x = RAIL_OFFSET * SCALE
     rightPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
-    rightPorecz.position.z = -245.5 * SCALE
+    rightPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
     addOutlineToModel(rightPorecz)
     ladderContainer.add(rightPorecz)
   }
@@ -3511,7 +4072,7 @@ function renderPlatformHandrails(totalHeight: number) {
     podest.rotation.set(Math.PI * 1.5, 0, 0)
     podest.position.x = 0
     podest.position.y = (topOfLadder + DIMS.handrailVertical / 2 - 536) * SCALE
-    podest.position.z = -245.5 * SCALE
+    podest.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
     addOutlineToModel(podest)
     ladderContainer.add(podest)
   }
@@ -3529,7 +4090,7 @@ function renderAtticPassage(totalHeight: number) {
     attyka.rotation.set(Math.PI * 1.5, 0, 0)
     attyka.position.x = 0
     attyka.position.y = (topOfMainRails + DIMS.atticRailHeight / 2) * SCALE
-    attyka.position.z = -535 * SCALE
+    attyka.position.z = (-535 - 3) * SCALE  // Korekta -3mm
     attyka.userData.ladderNum = 0
     addOutlineToModel(attyka)
     ladderContainer.add(attyka)
@@ -3541,7 +4102,7 @@ function renderAtticPassage(totalHeight: number) {
     krata.rotation.set(Math.PI * 1.5, 0, 0)
     krata.position.x = 0
     krata.position.y = (topOfMainRails + DIMS.atticRailHeight / 2 - 430) * SCALE
-    krata.position.z = -535 * SCALE
+    krata.position.z = (-535 - 3) * SCALE  // Korekta -3mm
     krata.userData.ladderNum = 0
     addOutlineToModel(krata)
     ladderContainer.add(krata)
@@ -3550,8 +4111,8 @@ function renderAtticPassage(totalHeight: number) {
   // BIGFOOT - renderuj gdy typ montażu zejścia to bigfoot
   if (props.descentMountType === 'bigfoot') {
     // Stała pozycja Z (bigfoot nie przesuwa się z drabiną)
-    // Oryginalna formuła: -(215 + 250 + 33 + 250 + 1000 - 678) = -1070
-    const bigfootZ = -1070
+    // Oryginalna formuła: -(215 + 250 + 33 + 250 + 1000 - 678) = -1070, + korekta -3mm
+    const bigfootZ = -1070 - 3
     
     // Oblicz pozycję na szczycie ściany zejścia (dachu)
     const atticDist = props.atticPlatformDistance ?? 0
@@ -3615,9 +4176,13 @@ function renderAtticPassage(totalHeight: number) {
         ladder.position.y = ladderCenterY * SCALE
         ladder.position.z = bigfootZ * SCALE
         ladder.userData.isDescentLadder = true
+        ladder.userData.ladderNum = 2
+        ladder.userData.isLadderModule = true
+        ladder.userData.rungs = descentRungs
+        ladder.userData.moduleType = 'final'
         addOutlineToModel(ladder)
         ladderContainer.add(ladder)
-        
+
         // Łączniki dla drabiny zejścia (para L+P) - pozycja absolutna
         if (loadedModels.lacznik) {
           const connectorY = topOfMainRails + 46 - 52  // Na wysokości góry drabiny zejścia - 52mm
@@ -3649,8 +4214,8 @@ function renderAtticPassage(totalHeight: number) {
   }
   // CUSTOM-BASE - własne podłoże (bloczki + drabina i łączniki)
   if (props.descentMountType === 'custom-base') {
-    // Stała pozycja Z (tak samo jak bigfoot)
-    const customBaseZ = -1070
+    // Stała pozycja Z (tak samo jak bigfoot) + korekta -3mm
+    const customBaseZ = -1070 - 3
 
     // Oblicz pozycję dachu (szczyt ściany zejścia)
     const atticDist = props.atticPlatformDistance ?? 0
@@ -3701,6 +4266,10 @@ function renderAtticPassage(totalHeight: number) {
         ladder.position.y = ladderCenterY * SCALE
         ladder.position.z = customBaseZ * SCALE
         ladder.userData.isDescentLadder = true
+        ladder.userData.ladderNum = 2
+        ladder.userData.isLadderModule = true
+        ladder.userData.rungs = descentRungs
+        ladder.userData.moduleType = 'final'
         addOutlineToModel(ladder)
         ladderContainer.add(ladder)
 
@@ -3746,10 +4315,21 @@ function renderDescentLadderFull(totalHeight: number) {
   const { repeatLadder7, endLadderRungs } = props.descentLadder
   
   // Pozycja Z - za ścianą zejścia
-  const wallThickness = 250
-  const wallZ = -(globalWspornikDistance1 + wallThickness / 2 + 33)
-  const descentLadderZ = wallZ - wallThickness - 447  // 10cm + 347mm za ścianą zejścia
-  
+  // Dla brackets: stała pozycja Z (nie przesuwa się z drabiną wejściową)
+  // Dla self: pozycja zależy od wsporników drabiny wejściowej
+  let descentLadderZ: number
+  if (props.descentMountType === 'brackets') {
+    // Stała pozycja Z -1070 - 3mm korekta (jak bigfoot)
+    descentLadderZ = -1070 - 3
+  } else {
+    const wallThickness = 250
+    const wallZ = -(globalWspornikDistance1 + wallThickness / 2 + 33)
+    descentLadderZ = wallZ - wallThickness - 447 - 3  // 10cm + 347mm za ścianą zejścia + korekta -3mm
+  }
+
+  // Save Z position for use in renderSciskaneHandles
+  descentLadderZPosition = descentLadderZ
+
   // Pozycja Y - punkt startowy (góra drabiny zejścia)
   const topOfMainRails = totalHeight / 2
   const ladderStartY = topOfMainRails - 91  // 3mm pod przełazem + korekty
@@ -3768,6 +4348,10 @@ function renderDescentLadderFull(totalHeight: number) {
       ladder.position.y = x7CenterY * SCALE
       ladder.position.z = descentLadderZ * SCALE
       ladder.userData.isDescentLadder = true
+      ladder.userData.ladderNum = 2
+      ladder.userData.isLadderModule = true
+      ladder.userData.rungs = 7
+      ladder.userData.moduleType = 'standard'
       addOutlineToModel(ladder)
       ladderContainer.add(ladder)
     }
@@ -3794,8 +4378,196 @@ function renderDescentLadderFull(totalHeight: number) {
     endLadder.position.y = endLadderY * SCALE
     endLadder.position.z = descentLadderZ * SCALE
     endLadder.userData.isDescentLadder = true
+    endLadder.userData.ladderNum = 2
+    endLadder.userData.isLadderModule = true
+    endLadder.userData.rungs = endLadderRungs
+    endLadder.userData.moduleType = 'final'
     addOutlineToModel(endLadder)
     ladderContainer.add(endLadder)
+  }
+
+  // Uchwyty i wsporniki dla brackets mode (lustrzane odbicie strony wejścia)
+  if (props.descentMountType === 'brackets') {
+    renderDescentLadderConnectors(totalHeight, descentLadderZ, repeatLadder7, endLadderRungs)
+  }
+}
+
+// ============================================
+// RENDER DESCENT LADDER CONNECTORS (dla brackets)
+// ============================================
+function renderDescentLadderConnectors(
+  totalHeight: number,
+  descentLadderZ: number,
+  repeatLadder7: number,
+  endLadderRungs: number
+) {
+  const geoConfig = ladderGeometryConfig[2]
+  const X7_HEIGHT = 1925
+  const SECTION_GAP = 3
+
+  // Calculate number of connector pairs needed
+  let numConnectorPairs = 1  // Top connector always
+  for (let i = 0; i < repeatLadder7; i++) {
+    const isLastX7 = (i === repeatLadder7 - 1)
+    const hasMoreSections = !isLastX7 || endLadderRungs > 0
+    if (hasMoreSections) {
+      numConnectorPairs++
+    }
+  }
+
+  // Initialize/resize wspornikTypes2 and wspornikDistances2 arrays
+  const globalDistance = globalWspornikDistance2 || 215
+  const defaultWsp = defaultWspornik2 || 'krotki'
+
+  // Truncate arrays if they're too long (configuration changed to fewer sections)
+  if (wspornikTypes2.length > numConnectorPairs) {
+    wspornikTypes2.length = numConnectorPairs
+  }
+  if (wspornikDistances2.length > numConnectorPairs) {
+    wspornikDistances2.length = numConnectorPairs
+  }
+  if (connectorTypes2.length > numConnectorPairs) {
+    connectorTypes2.length = numConnectorPairs
+  }
+
+  // Expand arrays if needed
+  while (wspornikTypes2.length < numConnectorPairs) {
+    wspornikTypes2.push(defaultWsp)
+  }
+  while (wspornikDistances2.length < numConnectorPairs) {
+    wspornikDistances2.push(globalDistance)
+  }
+  while (connectorTypes2.length < numConnectorPairs) {
+    connectorTypes2.push('uchwyt')
+  }
+
+  // Pozycja Y - punkt startowy (góra drabiny zejścia)
+  const topOfMainRails = totalHeight / 2
+  const ladderStartY = topOfMainRails - 91
+
+  // Track pair index for descent ladder connectors
+  let pairIndex = 0
+
+  // Górny łącznik (pod przełazem) - midrung 113mm w dół
+  const topY = ladderStartY + (DIMS.connectorHeight / 2) + 50
+  const topConnectorYOffset = 100 - 113  // Korekta -113mm
+  const connectorZOffset = 0  // Bez korekty - przesunięcie całej drabiny w ladderGeometryConfig
+
+  // Uchwyt lewy górny
+  const leftConnTop = createConnector('uchwyt', 'left', 2)
+  leftConnTop.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
+  leftConnTop.position.y = (topY + topConnectorYOffset) * SCALE
+  leftConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
+  leftConnTop.userData.isDescentConnector = true
+  leftConnTop.userData.pairIndex = pairIndex
+  ladderContainer.add(leftConnTop)
+
+  // Uchwyt prawy górny
+  const rightConnTop = createConnector('uchwyt', 'right', 2)
+  rightConnTop.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
+  rightConnTop.position.y = (topY + topConnectorYOffset) * SCALE
+  rightConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
+  rightConnTop.userData.isDescentConnector = true
+  rightConnTop.userData.pairIndex = pairIndex
+  ladderContainer.add(rightConnTop)
+
+  // Wsporniki górne - use type from wspornikTypes2 array or default
+  const topWspornikType = wspornikTypes2[pairIndex] || defaultWspornik2 || 'krotki'
+  const topWspornikDistance = wspornikDistances2[pairIndex] || globalWspornikDistance2 || 215
+
+  if (topWspornikType !== 'none') {
+    const defaultDist = wspornikDefaultDistances[topWspornikType]
+    const distanceOffset = topWspornikDistance - defaultDist
+    const distanceZOffset = distanceOffset
+
+    const leftWspornikTop = createWspornik(topWspornikType, 'left', 2)
+    if (leftWspornikTop) {
+      leftWspornikTop.position.x = (-RAIL_OFFSET + leftWspornikTop.userData.extraXOffset) * SCALE
+      leftWspornikTop.position.y = (topY + topConnectorYOffset + leftWspornikTop.userData.extraYOffset) * SCALE
+      leftWspornikTop.position.z = (geoConfig.wspornik.zOffset + descentLadderZ + leftWspornikTop.userData.extraZOffset + distanceZOffset + connectorZOffset) * SCALE
+      leftWspornikTop.userData.isDescentConnector = true
+      leftWspornikTop.userData.pairIndex = pairIndex
+      ladderContainer.add(leftWspornikTop)
+    }
+
+    const rightWspornikTop = createWspornik(topWspornikType, 'right', 2)
+    if (rightWspornikTop) {
+      rightWspornikTop.position.x = (RAIL_OFFSET - rightWspornikTop.userData.extraXOffset) * SCALE
+      rightWspornikTop.position.y = (topY + topConnectorYOffset + rightWspornikTop.userData.extraYOffset) * SCALE
+      rightWspornikTop.position.z = (geoConfig.wspornik.zOffset + descentLadderZ + rightWspornikTop.userData.extraZOffset + distanceZOffset + connectorZOffset) * SCALE
+      rightWspornikTop.userData.isDescentConnector = true
+      rightWspornikTop.userData.pairIndex = pairIndex
+      ladderContainer.add(rightWspornikTop)
+    }
+  }
+
+  pairIndex++
+
+  // Renderuj łączniki między sekcjami
+  let currentOffset = 0
+
+  for (let i = 0; i < repeatLadder7; i++) {
+    currentOffset += X7_HEIGHT
+
+    // Łącznik po każdej sekcji x7 (oprócz ostatniej jeśli nie ma końcowej)
+    const isLastX7 = (i === repeatLadder7 - 1)
+    const hasMoreSections = !isLastX7 || endLadderRungs > 0
+
+    if (hasMoreSections) {
+      const gapCenterOffset = SECTION_GAP / 2
+      const connectionY = ladderStartY - currentOffset - gapCenterOffset + (DIMS.connectorHeight / 2) - 50 + 91  // Korekta +91mm
+
+      // Uchwyt lewy
+      const leftConn = createConnector('uchwyt', 'left', 2)
+      leftConn.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
+      leftConn.position.y = connectionY * SCALE
+      leftConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
+      leftConn.userData.isDescentConnector = true
+      leftConn.userData.pairIndex = pairIndex
+      ladderContainer.add(leftConn)
+
+      // Uchwyt prawy
+      const rightConn = createConnector('uchwyt', 'right', 2)
+      rightConn.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
+      rightConn.position.y = connectionY * SCALE
+      rightConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
+      rightConn.userData.isDescentConnector = true
+      rightConn.userData.pairIndex = pairIndex
+      ladderContainer.add(rightConn)
+
+      // Wsporniki - use type from wspornikTypes2 array for each pairIndex
+      const loopWspornikType = wspornikTypes2[pairIndex] || defaultWspornik2 || 'krotki'
+      const loopWspornikDistance = wspornikDistances2[pairIndex] || globalWspornikDistance2 || 215
+
+      if (loopWspornikType !== 'none') {
+        const defaultDist = wspornikDefaultDistances[loopWspornikType]
+        const distanceOffset = loopWspornikDistance - defaultDist
+        const distanceZOffset = distanceOffset  // Dla ladder 2, kierunek jest odwrócony
+
+        const leftWspornik = createWspornik(loopWspornikType, 'left', 2)
+        if (leftWspornik) {
+          leftWspornik.position.x = (-RAIL_OFFSET + leftWspornik.userData.extraXOffset) * SCALE
+          leftWspornik.position.y = (connectionY + leftWspornik.userData.extraYOffset) * SCALE
+          leftWspornik.position.z = (geoConfig.wspornik.zOffset + descentLadderZ + leftWspornik.userData.extraZOffset + distanceZOffset + connectorZOffset) * SCALE
+          leftWspornik.userData.isDescentConnector = true
+          leftWspornik.userData.pairIndex = pairIndex
+          ladderContainer.add(leftWspornik)
+        }
+
+        const rightWspornik = createWspornik(loopWspornikType, 'right', 2)
+        if (rightWspornik) {
+          rightWspornik.position.x = (RAIL_OFFSET - rightWspornik.userData.extraXOffset) * SCALE
+          rightWspornik.position.y = (connectionY + rightWspornik.userData.extraYOffset) * SCALE
+          rightWspornik.position.z = (geoConfig.wspornik.zOffset + descentLadderZ + rightWspornik.userData.extraZOffset + distanceZOffset + connectorZOffset) * SCALE
+          rightWspornik.userData.isDescentConnector = true
+          rightWspornik.userData.pairIndex = pairIndex
+          ladderContainer.add(rightWspornik)
+        }
+      }
+
+      pairIndex++
+      currentOffset += SECTION_GAP
+    }
   }
 }
 
@@ -4034,8 +4806,13 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
 
   // Ground
   if (showGround) {
-    const groundDepth = 3000
     const wallThickness = 250
+    const descentWallDepth = 2000
+    // Jeśli jest ściana zejścia, wydłuż podłogę żeby sięgała do jej końca
+    const hasDescentWall = props.showDescentWall || handrailType === 'attic'
+    const baseGroundDepth = 3000
+    const extraDepth = hasDescentWall ? descentWallDepth + wallThickness : 0
+    const groundDepth = baseGroundDepth + extraDepth
     const groundGeometry = new THREE.BoxGeometry(wallWidthConfig * SCALE, 50 * SCALE, groundDepth * SCALE)
     const groundMaterial = new THREE.MeshStandardMaterial({
       color: 0xff8c00,
@@ -4045,7 +4822,8 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
     const groundBar = new THREE.Mesh(groundGeometry, groundMaterial)
 
     const backOfWall = -(globalWspornikDistance1 + wallThickness + 25)
-    const groundZ = backOfWall + groundDepth / 2
+    // Przesuń środek do tyłu o połowę dodatkowej głębokości
+    const groundZ = backOfWall + baseGroundDepth / 2 - extraDepth / 2
     // Offset dla custom-base - podniesienie o 110mm
     const customBaseOffset = props.descentMountType === 'custom-base' ? 0 : 0
     groundBar.position.set(0, (groundLevel + customBaseOffset) * SCALE, groundZ * SCALE)
@@ -4166,7 +4944,8 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
 
     // Ściana strony zejścia (attyka) - po drugiej stronie głównej ściany
     // Wysokość = główna ściana - wartość wpisana przez użytkownika
-    if (handrailType === 'attic' && props.atticWallHeight !== undefined) {
+    // Renderuj dla attic-passage LUB gdy showDescentWall jest ustawione (płaski dach/okap)
+    if ((handrailType === 'attic' || props.showDescentWall) && props.atticWallHeight !== undefined) {
       const descentWallHeight = wallHeightConfig - props.atticWallHeight  // mm
       
       // Renderuj tylko jeśli ściana zejścia ma dodatnią wysokość
@@ -4303,8 +5082,8 @@ function emitUpdate() {
     }
     const groundLevel = ladderTop - wallHeightConfig + topOffset
 
-    // Distance from last hoop bottom to ground (+ suspendedHeight if ladder is suspended)
-    lastHoopToGround = Math.round(lastHoopY - groundLevel + suspendedHeight1)
+    // Distance from last hoop bottom to ground (absolute - groundLevel already accounts for suspension)
+    lastHoopToGround = Math.round(lastHoopY - groundLevel)
   }
 
   emit('update', {
@@ -4316,21 +5095,58 @@ function emitUpdate() {
     lastRungToGround: Math.round(lastRungToGround),
     lastHoopToGround
   })
+
+  // Re-center camera in tech drawing mode after model update
+  if (isTechDrawingMode) {
+    enterTechDrawingMode(techDrawingView)
+  }
+
+  requestRender() // Render after model update
 }
 
 // ============================================
-// ANIMATION (custom camera control)
+// ANIMATION (custom camera control with on-demand rendering)
 // ============================================
-function animate() {
-  if (isDisposed) return
 
-  requestAnimationFrame(animate)
+// Request a single render frame
+function requestRender() {
+  needsRender = true
+  scheduleFrame()
+}
+
+// Schedule next animation frame if not already scheduled
+function scheduleFrame() {
+  if (!animationFrameId && !isDisposed) {
+    animationFrameId = requestAnimationFrame(animate)
+  }
+}
+
+// Start continuous animation (for smooth interpolation)
+function startAnimation() {
+  isAnimating = true
+  scheduleFrame()
+}
+
+function animate() {
+  if (isDisposed) {
+    animationFrameId = null
+    return
+  }
+
+  animationFrameId = null
 
   // In tech drawing mode, don't modify camera/rotation
   if (!isTechDrawingMode) {
     // Smooth rotation interpolation
-    currentRotation.x += (targetRotation.x - currentRotation.x) * 0.1
-    currentRotation.y += (targetRotation.y - currentRotation.y) * 0.1
+    const dx = targetRotation.x - currentRotation.x
+    const dy = targetRotation.y - currentRotation.y
+
+    currentRotation.x += dx * 0.1
+    currentRotation.y += dy * 0.1
+
+    // Check if animation is done (within epsilon)
+    const epsilon = 0.0001
+    isAnimating = (Math.abs(dx) > epsilon || Math.abs(dy) > epsilon)
 
     // Move ladder inside pivot - pivot point follows camera
     ladderContainer.position.y = -cameraOffset.y
@@ -4348,7 +5164,14 @@ function animate() {
     perspectiveCamera.lookAt(cameraOffset.x, 0, 0)
   }
 
+  // Render the frame
   renderer.render(scene, camera)
+  needsRender = false
+
+  // Continue animation loop while interacting or smoothly interpolating
+  if (isAnimating || isDragging || isPanning) {
+    animationFrameId = requestAnimationFrame(animate)
+  }
 }
 
 function handleResize() {
@@ -4369,6 +5192,7 @@ function handleResize() {
   orthoCamera.updateProjectionMatrix()
 
   renderer.setSize(width, height)
+  requestRender() // Render after resize
 }
 
 // ============================================
@@ -4630,7 +5454,7 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
   // White background
   scene.background = new THREE.Color(0xffffff)
 
-  // Calculate model height for camera fitting
+  // Calculate scene height for camera fitting (use wall height if available, otherwise ladder height)
   const height1 = getTotalHeightForLadder(1)
   let totalHeight = height1
   let totalHeightWithHandrails = totalHeight
@@ -4641,8 +5465,15 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     totalHeightWithHandrails += DIMS.atticRailHeight
   }
 
+  // Use wall height if wall is shown, otherwise use ladder height
+  // This ensures we see the full wall including ground when ladder is suspended
+  let sceneHeight = totalHeightWithHandrails
+  if (showWall && wallHeightConfig > 0) {
+    sceneHeight = Math.max(wallHeightConfig, totalHeightWithHandrails + suspendedHeight1)
+  }
+
   // Ortho camera size with margin
-  const modelHeight = totalHeightWithHandrails * SCALE
+  const modelHeight = sceneHeight * SCALE
   const margin = 1.3
   let orthoSize = Math.max(modelHeight * margin / 2, 5)
 
@@ -4659,30 +5490,39 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
   pivotGroup.rotation.y = 0
   ladderContainer.position.set(0, 0, 0)
 
-  // Center of model
-  const centerY = modelHeight / 2
-  const extraOffset = (handrailType === 'none') ? 0.10 : 0.01
-  const offsetY = modelHeight * (0.385 + extraOffset)
-  const lookAtY = centerY - offsetY
+  // Calculate lookAtY based on actual ladder position in the scene
+  // The ladder is built with its bottom at a certain Y, we need to find the center of the visible scene
+  const ladderHeight = totalHeightWithHandrails * SCALE
+  let lookAtY: number
 
-  // Set camera position for view
+  // Center camera on the ladder - use same logic for both wall and no-wall cases
+  // Lower offsetY multiplier = model appears higher in view
+  const extraOffset = (handrailType === 'none') ? 0.08 : 0.01
+  const offsetY = ladderHeight * (0.42 + extraOffset)
+  lookAtY = ladderHeight / 2 - offsetY
+
+  // Set camera position and orientation for view
+  // Reset up vector first (except for top view)
+  if (view !== 'top') {
+    orthoCamera.up.set(0, 1, 0)
+  }
+
   if (view === 'front') {
     orthoCamera.position.set(0, lookAtY, 50)
     orthoCamera.lookAt(0, lookAtY, 0)
-    orthoCamera.up.set(0, 1, 0)
   } else if (view === 'side') {
     orthoCamera.position.set(50, lookAtY, 0)
     orthoCamera.lookAt(0, lookAtY, 0)
-    orthoCamera.up.set(0, 1, 0)
   } else if (view === 'back') {
     orthoCamera.position.set(0, lookAtY, -50)
     orthoCamera.lookAt(0, lookAtY, 0)
-    orthoCamera.up.set(0, 1, 0)
   } else if (view === 'top') {
+    orthoCamera.up.set(0, 0, -1)
     orthoCamera.position.set(0, 50, 0)
     orthoCamera.lookAt(0, 0, 0)
-    orthoCamera.up.set(0, 0, -1)
   }
+
+  orthoCamera.updateProjectionMatrix()
 
   // Switch to orthographic camera
   camera = orthoCamera
@@ -4693,6 +5533,8 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     view,
     totalHeightMm: Math.round(totalHeightWithHandrails)
   })
+
+  requestRender() // Render after view change
 }
 
 function exitTechDrawingMode() {
@@ -4720,9 +5562,25 @@ function exitTechDrawingMode() {
     )
   }
 
-  // Restore all ladder visibility
+  // Restore all ladder visibility (except debug boxes)
   ladderContainer.traverse((child) => {
-    child.visible = true
+    // Debug elements should respect showDebugBboxes flag
+    if (child.userData.isGreenCollisionBox ||
+        child.userData.isCollisionZone ||
+        child.userData.isAtticPassageObstacle ||
+        child.userData.isEaveCollision) {
+      child.visible = showDebugBboxes
+    } else if (child instanceof THREE.LineSegments &&
+               child.material instanceof THREE.LineBasicMaterial &&
+               (child.material.color.getHex() === 0xef4444 ||
+                child.material.color.getHex() === 0x00ff00 ||
+                child.material.color.getHex() === 0x66ff66 ||
+                child.material.color.getHex() === 0xa78bfa)) {
+      // Debug wireframes (red, green, purple)
+      child.visible = showDebugBboxes
+    } else {
+      child.visible = true
+    }
   })
 
   // Switch back to perspective camera
@@ -4733,6 +5591,8 @@ function exitTechDrawingMode() {
     view: techDrawingView,
     totalHeightMm: 0
   })
+
+  requestRender() // Render after exiting tech drawing mode
 }
 
 function toggleTechDrawingView() {
@@ -4922,10 +5782,8 @@ function createSciskanePreview() {
   if (!sourceModel) return
 
   const height1 = getTotalHeightForLadder(1)
-  const maxHeight = height1
-  const sections = getLadderSectionsForLadder(1)
-
-  if (sections.length === 0) return
+  const height2 = getTotalHeightForLadder(2)
+  const maxHeight = Math.max(height1, height2)
 
   // Preview material - green transparent
   const previewMaterial = new THREE.MeshStandardMaterial({
@@ -4937,63 +5795,80 @@ function createSciskanePreview() {
   })
 
   const railOffset = 265
-  const geoConfig = ladderGeometryConfig[1]
-  let currentOffset = 0
 
-  for (let s = 0; s < sections.length; s++) {
-    const section = sections[s]
-    const sectionHeight = getLadderHeight(section.rungs)
+  // Helper function to create previews for a ladder
+  const createPreviewsForLadder = (ladderNum: number) => {
+    const sections = getLadderSectionsForLadder(ladderNum)
+    if (sections.length === 0) return
 
-    // Create preview for each space between rungs
-    for (let i = 0; i < section.rungs - 1; i++) {
-      const yPos = (maxHeight / 2) - currentOffset - DIMS.firstRungFromTop - (i * DIMS.rungSpacing) - DIMS.rungSpacing / 2
+    const geoConfig = ladderGeometryConfig[ladderNum]
+    let currentOffset = 0
 
-      // Check if position is valid (not too close to existing connectors)
-      if (!isPositionValidForSciskane(yPos)) continue
+    for (let s = 0; s < sections.length; s++) {
+      const section = sections[s]
+      const sectionHeight = getLadderHeight(section.rungs)
 
-      // Left preview
-      const leftPreview = sourceModel.clone(true)
-      leftPreview.scale.set(SCALE, SCALE, SCALE)
-      const leftRot = geoConfig.sciskane.left
-      leftPreview.rotation.set(leftRot.x, leftRot.y, leftRot.z)
-      leftPreview.position.x = -railOffset * SCALE
-      leftPreview.position.y = yPos * SCALE
-      leftPreview.position.z = (geoConfig.sciskane.leftZOffset + geoConfig.zOffset) * SCALE
-      leftPreview.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).material = previewMaterial.clone()
-        }
-      })
-      leftPreview.userData.isSciskanePreview = true
-      leftPreview.userData.previewY = yPos
-      leftPreview.userData.ladderNum = 1
-      ladderContainer.add(leftPreview)
-      sciskanePreviewObjects.push(leftPreview)
+      // Create preview for each space between rungs
+      for (let i = 0; i < section.rungs - 1; i++) {
+        const yPos = (maxHeight / 2) - currentOffset - DIMS.firstRungFromTop - (i * DIMS.rungSpacing) - DIMS.rungSpacing / 2
 
-      // Right preview
-      const rightPreview = sourceModel.clone(true)
-      rightPreview.scale.set(SCALE, SCALE, SCALE)
-      const rightRot = geoConfig.sciskane.right
-      rightPreview.rotation.set(rightRot.x, rightRot.y, rightRot.z)
-      rightPreview.position.x = railOffset * SCALE
-      rightPreview.position.y = yPos * SCALE
-      rightPreview.position.z = (geoConfig.sciskane.rightZOffset + geoConfig.zOffset) * SCALE
-      rightPreview.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).material = previewMaterial.clone()
-        }
-      })
-      rightPreview.userData.isSciskanePreview = true
-      rightPreview.userData.previewY = yPos
-      rightPreview.userData.ladderNum = 1
-      ladderContainer.add(rightPreview)
-      sciskanePreviewObjects.push(rightPreview)
+        // Check if position is valid (not too close to existing connectors)
+        if (!isPositionValidForSciskane(yPos, ladderNum)) continue
+
+        // Left preview
+        const leftPreview = sourceModel.clone(true)
+        leftPreview.scale.set(SCALE, SCALE, SCALE)
+        const leftRot = geoConfig.sciskane.left
+        leftPreview.rotation.set(leftRot.x, leftRot.y, leftRot.z)
+        leftPreview.position.x = -railOffset * SCALE
+        leftPreview.position.y = yPos * SCALE
+        leftPreview.position.z = (geoConfig.sciskane.leftZOffset + geoConfig.zOffset) * SCALE
+        leftPreview.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            (child as THREE.Mesh).material = previewMaterial.clone()
+          }
+        })
+        leftPreview.userData.isSciskanePreview = true
+        leftPreview.userData.previewY = yPos
+        leftPreview.userData.ladderNum = ladderNum
+        ladderContainer.add(leftPreview)
+        sciskanePreviewObjects.push(leftPreview)
+
+        // Right preview
+        const rightPreview = sourceModel.clone(true)
+        rightPreview.scale.set(SCALE, SCALE, SCALE)
+        const rightRot = geoConfig.sciskane.right
+        rightPreview.rotation.set(rightRot.x, rightRot.y, rightRot.z)
+        rightPreview.position.x = railOffset * SCALE
+        rightPreview.position.y = yPos * SCALE
+        rightPreview.position.z = (geoConfig.sciskane.rightZOffset + geoConfig.zOffset) * SCALE
+        rightPreview.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            (child as THREE.Mesh).material = previewMaterial.clone()
+          }
+        })
+        rightPreview.userData.isSciskanePreview = true
+        rightPreview.userData.previewY = yPos
+        rightPreview.userData.ladderNum = ladderNum
+        ladderContainer.add(rightPreview)
+        sciskanePreviewObjects.push(rightPreview)
+      }
+
+      currentOffset += sectionHeight
+      if (s < sections.length - 1) {
+        currentOffset += 3 // 3mm gap between sections
+      }
     }
+  }
 
-    currentOffset += sectionHeight
-    if (s < sections.length - 1) {
-      currentOffset += 3 // 3mm gap between sections
-    }
+  // Create previews for ladder 1 (entry side)
+  createPreviewsForLadder(1)
+
+  // Create previews for ladder 2 (descent side) - only when in attic mode or brackets mode
+  const isAtticMode = handrailType === 'attic'
+  const isBracketsMode = props.descentMountType === 'brackets'
+  if ((isAtticMode || isBracketsMode) && props.descentLadder && height2 > 0) {
+    createPreviewsForLadder(2)
   }
 }
 
@@ -5004,11 +5879,21 @@ function isPositionValidForSciskane(yPos: number, ladderNum: number = 1): boolea
   const maxHeight = Math.max(height1, height2)
   const minDistance = 150 // 15cm minimum distance from connectors
 
-  // Check distance from connectors (use calculated positions)
+  // Check distance from ladder 1 connectors
   const connectorPositions = getConnectorPositions()
   for (const connY of connectorPositions) {
     if (Math.abs(yPos - connY) < minDistance) {
       return false
+    }
+  }
+
+  // Check distance from descent ladder (ladder 2) connectors in brackets mode
+  if (ladderNum === 2 && props.descentMountType === 'brackets' && props.descentLadder) {
+    const descentConnectorPositions = getDescentConnectorPositions()
+    for (const connY of descentConnectorPositions) {
+      if (Math.abs(yPos - connY) < minDistance) {
+        return false
+      }
     }
   }
 
@@ -5031,6 +5916,51 @@ function isPositionValidForSciskane(yPos: number, ladderNum: number = 1): boolea
   }
 
   return true
+}
+
+/**
+ * Get connector positions for descent ladder (ladder 2) in brackets mode
+ */
+function getDescentConnectorPositions(): number[] {
+  const positions: number[] = []
+
+  if (!props.descentLadder) return positions
+
+  const { repeatLadder7, endLadderRungs } = props.descentLadder
+  const height1 = getTotalHeightForLadder(1)
+  const height2 = getTotalHeightForLadder(2)
+  const maxHeight = Math.max(height1, height2)
+
+  const X7_HEIGHT = 1925
+  const SECTION_GAP = 3
+
+  // Top of main rails (góra drabiny zejścia)
+  const topOfMainRails = maxHeight / 2
+  const ladderStartY = topOfMainRails - 91
+
+  // Top connector position
+  const topY = ladderStartY + (DIMS.connectorHeight / 2) + 50
+  const topConnectorYOffset = 100 - 113  // Korekta -113mm
+  positions.push(topY + topConnectorYOffset)
+
+  // Connectors between sections
+  let currentOffset = 0
+
+  for (let i = 0; i < repeatLadder7; i++) {
+    currentOffset += X7_HEIGHT
+
+    const isLastX7 = (i === repeatLadder7 - 1)
+    const hasMoreSections = !isLastX7 || endLadderRungs > 0
+
+    if (hasMoreSections) {
+      const gapCenterOffset = SECTION_GAP / 2
+      const connectionY = ladderStartY - currentOffset - gapCenterOffset + (DIMS.connectorHeight / 2) - 50 + 91
+      positions.push(connectionY)
+      currentOffset += SECTION_GAP
+    }
+  }
+
+  return positions
 }
 
 function addSciskaneHandle(yPos: number, ladderNum: number = 1) {
@@ -5199,15 +6129,1751 @@ function clearSciskanePreview() {
 }
 
 // ============================================
+// DEBUG EDITOR FUNCTIONS
+// ============================================
+
+function getAvailableModels(): string[] {
+  const models: string[] = []
+  if (loadedModels.powielana) models.push('powielana')
+  if (loadedModels.attyka) models.push('attyka')
+  if (loadedModels.krataWema) models.push('krataWema')
+  if (loadedModels.uchwyt) models.push('uchwyt')
+  if (loadedModels.lacznik) models.push('lacznik')
+  if (loadedModels.porecz) models.push('porecz')
+  if (loadedModels.uchwytPoreczy) models.push('uchwytPoreczy')
+  if (loadedModels.sciskany) models.push('sciskany')
+  if (loadedModels.obrecz) models.push('obrecz')
+  if (loadedModels.zamykanie) models.push('zamykanie')
+  if (loadedModels.katownikX2) models.push('katownikX2')
+  if (loadedModels.katownikX3) models.push('katownikX3')
+  if (loadedModels.katownikX4) models.push('katownikX4')
+  if (loadedModels.wspornikKrotki) models.push('wspornikKrotki')
+  if (loadedModels.wspornikSredniLewy) models.push('wspornikSredniLewy')
+  if (loadedModels.wspornikSredniPrawy) models.push('wspornikSredniPrawy')
+  if (loadedModels.wspornikDlugiLewy) models.push('wspornikDlugiLewy')
+  if (loadedModels.wspornikDlugiPrawy) models.push('wspornikDlugiPrawy')
+  if (loadedModels.bigfoot) models.push('bigfoot')
+  if (loadedModels.prowadnicaBigfoot) models.push('prowadnicaBigfoot')
+  if (loadedModels.podestSpoczynkowy) models.push('podestSpoczynkowy')
+  if (loadedModels.podestKrotki) models.push('podestKrotki')
+  for (let i = 1; i <= 7; i++) {
+    if (loadedModels.koncowa[i]) models.push(`koncowa-x${i}`)
+  }
+  return models
+}
+
+function addDebugModel(modelName: string): DebugObject | null {
+  if (!ladderContainer) return null
+
+  let sourceModel: THREE.Group | null = null
+
+  // Find the model
+  if (modelName.startsWith('koncowa-x')) {
+    const rungs = parseInt(modelName.replace('koncowa-x', ''))
+    sourceModel = loadedModels.koncowa[rungs] || null
+  } else {
+    // Type-safe lookup
+    const modelMap: Record<string, THREE.Group | null> = {
+      powielana: loadedModels.powielana,
+      attyka: loadedModels.attyka,
+      krataWema: loadedModels.krataWema,
+      uchwyt: loadedModels.uchwyt,
+      lacznik: loadedModels.lacznik,
+      porecz: loadedModels.porecz,
+      uchwytPoreczy: loadedModels.uchwytPoreczy,
+      sciskany: loadedModels.sciskany,
+      obrecz: loadedModels.obrecz,
+      zamykanie: loadedModels.zamykanie,
+      katownikX2: loadedModels.katownikX2,
+      katownikX3: loadedModels.katownikX3,
+      katownikX4: loadedModels.katownikX4,
+      wspornikKrotki: loadedModels.wspornikKrotki,
+      wspornikSredniLewy: loadedModels.wspornikSredniLewy,
+      wspornikSredniPrawy: loadedModels.wspornikSredniPrawy,
+      wspornikDlugiLewy: loadedModels.wspornikDlugiLewy,
+      wspornikDlugiPrawy: loadedModels.wspornikDlugiPrawy,
+      bigfoot: loadedModels.bigfoot,
+      prowadnicaBigfoot: loadedModels.prowadnicaBigfoot,
+      podestSpoczynkowy: loadedModels.podestSpoczynkowy,
+      podestKrotki: loadedModels.podestKrotki
+    }
+    sourceModel = modelMap[modelName] || null
+  }
+
+  if (!sourceModel) return null
+
+  const model = sourceModel.clone(true)
+  model.scale.set(SCALE, SCALE, SCALE)
+  model.position.set(0, 0, 0)
+
+  const debugObj: DebugObject = {
+    id: `debug_${++debugObjectIdCounter}`,
+    name: modelName,
+    type: 'model',
+    object: model,
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 }
+  }
+
+  model.userData.debugObjectId = debugObj.id
+  addOutlineToModel(model)
+  ladderContainer.add(model)
+  debugEditorObjects.push(debugObj)
+
+  return debugObj
+}
+
+function addDebugBox(width: number, height: number, depth: number, color: string): DebugObject | null {
+  if (!ladderContainer) return null
+
+  const geometry = new THREE.BoxGeometry(width * SCALE, height * SCALE, depth * SCALE)
+  const material = new THREE.MeshStandardMaterial({
+    color: color,
+    metalness: 0.3,
+    roughness: 0.7
+  })
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.position.set(0, 0, 0)
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+
+  const debugObj: DebugObject = {
+    id: `debug_${++debugObjectIdCounter}`,
+    name: `Box ${width}x${height}x${depth}`,
+    type: 'box',
+    object: mesh,
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 },
+    color: color,
+    dimensions: { width, height, depth }
+  }
+
+  mesh.userData.debugObjectId = debugObj.id
+  ladderContainer.add(mesh)
+  debugEditorObjects.push(debugObj)
+
+  return debugObj
+}
+
+function updateDebugObject(id: string, updates: {
+  position?: { x: number; y: number; z: number }
+  rotation?: { x: number; y: number; z: number }
+  scale?: { x: number; y: number; z: number }
+}): void {
+  const debugObj = debugEditorObjects.find(o => o.id === id)
+  if (!debugObj) return
+
+  if (updates.position) {
+    debugObj.position = { ...updates.position }
+    debugObj.object.position.set(
+      updates.position.x * SCALE,
+      updates.position.y * SCALE,
+      updates.position.z * SCALE
+    )
+  }
+
+  if (updates.rotation) {
+    debugObj.rotation = { ...updates.rotation }
+    debugObj.object.rotation.set(
+      updates.rotation.x * Math.PI / 180,
+      updates.rotation.y * Math.PI / 180,
+      updates.rotation.z * Math.PI / 180
+    )
+  }
+
+  if (updates.scale) {
+    debugObj.scale = { ...updates.scale }
+    debugObj.object.scale.set(
+      updates.scale.x * SCALE,
+      updates.scale.y * SCALE,
+      updates.scale.z * SCALE
+    )
+  }
+}
+
+function removeDebugObject(id: string): void {
+  const index = debugEditorObjects.findIndex(o => o.id === id)
+  if (index === -1) return
+
+  const debugObj = debugEditorObjects[index]
+  if (debugObj.object.parent === ladderContainer) {
+    ladderContainer.remove(debugObj.object)
+  }
+
+  debugEditorObjects.splice(index, 1)
+
+  if (selectedDebugObject?.id === id) {
+    selectedDebugObject = null
+  }
+}
+
+function getDebugObjects(): DebugObject[] {
+  return debugEditorObjects.map(obj => ({
+    ...obj,
+    object: obj.object // Include reference but shouldn't be serialized
+  }))
+}
+
+function selectDebugObject(id: string | null): void {
+  selectedDebugObject = id ? debugEditorObjects.find(o => o.id === id) || null : null
+
+  // Attach/detach transform controls
+  if (transformControls) {
+    const helper = transformControls.getHelper()
+    if (selectedDebugObject) {
+      transformControls.attach(selectedDebugObject.object)
+      helper.visible = true
+      transformControls.enabled = true
+    } else {
+      transformControls.detach()
+      helper.visible = false
+      transformControls.enabled = false
+    }
+  }
+}
+
+function setTransformMode(mode: 'translate' | 'rotate' | 'scale'): void {
+  transformMode = mode
+  if (transformControls) {
+    transformControls.setMode(mode)
+  }
+}
+
+function getTransformMode(): string {
+  return transformMode
+}
+
+function getSelectedDebugObject(): DebugObject | null {
+  return selectedDebugObject
+}
+
+function clearAllDebugObjects(): void {
+  for (const obj of debugEditorObjects) {
+    if (obj.object.parent === ladderContainer) {
+      ladderContainer.remove(obj.object)
+    }
+  }
+  debugEditorObjects = []
+  selectedDebugObject = null
+}
+
+function duplicateDebugObject(id: string): DebugObject | null {
+  const original = debugEditorObjects.find(o => o.id === id)
+  if (!original) return null
+
+  let newObj: DebugObject | null = null
+
+  if (original.type === 'model') {
+    newObj = addDebugModel(original.name)
+  } else if (original.type === 'box' && original.dimensions) {
+    newObj = addDebugBox(
+      original.dimensions.width,
+      original.dimensions.height,
+      original.dimensions.depth,
+      original.color || '#888888'
+    )
+  }
+
+  if (newObj) {
+    // Offset position slightly
+    updateDebugObject(newObj.id, {
+      position: {
+        x: original.position.x + 100,
+        y: original.position.y,
+        z: original.position.z
+      },
+      rotation: { ...original.rotation },
+      scale: { ...original.scale }
+    })
+  }
+
+  return newObj
+}
+
+// ============================================
+// BOM (BILL OF MATERIALS) GENERATION
+// ============================================
+
+export interface BOMItem {
+  id: string
+  name: string
+  namePL: string
+  quantity: number
+  unit: string
+  category: string
+  details?: string
+  image?: string
+}
+
+export interface BOMData {
+  ladder1: {
+    items: BOMItem[]
+    config: {
+      wallHeight: number
+      scheme: string
+      cage: string
+      insulationThickness: number
+      wspornikType: string
+      wspornikDistance: number
+      lastRungToGround?: number
+      lastCageToGround?: number
+    }
+  }
+  ladder2?: {
+    items: BOMItem[]
+    config: {
+      wallHeight: number
+      mountType: string
+      insulationThickness: number
+      wspornikType: string
+      wspornikDistance: number
+      minDistance: number
+      lastRungToGround?: number
+      lastCageToGround?: number
+    }
+  }
+  generatedAt: Date
+}
+
+/**
+ * Generate Bill of Materials from the current 3D scene
+ * Counts all models and categorizes them
+ */
+function generateBOM(): BOMData {
+  console.log('generateBOM called, ladderContainer:', !!ladderContainer)
+  if (!ladderContainer) {
+    console.log('No ladderContainer, returning empty BOM')
+    return {
+      ladder1: { items: [], config: { wallHeight: 0, scheme: '', cage: '', insulationThickness: 0, wspornikType: '', wspornikDistance: 0 } },
+      generatedAt: new Date()
+    }
+  }
+
+  // Counters for ladder 1 (entry)
+  const counts1: Record<string, { count: number; details?: string }> = {}
+  // Counters for ladder 2 (descent)
+  const counts2: Record<string, { count: number; details?: string }> = {}
+
+  console.log('ladderContainer children count:', ladderContainer.children.length)
+
+  // Traverse all children
+  ladderContainer.traverse((child) => {
+    if (child === ladderContainer) return
+    // Skip helper/debug objects
+    if (child.userData.isOutline) return
+    if (child.userData.isMeasureObject) return
+    if (child.userData.isGreenCollisionBox) return
+    if (child.userData.isCollisionZone) return
+    if (child.userData.isMidRungBox) return
+    if (child.userData.isSciskaneBox) return
+    if (child.userData.isSciskanePreview) return
+    if (child.type === 'Line' || child.type === 'LineSegments') return
+
+    // Skip non-top-level (already counted with parent)
+    if (child.parent !== ladderContainer) return
+
+    // Skip generic shapes (walls, ground, insulation - boxes without specific userData)
+    if (child.userData.isWall) return
+    if (child.userData.isGround) return
+    if (child.userData.isInsulation) return
+    if (child.userData.isObstacle) return
+
+    // Determine ladder number
+    const ladderNum = child.userData.ladderNum || 1
+    const counts = ladderNum === 1 ? counts1 : counts2
+
+    // Categorize object
+    let itemKey = ''
+    let details = ''
+
+    if (child.userData.isLadderModule) {
+      const rungs = child.userData.rungs || 7
+      if (rungs === 7) {
+        itemKey = 'ladder_x7'
+      } else if (rungs === 8) {
+        itemKey = 'ladder_x8'
+      } else {
+        itemKey = `ladder_x${rungs}`
+      }
+    } else if (child.userData.isConnector) {
+      const connType = child.userData.connectorType || 'uchwyt'
+      if (connType === 'sciskany') {
+        itemKey = 'connector_sciskany'
+      } else {
+        itemKey = 'connector_uchwyt'
+      }
+      if (child.userData.isMidRungBracket) {
+        details = 'środkowy'
+      }
+    } else if (child.userData.isWspornik) {
+      const wspType = child.userData.wspornikType || 'krotki'
+      if (wspType === 'krotki' || wspType === 'short') {
+        itemKey = 'wspornik_krotki'
+      } else if (wspType === 'sredni' || wspType === 'medium') {
+        itemKey = 'wspornik_sredni'
+      } else if (wspType === 'dlugi' || wspType === 'long') {
+        itemKey = 'wspornik_dlugi'
+      } else if (wspType === 'none') {
+        return // Skip 'none' wsporniki
+      } else {
+        itemKey = 'wspornik_' + wspType
+      }
+    } else if (child.userData.isSafetyCage || child.userData.isCageHoop) {
+      itemKey = 'cage_hoop'
+    } else if (child.userData.isCageClosing) {
+      itemKey = 'cage_closing'
+    } else if (child.userData.isRestingPlatform) {
+      itemKey = 'resting_platform'
+    } else if (child.userData.isHandrail) {
+      itemKey = 'handrail'
+    } else if (child.userData.isHandrailConnector) {
+      itemKey = 'handrail_connector'
+    } else if (child.userData.isPlatform) {
+      itemKey = 'platform'
+    } else if (child.userData.isAtticPassage) {
+      itemKey = 'attic_passage'
+    } else if (child.userData.isAngleBracket) {
+      const segments = child.userData.segments || 2
+      itemKey = `angle_bracket_x${segments}`
+    } else if (child.userData.isBigfoot) {
+      itemKey = 'bigfoot'
+    } else if (child.userData.isBigfootGuide) {
+      itemKey = 'bigfoot_guide'
+    } else if (child.userData.isModuleLacznik) {
+      itemKey = 'module_connector'
+    } else if (child.userData.isSciskanePlaced) {
+      // Skip - already counted as connector
+      return
+    } else {
+      // Unknown object - skip or log
+      return
+    }
+
+    if (itemKey) {
+      if (!counts[itemKey]) {
+        counts[itemKey] = { count: 0, details }
+      }
+      counts[itemKey].count++
+      if (details && !counts[itemKey].details) {
+        counts[itemKey].details = details
+      }
+    }
+  })
+
+  console.log('counts1:', counts1)
+  console.log('counts2:', counts2)
+
+  // Convert counts to BOM items
+  const itemDefinitions: Record<string, { namePL: string; unit: string; category: string; image?: string }> = {
+    'ladder_x7': { namePL: 'Moduł drabiny X7 (7 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x7' },
+    'ladder_x8': { namePL: 'Moduł drabiny X8 (8 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x8' },
+    'ladder_x1': { namePL: 'Moduł końcowy X1 (1 szczebel)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x1' },
+    'ladder_x2': { namePL: 'Moduł końcowy X2 (2 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x2' },
+    'ladder_x3': { namePL: 'Moduł końcowy X3 (3 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x3' },
+    'ladder_x4': { namePL: 'Moduł końcowy X4 (4 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x4' },
+    'ladder_x5': { namePL: 'Moduł końcowy X5 (5 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x5' },
+    'ladder_x6': { namePL: 'Moduł końcowy X6 (6 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x6' },
+    'connector_uchwyt': { namePL: 'Uchwyt montażowy (para)', unit: 'szt.', category: 'łącznik', image: 'lacznik-drabin' },
+    'connector_sciskany': { namePL: 'Uchwyt ściskany (para)', unit: 'szt.', category: 'łącznik', image: 'wspornik-sciskany' },
+    'wspornik_krotki': { namePL: 'Wspornik krótki (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-krotki' },
+    'wspornik_sredni': { namePL: 'Wspornik średni (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-sredni' },
+    'wspornik_dlugi': { namePL: 'Wspornik długi (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-dlugi' },
+    'cage_hoop': { namePL: 'Obręcz kosza bezpieczeństwa', unit: 'szt.', category: 'kosz', image: 'obrecz' },
+    'cage_closing': { namePL: 'Zamknięcie kosza', unit: 'szt.', category: 'kosz' },
+    'resting_platform': { namePL: 'Podest spoczynkowy', unit: 'szt.', category: 'podest' },
+    'handrail': { namePL: 'L-ki (poręcze)', unit: 'szt.', category: 'poręcz', image: 'l-ki' },
+    'handrail_connector': { namePL: 'Łącznik poręczy', unit: 'para', category: 'poręcz', image: 'lacznik-poreczy' },
+    'platform': { namePL: 'Podest z poręczami', unit: 'kpl.', category: 'podest' },
+    'attic_passage': { namePL: 'Przejście przez attykę', unit: 'kpl.', category: 'attyka' },
+    'angle_bracket_x2': { namePL: 'Kątownik łączący kosz (2 segmenty)', unit: 'szt.', category: 'kosz' },
+    'angle_bracket_x3': { namePL: 'Kątownik łączący kosz (3 segmenty)', unit: 'szt.', category: 'kosz' },
+    'angle_bracket_x4': { namePL: 'Kątownik łączący kosz (4 segmenty)', unit: 'szt.', category: 'kosz', image: 'katownik-x4' },
+    'bigfoot': { namePL: 'Stopa BIGFOOT', unit: 'szt.', category: 'montaż' },
+    'bigfoot_guide': { namePL: 'Prowadnica BIGFOOT', unit: 'szt.', category: 'montaż' },
+    'module_connector': { namePL: 'Łącznik modułowy', unit: 'szt.', category: 'łącznik', image: 'lacznik-drabin' }
+  }
+
+  // Calculate distances using the same logic as emitUpdate()
+  let lastRung1ToGround: number | undefined
+  let lastCage1ToGround: number | undefined
+  let lastRung2ToGround: number | undefined
+  let lastCage2ToGround: number | undefined
+
+  // Calculate last rung to ground for ladder 1
+  const distFromGround = props.distanceFromGround || 160
+  if (handrailType === 'attic') {
+    lastRung1ToGround = distFromGround
+  } else {
+    lastRung1ToGround = distFromGround + suspendedHeight1
+  }
+
+  // Calculate last cage hoop to ground for ladder 1
+  if (safetyCageCount1 > 0) {
+    const height1 = getTotalHeightForLadder(1)
+    const hoopSpacing = 641.7
+
+    let topPosition = height1 / 2
+    let firstHoopOffset: number
+
+    if (handrailType === 'safety' || handrailType === 'platform') {
+      topPosition += DIMS.handrailVertical
+      firstHoopOffset = 25
+    } else if (handrailType === 'attic') {
+      topPosition += DIMS.atticRailHeight
+      firstHoopOffset = 25
+    } else {
+      firstHoopOffset = 294.3
+    }
+
+    const hoopHeight = 45
+    const lastHoopY = topPosition - firstHoopOffset - ((safetyCageCount1 - 1) * hoopSpacing) - hoopHeight
+
+    const ladderTop = height1 / 2
+    let topOffset = -161
+    if (handrailType === 'platform') {
+      topOffset = -211
+    } else if (handrailType === 'attic') {
+      const atticDist = props.atticPlatformDistance ?? 0
+      topOffset = -161 + 511 - atticDist
+    }
+    const groundLevel = ladderTop - wallHeightConfig + topOffset
+
+    lastCage1ToGround = Math.round(lastHoopY - groundLevel + suspendedHeight1)
+  }
+
+  function countsToItems(counts: Record<string, { count: number; details?: string }>): BOMItem[] {
+    const items: BOMItem[] = []
+    let itemId = 0
+    for (const [key, data] of Object.entries(counts)) {
+      const def = itemDefinitions[key]
+      if (def && data.count > 0) {
+        items.push({
+          id: `item_${++itemId}`,
+          name: key,
+          namePL: def.namePL,
+          quantity: data.count,
+          unit: def.unit,
+          category: def.category,
+          details: data.details,
+          image: def.image
+        })
+      }
+    }
+    // Sort by category, then by name
+    items.sort((a, b) => {
+      const catOrder = ['drabina', 'łącznik', 'wspornik', 'kosz', 'poręcz', 'podest', 'montaż', 'attyka']
+      const catA = catOrder.indexOf(a.category)
+      const catB = catOrder.indexOf(b.category)
+      if (catA !== catB) return catA - catB
+      return a.namePL.localeCompare(b.namePL)
+    })
+    return items
+  }
+
+  const bomData: BOMData = {
+    ladder1: {
+      items: countsToItems(counts1),
+      config: {
+        wallHeight: wallHeightConfig / 1000,
+        scheme: handrailType,
+        cage: safetyCageCount1 > 0 ? `${safetyCageCount1} obręczy` : 'brak',
+        insulationThickness: 0, // Will be filled from props
+        wspornikType: defaultWspornik1,
+        wspornikDistance: globalWspornikDistance1,
+        lastRungToGround: lastRung1ToGround,
+        lastCageToGround: lastCage1ToGround
+      }
+    },
+    generatedAt: new Date()
+  }
+
+  // Add ladder 2 if it exists (attic passage)
+  if (Object.keys(counts2).length > 0) {
+    bomData.ladder2 = {
+      items: countsToItems(counts2),
+      config: {
+        wallHeight: 0, // Will be filled from props
+        mountType: props.descentMountType || 'bigfoot',
+        insulationThickness: 0, // Will be filled from props
+        wspornikType: defaultWspornik2,
+        wspornikDistance: globalWspornikDistance2,
+        minDistance: 0, // Will be filled from props
+        lastRungToGround: lastRung2ToGround,
+        lastCageToGround: lastCage2ToGround
+      }
+    }
+  }
+
+  return bomData
+}
+
+/**
+ * Collect all existing scene objects and add them to debugEditorObjects
+ * This allows editing existing ladder elements
+ */
+function collectSceneObjects(): void {
+  if (!ladderContainer) return
+
+  // Clear only added objects (remove existing references as they will be re-collected)
+  const nonExistingObjects = debugEditorObjects.filter(o => o.type !== 'existing')
+
+  // Remove non-existing objects from scene
+  for (const obj of nonExistingObjects) {
+    if (obj.object.parent === ladderContainer) {
+      ladderContainer.remove(obj.object)
+    }
+  }
+
+  // Clear array and keep only non-existing (will refresh existing)
+  debugEditorObjects = []
+
+  // Traverse all children in ladderContainer
+  ladderContainer.traverse((child) => {
+    // Skip the container itself, helper objects, and outline objects
+    if (child === ladderContainer) return
+    if (child.userData.isOutline) return
+    if (child.userData.isMeasureObject) return
+    if (child.userData.isGreenCollisionBox) return
+    if (child.userData.isCollisionZone) return
+    if (child.userData.isMidRungBox) return
+    if (child.userData.isSciskaneBox) return
+    if (child.userData.isSciskanePreview) return
+    if (child.type === 'Line' || child.type === 'LineSegments') return
+
+    // Skip if already in debugEditorObjects
+    if (child.userData.debugObjectId) return
+
+    // Only get top-level groups and meshes
+    if (child.parent !== ladderContainer) return
+
+    // Determine object name from userData
+    let objName = 'Object'
+    if (child.userData.isConnector) {
+      objName = `Łącznik (${child.userData.connectorType || 'uchwyt'})`
+    } else if (child.userData.isWspornik) {
+      objName = `Wspornik (${child.userData.wspornikType || 'krotki'})`
+    } else if (child.userData.isLadderModule) {
+      objName = `Moduł drabiny (${child.userData.rungs || 7} szczebli)`
+    } else if (child.userData.isHandrail) {
+      objName = 'Poręcz'
+    } else if (child.userData.isCageHoop) {
+      objName = 'Obręcz kosza'
+    } else if (child.userData.isPlatform) {
+      objName = 'Podest'
+    } else if (child.userData.isWall) {
+      objName = 'Ściana'
+    } else if (child.userData.isGround) {
+      objName = 'Podłoga'
+    } else if (child.name) {
+      objName = child.name
+    } else if ((child as THREE.Mesh).geometry) {
+      objName = `Mesh`
+    } else if ((child as THREE.Group).isGroup) {
+      objName = `Group`
+    }
+
+    const id = `existing_${++debugObjectIdCounter}`
+    child.userData.debugObjectId = id
+
+    const debugObj: DebugObject = {
+      id,
+      name: objName,
+      type: 'existing' as any, // Mark as existing scene object
+      object: child,
+      position: {
+        x: child.position.x / SCALE,
+        y: child.position.y / SCALE,
+        z: child.position.z / SCALE
+      },
+      rotation: {
+        x: child.rotation.x * 180 / Math.PI,
+        y: child.rotation.y * 180 / Math.PI,
+        z: child.rotation.z * 180 / Math.PI
+      },
+      scale: {
+        x: child.scale.x / SCALE,
+        y: child.scale.y / SCALE,
+        z: child.scale.z / SCALE
+      }
+    }
+
+    debugEditorObjects.push(debugObj)
+  })
+}
+
+/**
+ * Delete an existing scene object (removes from scene completely)
+ * Does NOT dispose geometry/materials to allow undo
+ */
+function deleteSceneObject(id: string): boolean {
+  const index = debugEditorObjects.findIndex(o => o.id === id)
+  if (index === -1) return false
+
+  const debugObj = debugEditorObjects[index]
+
+  // Record history for undo
+  recordDeleteAction(debugObj)
+
+  // Remove from scene (but don't dispose - we might undo)
+  if (debugObj.object.parent) {
+    debugObj.object.parent.remove(debugObj.object)
+  }
+
+  // Remove from array
+  debugEditorObjects.splice(index, 1)
+
+  // Clear selection if this object was selected
+  if (selectedDebugObject?.id === id) {
+    selectedDebugObject = null
+    if (transformControls) {
+      transformControls.detach()
+      transformControls.getHelper().visible = false
+    }
+  }
+
+  return true
+}
+
+// ============================================
+// UNDO/REDO FUNCTIONS
+// ============================================
+
+function recordMoveAction(objectId: string, prevPos: { x: number; y: number; z: number }, prevRot: { x: number; y: number; z: number }, newPos: { x: number; y: number; z: number }, newRot: { x: number; y: number; z: number }) {
+  if (isUndoingOrRedoing) return
+
+  // Don't record if position didn't actually change
+  if (prevPos.x === newPos.x && prevPos.y === newPos.y && prevPos.z === newPos.z &&
+      prevRot.x === newRot.x && prevRot.y === newRot.y && prevRot.z === newRot.z) {
+    return
+  }
+
+  const action: HistoryAction = {
+    type: 'move',
+    objectId,
+    previousPosition: { ...prevPos },
+    previousRotation: { ...prevRot },
+    newPosition: { ...newPos },
+    newRotation: { ...newRot }
+  }
+
+  undoStack.push(action)
+  if (undoStack.length > MAX_HISTORY) {
+    undoStack.shift()
+  }
+  redoStack = [] // Clear redo stack on new action
+}
+
+function recordDeleteAction(debugObj: DebugObject) {
+  if (isUndoingOrRedoing) return
+
+  const action: HistoryAction = {
+    type: 'delete',
+    objectId: debugObj.id,
+    objectData: {
+      name: debugObj.name,
+      type: debugObj.type,
+      object: debugObj.object,
+      position: { ...debugObj.position },
+      rotation: { ...debugObj.rotation },
+      scale: { ...debugObj.scale },
+      color: debugObj.color,
+      dimensions: debugObj.dimensions ? { ...debugObj.dimensions } : undefined
+    }
+  }
+
+  undoStack.push(action)
+  if (undoStack.length > MAX_HISTORY) {
+    undoStack.shift()
+  }
+  redoStack = []
+}
+
+function undo(): boolean {
+  if (undoStack.length === 0) return false
+
+  const action = undoStack.pop()!
+  isUndoingOrRedoing = true
+
+  try {
+    if (action.type === 'move') {
+      const debugObj = debugEditorObjects.find(o => o.id === action.objectId)
+      if (debugObj && action.previousPosition && action.previousRotation) {
+        debugObj.position = { ...action.previousPosition }
+        debugObj.rotation = { ...action.previousRotation }
+        debugObj.object.position.set(
+          action.previousPosition.x * SCALE,
+          action.previousPosition.y * SCALE,
+          action.previousPosition.z * SCALE
+        )
+        debugObj.object.rotation.set(
+          action.previousRotation.x * Math.PI / 180,
+          action.previousRotation.y * Math.PI / 180,
+          action.previousRotation.z * Math.PI / 180
+        )
+
+        // Emit update
+        emit('debugObjectUpdated', {
+          id: debugObj.id,
+          position: debugObj.position,
+          rotation: debugObj.rotation
+        })
+      }
+    } else if (action.type === 'delete' && action.objectData) {
+      // Restore deleted object
+      const data = action.objectData
+
+      // Re-add to scene
+      if (ladderContainer && data.object) {
+        ladderContainer.add(data.object)
+
+        // Restore position/rotation
+        data.object.position.set(
+          data.position.x * SCALE,
+          data.position.y * SCALE,
+          data.position.z * SCALE
+        )
+        data.object.rotation.set(
+          data.rotation.x * Math.PI / 180,
+          data.rotation.y * Math.PI / 180,
+          data.rotation.z * Math.PI / 180
+        )
+
+        // Re-add to debugEditorObjects
+        const restoredObj: DebugObject = {
+          id: action.objectId,
+          name: data.name,
+          type: data.type,
+          object: data.object,
+          position: { ...data.position },
+          rotation: { ...data.rotation },
+          scale: { ...data.scale },
+          color: data.color,
+          dimensions: data.dimensions
+        }
+        debugEditorObjects.push(restoredObj)
+      }
+    }
+
+    redoStack.push(action)
+    return true
+  } finally {
+    isUndoingOrRedoing = false
+  }
+}
+
+function redo(): boolean {
+  if (redoStack.length === 0) return false
+
+  const action = redoStack.pop()!
+  isUndoingOrRedoing = true
+
+  try {
+    if (action.type === 'move') {
+      const debugObj = debugEditorObjects.find(o => o.id === action.objectId)
+      if (debugObj && action.newPosition && action.newRotation) {
+        debugObj.position = { ...action.newPosition }
+        debugObj.rotation = { ...action.newRotation }
+        debugObj.object.position.set(
+          action.newPosition.x * SCALE,
+          action.newPosition.y * SCALE,
+          action.newPosition.z * SCALE
+        )
+        debugObj.object.rotation.set(
+          action.newRotation.x * Math.PI / 180,
+          action.newRotation.y * Math.PI / 180,
+          action.newRotation.z * Math.PI / 180
+        )
+
+        // Emit update
+        emit('debugObjectUpdated', {
+          id: debugObj.id,
+          position: debugObj.position,
+          rotation: debugObj.rotation
+        })
+      }
+    } else if (action.type === 'delete') {
+      // Re-delete the object
+      const index = debugEditorObjects.findIndex(o => o.id === action.objectId)
+      if (index !== -1) {
+        const debugObj = debugEditorObjects[index]
+        if (debugObj.object.parent) {
+          debugObj.object.parent.remove(debugObj.object)
+        }
+        debugEditorObjects.splice(index, 1)
+
+        if (selectedDebugObject?.id === action.objectId) {
+          selectedDebugObject = null
+          if (transformControls) {
+            transformControls.detach()
+            transformControls.getHelper().visible = false
+          }
+        }
+      }
+    }
+
+    undoStack.push(action)
+    return true
+  } finally {
+    isUndoingOrRedoing = false
+  }
+}
+
+function canUndo(): boolean {
+  return undoStack.length > 0
+}
+
+function canRedo(): boolean {
+  return redoStack.length > 0
+}
+
+function clearHistory(): void {
+  undoStack = []
+  redoStack = []
+}
+
+// ============================================
+// ALIGN MODE (Fusion-style snap/align)
+// ============================================
+
+function startAlignMode(): void {
+  if (!selectedDebugObject) return
+
+  alignMode = true
+  alignStep = 'select-face'
+  alignSelectedFace = null
+
+  // Disable transform controls when in align mode
+  if (transformControls) {
+    transformControls.detach()
+    transformControls.getHelper().visible = false
+    transformControls.enabled = false
+  }
+}
+
+function cancelAlignMode(): void {
+  alignMode = false
+  alignStep = 'done'
+  alignSelectedFace = null
+  clearAlignFaceHelper()
+  clearAlignPreviewSphere()
+}
+
+function getAlignState(): { mode: boolean; step: string } {
+  return {
+    mode: alignMode,
+    step: alignStep
+  }
+}
+
+/**
+ * Clear the face highlight helper
+ */
+function clearAlignFaceHelper(): void {
+  if (alignFaceHelper) {
+    if (alignFaceHelper.parent) {
+      alignFaceHelper.parent.remove(alignFaceHelper)
+    }
+    alignFaceHelper.geometry.dispose()
+    ;(alignFaceHelper.material as THREE.Material).dispose()
+    alignFaceHelper = null
+  }
+}
+
+/**
+ * Clear the align preview sphere
+ */
+function clearAlignPreviewSphere(): void {
+  if (alignPreviewSphere && ladderContainer) {
+    ladderContainer.remove(alignPreviewSphere)
+    alignPreviewSphere.geometry.dispose()
+    ;(alignPreviewSphere.material as THREE.Material).dispose()
+    alignPreviewSphere = null
+  }
+  alignCurrentSnapPoint = null
+}
+
+/**
+ * Update align preview sphere on mouse move (shows snap point)
+ */
+function updateAlignPreview(clientX: number, clientY: number): void {
+  if (!alignMode || alignStep !== 'select-target' || !selectedDebugObject) {
+    clearAlignPreviewSphere()
+    return
+  }
+
+  if (!renderer || !perspectiveCamera || !ladderContainer || !raycaster) return
+
+  const rect = renderer.domElement.getBoundingClientRect()
+  mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
+  mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
+
+  raycaster.setFromCamera(mouse, perspectiveCamera)
+
+  const intersects = raycaster.intersectObjects(ladderContainer.children, true)
+
+  // Find first valid intersection (not the selected object, not helpers)
+  let validIntersect: THREE.Intersection | null = null
+  for (const intersect of intersects) {
+    const obj = intersect.object
+    if (obj.userData.isMeasureObject) continue
+    if (obj.userData.isOutline) continue
+    if (obj === alignFaceHelper) continue
+    if (obj === alignPreviewSphere) continue
+    if (!obj.visible) continue
+
+    // Skip the selected object
+    let isSelectedObj = false
+    let checkObj: THREE.Object3D | null = obj
+    while (checkObj) {
+      if (checkObj === selectedDebugObject.object) {
+        isSelectedObj = true
+        break
+      }
+      checkObj = checkObj.parent
+    }
+    if (isSelectedObj) continue
+
+    validIntersect = intersect
+    break
+  }
+
+  if (!validIntersect) {
+    clearAlignPreviewSphere()
+    alignCurrentSnapPoint = null
+    return
+  }
+
+  // Find snap point
+  const snapPoint = findSnapPoint(validIntersect.point, validIntersect.object)
+  const finalPoint = snapPoint || validIntersect.point
+  const isSnapped = !!snapPoint
+
+  // Store the current snap point in world coordinates for use when clicking
+  alignCurrentSnapPoint = finalPoint.clone()
+
+  // Convert to local coordinates for display
+  const localPoint = finalPoint.clone()
+  ladderContainer.worldToLocal(localPoint)
+
+  // Create or update sphere
+  const sphereRadius = perspectiveCamera.position.z * 0.008
+
+  if (!alignPreviewSphere) {
+    const geometry = new THREE.SphereGeometry(sphereRadius, 16, 16)
+    const material = new THREE.MeshBasicMaterial({
+      color: isSnapped ? 0x00ff00 : 0xffff00,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false
+    })
+    alignPreviewSphere = new THREE.Mesh(geometry, material)
+    alignPreviewSphere.renderOrder = 1000
+    ladderContainer.add(alignPreviewSphere)
+  }
+
+  alignPreviewSphere.position.copy(localPoint)
+
+  // Update geometry size
+  alignPreviewSphere.geometry.dispose()
+  alignPreviewSphere.geometry = new THREE.SphereGeometry(sphereRadius, 16, 16)
+
+  // Update color based on snap
+  const mat = alignPreviewSphere.material as THREE.MeshBasicMaterial
+  mat.color.setHex(isSnapped ? 0x00ff00 : 0xffff00)
+}
+
+/**
+ * Create a visual helper to show selected face - attached to the object itself
+ */
+function showAlignFaceHelper(obj: THREE.Object3D, axis: 'x' | 'y' | 'z', side: 'min' | 'max'): void {
+  clearAlignFaceHelper()
+
+  // Get bounding box in LOCAL coordinates of the object
+  const localBox = new THREE.Box3()
+
+  // Calculate local bounding box by examining geometry
+  obj.traverse((child) => {
+    if ((child as THREE.Mesh).geometry) {
+      const geom = (child as THREE.Mesh).geometry
+      if (!geom.boundingBox) geom.computeBoundingBox()
+      if (geom.boundingBox) {
+        const childBox = geom.boundingBox.clone()
+        // Transform by child's local matrix relative to obj
+        const childWorldMatrix = child.matrixWorld.clone()
+        const objWorldMatrixInv = obj.matrixWorld.clone().invert()
+        const localMatrix = childWorldMatrix.premultiply(objWorldMatrixInv)
+        childBox.applyMatrix4(localMatrix)
+        localBox.union(childBox)
+      }
+    }
+  })
+
+  // If empty, try setFromObject approach
+  if (localBox.isEmpty()) {
+    localBox.setFromObject(obj)
+    // Convert to local space
+    const worldCenter = new THREE.Vector3()
+    localBox.getCenter(worldCenter)
+    obj.worldToLocal(worldCenter)
+    const size = new THREE.Vector3()
+    localBox.getSize(size)
+    localBox.setFromCenterAndSize(worldCenter, size)
+  }
+
+  const size = new THREE.Vector3()
+  localBox.getSize(size)
+  const center = new THREE.Vector3()
+  localBox.getCenter(center)
+
+  let width: number, height: number
+  const facePos = new THREE.Vector3()
+
+  // Calculate face center position and plane dimensions
+  if (axis === 'x') {
+    width = size.z
+    height = size.y
+    facePos.set(side === 'min' ? localBox.min.x : localBox.max.x, center.y, center.z)
+  } else if (axis === 'y') {
+    width = size.x
+    height = size.z
+    facePos.set(center.x, side === 'min' ? localBox.min.y : localBox.max.y, center.z)
+  } else {
+    width = size.x
+    height = size.y
+    facePos.set(center.x, center.y, side === 'min' ? localBox.min.z : localBox.max.z)
+  }
+
+  // Add small offset so plane is visible (not z-fighting)
+  const offset = 0.001
+  if (axis === 'x') facePos.x += (side === 'min' ? -offset : offset)
+  if (axis === 'y') facePos.y += (side === 'min' ? -offset : offset)
+  if (axis === 'z') facePos.z += (side === 'min' ? -offset : offset)
+
+  const geometry = new THREE.PlaneGeometry(width, height)
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x00ff00,
+    transparent: true,
+    opacity: 0.5,
+    side: THREE.DoubleSide,
+    depthTest: false
+  })
+
+  alignFaceHelper = new THREE.Mesh(geometry, material)
+  alignFaceHelper.position.copy(facePos)
+
+  // Rotate plane to face correct direction
+  if (axis === 'x') {
+    alignFaceHelper.rotation.y = Math.PI / 2
+  } else if (axis === 'y') {
+    alignFaceHelper.rotation.x = -Math.PI / 2
+  }
+
+  alignFaceHelper.renderOrder = 999
+
+  // Add as child of the object so it moves with it
+  obj.add(alignFaceHelper)
+}
+
+/**
+ * Detect which face was clicked using the face normal from raycast
+ * This correctly handles rotated objects by using local coordinates
+ */
+function detectClickedFace(
+  obj: THREE.Object3D,
+  hitPointWorld: THREE.Vector3,
+  faceNormal: THREE.Vector3 | null,
+  hitObject: THREE.Object3D
+): { axis: 'x' | 'y' | 'z'; side: 'min' | 'max'; position: number } | null {
+
+  let axis: 'x' | 'y' | 'z'
+  let side: 'min' | 'max'
+
+  if (faceNormal) {
+    // Transform the face normal from hit object's local space to world space using quaternion
+    const worldNormal = faceNormal.clone()
+    const hitQuaternion = new THREE.Quaternion()
+    hitObject.getWorldQuaternion(hitQuaternion)
+    worldNormal.applyQuaternion(hitQuaternion).normalize()
+
+    // Transform from world space to the main object's local space
+    const objQuaternion = new THREE.Quaternion()
+    obj.getWorldQuaternion(objQuaternion)
+    const objQuatInverse = objQuaternion.clone().invert()
+    const localNormal = worldNormal.clone().applyQuaternion(objQuatInverse).normalize()
+
+    // Determine which local axis the normal is most aligned with
+    const absX = Math.abs(localNormal.x)
+    const absY = Math.abs(localNormal.y)
+    const absZ = Math.abs(localNormal.z)
+
+    if (absX >= absY && absX >= absZ) {
+      axis = 'x'
+      side = localNormal.x > 0 ? 'max' : 'min'
+    } else if (absY >= absX && absY >= absZ) {
+      axis = 'y'
+      side = localNormal.y > 0 ? 'max' : 'min'
+    } else {
+      axis = 'z'
+      side = localNormal.z > 0 ? 'max' : 'min'
+    }
+  } else {
+    // Fallback: use hit point relative to object center
+    const localHit = hitPointWorld.clone()
+    obj.worldToLocal(localHit)
+
+    // Get local bounding box
+    const localBox = new THREE.Box3()
+    obj.traverse((child) => {
+      if ((child as THREE.Mesh).geometry) {
+        const geom = (child as THREE.Mesh).geometry
+        if (!geom.boundingBox) geom.computeBoundingBox()
+        if (geom.boundingBox) {
+          const childBox = geom.boundingBox.clone()
+          const childWorldMatrix = child.matrixWorld.clone()
+          const objWorldMatrixInv = obj.matrixWorld.clone().invert()
+          const localMatrix = childWorldMatrix.premultiply(objWorldMatrixInv)
+          childBox.applyMatrix4(localMatrix)
+          localBox.union(childBox)
+        }
+      }
+    })
+
+    if (localBox.isEmpty()) {
+      return null
+    }
+
+    // Calculate distances to each face in local space
+    const distances = {
+      xMin: Math.abs(localHit.x - localBox.min.x),
+      xMax: Math.abs(localHit.x - localBox.max.x),
+      yMin: Math.abs(localHit.y - localBox.min.y),
+      yMax: Math.abs(localHit.y - localBox.max.y),
+      zMin: Math.abs(localHit.z - localBox.min.z),
+      zMax: Math.abs(localHit.z - localBox.max.z)
+    }
+
+    const entries: [string, number][] = Object.entries(distances)
+    entries.sort((a, b) => a[1] - b[1])
+    const closest = entries[0][0]
+
+    if (closest === 'xMin') { axis = 'x'; side = 'min' }
+    else if (closest === 'xMax') { axis = 'x'; side = 'max' }
+    else if (closest === 'yMin') { axis = 'y'; side = 'min' }
+    else if (closest === 'yMax') { axis = 'y'; side = 'max' }
+    else if (closest === 'zMin') { axis = 'z'; side = 'min' }
+    else { axis = 'z'; side = 'max' }
+  }
+
+  // Get local bounding box to determine position
+  const localBox = new THREE.Box3()
+  obj.traverse((child) => {
+    if ((child as THREE.Mesh).geometry) {
+      const geom = (child as THREE.Mesh).geometry
+      if (!geom.boundingBox) geom.computeBoundingBox()
+      if (geom.boundingBox) {
+        const childBox = geom.boundingBox.clone()
+        const childWorldMatrix = child.matrixWorld.clone()
+        const objWorldMatrixInv = obj.matrixWorld.clone().invert()
+        const localMatrix = childWorldMatrix.premultiply(objWorldMatrixInv)
+        childBox.applyMatrix4(localMatrix)
+        localBox.union(childBox)
+      }
+    }
+  })
+
+  let position: number
+  if (axis === 'x') position = side === 'min' ? localBox.min.x : localBox.max.x
+  else if (axis === 'y') position = side === 'min' ? localBox.min.y : localBox.max.y
+  else position = side === 'min' ? localBox.min.z : localBox.max.z
+
+  return { axis, side, position }
+}
+
+/**
+ * Handle face selection (step 1)
+ */
+function handleAlignFaceSelection(hitPoint: THREE.Vector3, faceNormal: THREE.Vector3 | null, hitObject: THREE.Object3D): boolean {
+  if (!selectedDebugObject || alignStep !== 'select-face') return false
+
+  const face = detectClickedFace(selectedDebugObject.object, hitPoint, faceNormal, hitObject)
+  if (!face) return false
+
+  alignSelectedFace = face
+  alignStep = 'select-target'
+
+  // Show visual helper on the object
+  showAlignFaceHelper(selectedDebugObject.object, face.axis, face.side)
+
+  return true
+}
+
+/**
+ * Perform alignment (step 2) - move object so selected face aligns with target point
+ * Uses LOCAL coordinate system for face detection, then transforms to world for movement
+ */
+function performAlignment(targetPoint: THREE.Vector3): boolean {
+  if (!selectedDebugObject || !alignSelectedFace || alignStep !== 'select-target') return false
+
+  const obj = selectedDebugObject.object
+  const prevPos = { ...selectedDebugObject.position }
+  const prevRot = { ...selectedDebugObject.rotation }
+
+  const axis = alignSelectedFace.axis
+  const side = alignSelectedFace.side
+
+  // Calculate local bounding box
+  const localBox = new THREE.Box3()
+  obj.traverse((child) => {
+    if ((child as THREE.Mesh).geometry) {
+      const geom = (child as THREE.Mesh).geometry
+      if (!geom.boundingBox) geom.computeBoundingBox()
+      if (geom.boundingBox) {
+        const childBox = geom.boundingBox.clone()
+        const childWorldMatrix = child.matrixWorld.clone()
+        const objWorldMatrixInv = obj.matrixWorld.clone().invert()
+        const localMatrix = childWorldMatrix.premultiply(objWorldMatrixInv)
+        childBox.applyMatrix4(localMatrix)
+        localBox.union(childBox)
+      }
+    }
+  })
+
+  if (localBox.isEmpty()) {
+    localBox.setFromObject(obj)
+    const worldCenter = new THREE.Vector3()
+    localBox.getCenter(worldCenter)
+    obj.worldToLocal(worldCenter)
+    const size = new THREE.Vector3()
+    localBox.getSize(size)
+    localBox.setFromCenterAndSize(worldCenter, size)
+  }
+
+  // Get face center point in LOCAL coordinates
+  const localFaceCenter = new THREE.Vector3()
+  localBox.getCenter(localFaceCenter)
+
+  if (axis === 'x') {
+    localFaceCenter.x = side === 'min' ? localBox.min.x : localBox.max.x
+  } else if (axis === 'y') {
+    localFaceCenter.y = side === 'min' ? localBox.min.y : localBox.max.y
+  } else {
+    localFaceCenter.z = side === 'min' ? localBox.min.z : localBox.max.z
+  }
+
+  // Transform face center from local to world coordinates
+  const worldFaceCenter = localFaceCenter.clone()
+  obj.localToWorld(worldFaceCenter)
+
+  // Create local axis direction vector
+  const localAxisDir = new THREE.Vector3()
+  if (axis === 'x') localAxisDir.set(1, 0, 0)
+  else if (axis === 'y') localAxisDir.set(0, 1, 0)
+  else localAxisDir.set(0, 0, 1)
+
+  // Transform axis direction to world space using quaternion (more accurate than normal matrix)
+  const worldAxisDir = localAxisDir.clone()
+  const objQuaternion = new THREE.Quaternion()
+  obj.getWorldQuaternion(objQuaternion)
+  worldAxisDir.applyQuaternion(objQuaternion).normalize()
+
+  // Calculate the signed distance we need to move along the axis
+  // Project both points onto the axis and find the difference
+  const faceProjection = worldFaceCenter.dot(worldAxisDir)
+  const targetProjection = targetPoint.dot(worldAxisDir)
+  const moveDistance = targetProjection - faceProjection
+
+  // Create world movement vector along the axis
+  const worldMove = worldAxisDir.clone().multiplyScalar(moveDistance)
+
+  // Transform the movement from world space to parent's local space using quaternion
+  const parent = obj.parent
+  if (parent) {
+    parent.updateWorldMatrix(true, false)
+    const parentQuaternion = new THREE.Quaternion()
+    parent.getWorldQuaternion(parentQuaternion)
+    parentQuaternion.invert()
+    worldMove.applyQuaternion(parentQuaternion)
+  }
+
+  // Apply local movement to object position
+  obj.position.add(worldMove)
+
+  // Update debug object position tracking
+  selectedDebugObject.position.x = obj.position.x / SCALE
+  selectedDebugObject.position.y = obj.position.y / SCALE
+  selectedDebugObject.position.z = obj.position.z / SCALE
+
+  // Record for undo
+  recordMoveAction(
+    selectedDebugObject.id,
+    prevPos,
+    prevRot,
+    selectedDebugObject.position,
+    selectedDebugObject.rotation
+  )
+
+  // Emit update
+  emit('debugObjectUpdated', {
+    id: selectedDebugObject.id,
+    position: selectedDebugObject.position,
+    rotation: selectedDebugObject.rotation
+  })
+
+  // Done - reset align mode
+  clearAlignFaceHelper()
+  clearAlignPreviewSphere()
+  alignMode = false
+  alignStep = 'done'
+  alignSelectedFace = null
+
+  return true
+}
+
+// ============================================
+// EXTRUDE MODE (Fusion-style push/pull)
+// ============================================
+
+function startExtrudeMode(): void {
+  if (!selectedDebugObject) return
+  extrudeMode = true
+  extrudeActive = false
+  extrudeFace = null
+  // Cancel other modes
+  alignMode = false
+  alignStep = 'done'
+  cancelAlignMode()
+}
+
+function cancelExtrudeMode(): void {
+  extrudeMode = false
+  extrudeActive = false
+  extrudeFace = null
+  extrudeStartPoint = null
+  extrudeStartSize = null
+  extrudeStartPos = null
+  clearExtrudeHelpers()
+}
+
+function getExtrudeState(): { mode: boolean; active: boolean } {
+  return {
+    mode: extrudeMode,
+    active: extrudeActive
+  }
+}
+
+function clearExtrudeHelpers(): void {
+  if (extrudeFaceHelper && ladderContainer) {
+    ladderContainer.remove(extrudeFaceHelper)
+    extrudeFaceHelper.geometry.dispose()
+    ;(extrudeFaceHelper.material as THREE.Material).dispose()
+    extrudeFaceHelper = null
+  }
+  if (extrudeAxisHelper && ladderContainer) {
+    ladderContainer.remove(extrudeAxisHelper)
+    extrudeAxisHelper.geometry.dispose()
+    ;(extrudeAxisHelper.material as THREE.Material).dispose()
+    extrudeAxisHelper = null
+  }
+}
+
+/**
+ * Show visual helper for extrude face and axis
+ */
+function showExtrudeFaceHelper(obj: THREE.Object3D, axis: 'x' | 'y' | 'z', side: 'min' | 'max'): void {
+  clearExtrudeHelpers()
+
+  // Get local bounding box
+  const localBox = new THREE.Box3()
+  obj.traverse((child) => {
+    if ((child as THREE.Mesh).geometry) {
+      const geom = (child as THREE.Mesh).geometry
+      if (!geom.boundingBox) geom.computeBoundingBox()
+      if (geom.boundingBox) {
+        const childBox = geom.boundingBox.clone()
+        const childWorldMatrix = child.matrixWorld.clone()
+        const objWorldMatrixInv = obj.matrixWorld.clone().invert()
+        const localMatrix = childWorldMatrix.premultiply(objWorldMatrixInv)
+        childBox.applyMatrix4(localMatrix)
+        localBox.union(childBox)
+      }
+    }
+  })
+
+  if (localBox.isEmpty()) return
+
+  const size = new THREE.Vector3()
+  localBox.getSize(size)
+  const center = new THREE.Vector3()
+  localBox.getCenter(center)
+
+  let width: number, height: number
+  const facePos = new THREE.Vector3()
+
+  if (axis === 'x') {
+    width = size.z
+    height = size.y
+    facePos.set(side === 'min' ? localBox.min.x : localBox.max.x, center.y, center.z)
+  } else if (axis === 'y') {
+    width = size.x
+    height = size.z
+    facePos.set(center.x, side === 'min' ? localBox.min.y : localBox.max.y, center.z)
+  } else {
+    width = size.x
+    height = size.y
+    facePos.set(center.x, center.y, side === 'min' ? localBox.min.z : localBox.max.z)
+  }
+
+  // Face helper (orange for extrude)
+  const faceGeom = new THREE.PlaneGeometry(width, height)
+  const faceMat = new THREE.MeshBasicMaterial({
+    color: 0xff8800,
+    transparent: true,
+    opacity: 0.4,
+    side: THREE.DoubleSide,
+    depthTest: false
+  })
+
+  extrudeFaceHelper = new THREE.Mesh(faceGeom, faceMat)
+  extrudeFaceHelper.position.copy(facePos)
+
+  if (axis === 'x') {
+    extrudeFaceHelper.rotation.y = Math.PI / 2
+  } else if (axis === 'y') {
+    extrudeFaceHelper.rotation.x = -Math.PI / 2
+  }
+
+  extrudeFaceHelper.renderOrder = 999
+  obj.add(extrudeFaceHelper)
+
+  // Axis helper line (shows direction of extrusion)
+  const axisDir = new THREE.Vector3()
+  if (axis === 'x') axisDir.set(side === 'min' ? -1 : 1, 0, 0)
+  else if (axis === 'y') axisDir.set(0, side === 'min' ? -1 : 1, 0)
+  else axisDir.set(0, 0, side === 'min' ? -1 : 1)
+
+  const lineLength = Math.max(size.x, size.y, size.z) * 2
+  const lineEnd = facePos.clone().add(axisDir.clone().multiplyScalar(lineLength))
+
+  const lineGeom = new THREE.BufferGeometry().setFromPoints([facePos, lineEnd])
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xff8800, linewidth: 2, depthTest: false })
+  extrudeAxisHelper = new THREE.Line(lineGeom, lineMat)
+  extrudeAxisHelper.renderOrder = 999
+  obj.add(extrudeAxisHelper)
+}
+
+/**
+ * Handle mouse down for extrude - detect face and start dragging
+ */
+function handleExtrudeMouseDown(_event: MouseEvent, intersect: THREE.Intersection): boolean {
+  if (!extrudeMode || !selectedDebugObject) return false
+
+  // Check if clicking on the selected object
+  let isSelectedObj = false
+  let checkObj: THREE.Object3D | null = intersect.object
+  while (checkObj) {
+    if (checkObj === selectedDebugObject.object) {
+      isSelectedObj = true
+      break
+    }
+    checkObj = checkObj.parent
+  }
+
+  if (!isSelectedObj) return false
+
+  // Detect which face was clicked
+  const face = detectClickedFace(
+    selectedDebugObject.object,
+    intersect.point,
+    intersect.face?.normal || null,
+    intersect.object
+  )
+
+  if (!face) return false
+
+  extrudeFace = { axis: face.axis, side: face.side }
+  extrudeActive = true
+  extrudeStartPoint = intersect.point.clone()
+
+  // Store starting size and position
+  const obj = selectedDebugObject.object
+  if (obj instanceof THREE.Mesh && obj.geometry instanceof THREE.BoxGeometry) {
+    const params = obj.geometry.parameters
+    extrudeStartSize = { x: params.width, y: params.height, z: params.depth }
+  } else {
+    // Fallback: estimate from bounding box
+    const box = new THREE.Box3().setFromObject(obj)
+    const size = new THREE.Vector3()
+    box.getSize(size)
+    extrudeStartSize = { x: size.x, y: size.y, z: size.z }
+  }
+  extrudeStartPos = { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+
+  // Show helper
+  showExtrudeFaceHelper(obj, face.axis, face.side)
+
+  return true
+}
+
+/**
+ * Handle mouse move during extrude drag
+ */
+function handleExtrudeMouseMove(event: MouseEvent): void {
+  if (!extrudeActive || !extrudeFace || !selectedDebugObject || !extrudeStartPoint || !extrudeStartSize || !extrudeStartPos) return
+  if (!renderer || !perspectiveCamera || !raycaster) return
+
+  const rect = renderer.domElement.getBoundingClientRect()
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+
+  // Create a plane perpendicular to view through the start point for dragging
+  const obj = selectedDebugObject.object
+
+  // Get extrude axis in world space
+  const localAxisDir = new THREE.Vector3()
+  if (extrudeFace.axis === 'x') localAxisDir.set(1, 0, 0)
+  else if (extrudeFace.axis === 'y') localAxisDir.set(0, 1, 0)
+  else localAxisDir.set(0, 0, 1)
+
+  const worldAxisDir = localAxisDir.clone()
+  const objQuaternion = new THREE.Quaternion()
+  obj.getWorldQuaternion(objQuaternion)
+  worldAxisDir.applyQuaternion(objQuaternion).normalize()
+
+  // Create a plane that contains the axis and is visible to the camera
+  const cameraDir = new THREE.Vector3()
+  perspectiveCamera.getWorldDirection(cameraDir)
+
+  // Plane normal is perpendicular to both axis and camera direction
+  let planeNormal = new THREE.Vector3().crossVectors(worldAxisDir, cameraDir)
+  if (planeNormal.length() < 0.1) {
+    // Axis is parallel to camera direction, use camera up instead
+    planeNormal.crossVectors(worldAxisDir, perspectiveCamera.up)
+  }
+  planeNormal.crossVectors(planeNormal, worldAxisDir).normalize()
+
+  const plane = new THREE.Plane()
+  plane.setFromNormalAndCoplanarPoint(planeNormal, extrudeStartPoint)
+
+  // Raycast to plane
+  raycaster.setFromCamera(mouse, perspectiveCamera)
+  const intersection = new THREE.Vector3()
+  if (!raycaster.ray.intersectPlane(plane, intersection)) return
+
+  // Calculate distance moved along the extrude axis
+  const movement = intersection.clone().sub(extrudeStartPoint)
+  let distance = movement.dot(worldAxisDir)
+
+  // Apply direction based on which side of face
+  if (extrudeFace.side === 'min') {
+    distance = -distance  // Min side moves opposite
+  }
+
+  // Calculate new size - minimum size constraint
+  const minSize = 0.1
+  let newSizeValue = 0
+
+  if (extrudeFace.axis === 'x') {
+    newSizeValue = Math.max(minSize, extrudeStartSize.x + distance)
+  } else if (extrudeFace.axis === 'y') {
+    newSizeValue = Math.max(minSize, extrudeStartSize.y + distance)
+  } else {
+    newSizeValue = Math.max(minSize, extrudeStartSize.z + distance)
+  }
+
+  // Update geometry
+  if (obj instanceof THREE.Mesh) {
+    const oldGeom = obj.geometry
+    let newWidth = extrudeStartSize.x
+    let newHeight = extrudeStartSize.y
+    let newDepth = extrudeStartSize.z
+
+    if (extrudeFace.axis === 'x') newWidth = newSizeValue
+    else if (extrudeFace.axis === 'y') newHeight = newSizeValue
+    else newDepth = newSizeValue
+
+    obj.geometry = new THREE.BoxGeometry(newWidth, newHeight, newDepth)
+    oldGeom.dispose()
+
+    // Move position to keep opposite face in place
+    // The box center moves by half the size change
+    const sizeChange = newSizeValue - (extrudeFace.axis === 'x' ? extrudeStartSize.x :
+                                        extrudeFace.axis === 'y' ? extrudeStartSize.y :
+                                        extrudeStartSize.z)
+    const posOffset = sizeChange / 2
+
+    // Transform offset to parent space
+    const localOffset = new THREE.Vector3()
+    if (extrudeFace.axis === 'x') localOffset.x = extrudeFace.side === 'max' ? posOffset : -posOffset
+    else if (extrudeFace.axis === 'y') localOffset.y = extrudeFace.side === 'max' ? posOffset : -posOffset
+    else localOffset.z = extrudeFace.side === 'max' ? posOffset : -posOffset
+
+    // Apply object's local rotation to offset
+    localOffset.applyQuaternion(obj.quaternion)
+
+    obj.position.set(
+      extrudeStartPos.x + localOffset.x,
+      extrudeStartPos.y + localOffset.y,
+      extrudeStartPos.z + localOffset.z
+    )
+
+    // Update face helper
+    showExtrudeFaceHelper(obj, extrudeFace.axis, extrudeFace.side)
+  }
+}
+
+/**
+ * Handle mouse up - finish extrude
+ */
+function handleExtrudeMouseUp(): void {
+  if (!extrudeActive || !selectedDebugObject) return
+
+  const obj = selectedDebugObject.object
+
+  // Update the debug object data
+  selectedDebugObject.position = {
+    x: obj.position.x / SCALE,
+    y: obj.position.y / SCALE,
+    z: obj.position.z / SCALE
+  }
+
+  if (obj instanceof THREE.Mesh && obj.geometry instanceof THREE.BoxGeometry) {
+    const params = obj.geometry.parameters
+    selectedDebugObject.scale = {
+      x: params.width / SCALE,
+      y: params.height / SCALE,
+      z: params.depth / SCALE
+    }
+  }
+
+  // Emit update
+  emit('debugObjectUpdated', {
+    id: selectedDebugObject.id,
+    position: selectedDebugObject.position,
+    rotation: selectedDebugObject.rotation,
+    scale: selectedDebugObject.scale
+  })
+
+  // Reset state but stay in extrude mode
+  extrudeActive = false
+  extrudeFace = null
+  extrudeStartPoint = null
+  extrudeStartSize = null
+  extrudeStartPos = null
+  clearExtrudeHelpers()
+}
+
+// ============================================
 // PUBLIC METHODS (exposed to parent)
 // ============================================
 defineExpose({
   createLadder,
   resetCamera: () => {
-    targetRotation = { x: 0, y: 0.3 }
-    currentRotation = { x: 0, y: 0.3 }
+    targetRotation = { x: 0.35, y: -0.785 }
+    currentRotation = { x: 0.35, y: -0.785 }
     cameraOffset = { x: 0, y: 0, z: 0 }
-    if (perspectiveCamera) perspectiveCamera.position.z = 50
+    if (perspectiveCamera) perspectiveCamera.position.z = 80
   },
   setMeasureMode,
   setMeasureAxisMode,
@@ -5231,7 +7897,39 @@ defineExpose({
   getGlobalWspornikDistance,
   getWspornikTypeForDistance,
   setWallWidth,
-  getWallWidth
+  getWallWidth,
+  // Debug editor
+  getAvailableModels,
+  addDebugModel,
+  addDebugBox,
+  updateDebugObject,
+  removeDebugObject,
+  getDebugObjects,
+  selectDebugObject,
+  getSelectedDebugObject,
+  clearAllDebugObjects,
+  duplicateDebugObject,
+  setTransformMode,
+  getTransformMode,
+  // Scene object editing
+  collectSceneObjects,
+  deleteSceneObject,
+  // Undo/Redo
+  undo,
+  redo,
+  canUndo,
+  canRedo,
+  clearHistory,
+  // Align mode
+  startAlignMode,
+  cancelAlignMode,
+  getAlignState,
+  // Extrude mode
+  startExtrudeMode,
+  cancelExtrudeMode,
+  getExtrudeState,
+  // BOM generation
+  generateBOM
 })
 </script>
 
