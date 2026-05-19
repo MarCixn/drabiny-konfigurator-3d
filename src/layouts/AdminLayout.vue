@@ -4280,6 +4280,9 @@ function toggleCageClosing() {
 
                 <!-- Fixed buttons for step 9 -->
                 <div v-if="customerWizardStep === 9" class="summary-fixed-actions">
+                  <button class="btn-back" @click="customerPrevStep">
+                    ← Wstecz
+                  </button>
                   <button class="btn-secondary" @click="addAnotherLadder">
                     + Dodaj kolejną drabinę
                   </button>
@@ -9799,6 +9802,19 @@ body {
 
 .customer-wizard .summary-fixed-actions .btn-primary:hover {
   background: #2980b9;
+}
+
+.customer-wizard .summary-fixed-actions .btn-back {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 10px;
+  font-size: 0.9rem;
+}
+
+.customer-wizard .summary-fixed-actions .btn-back:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
 }
 
 /* Reset button in header - same style as back button */
