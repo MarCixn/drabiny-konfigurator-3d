@@ -347,7 +347,6 @@ let cameraOffset = { x: 0, y: 0, z: 0 }
 let initialPinchDistance: number | null = null
 let lastZoom = 80
 let lastPanCenter = { x: 0, y: 0 }
-let needsRender = true  // Flag for on-demand rendering
 let isAnimating = false // Flag for smooth rotation animation
 let animationFrameId: number | null = null
 let clickStartPosition = { x: 0, y: 0 }
@@ -5110,7 +5109,6 @@ function emitUpdate() {
 
 // Request a single render frame
 function requestRender() {
-  needsRender = true
   scheduleFrame()
 }
 
@@ -5166,7 +5164,6 @@ function animate() {
 
   // Render the frame
   renderer.render(scene, camera)
-  needsRender = false
 
   // Continue animation loop while interacting or smoothly interpolating
   if (isAnimating || isDragging || isPanning) {

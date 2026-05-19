@@ -208,7 +208,7 @@ function setCustomerRoofType(type: CustomerRoofType) {
   // Reset wyboru zakończenia przy zmianie typu dachu
   customerLadderEnding.value = null
   // Reset wsporników do domyślnych (krótki 215mm)
-  state.value.bracketType = 'krotki'
+  state.value.bracketType = 'short'
   state.value.bracketSpacing = 215
   globalWspornikDistance.value = 215
   threeCanvasRef.value?.setGlobalWspornikDistance(215, 1)
@@ -525,14 +525,6 @@ const hiddenDistanceMm = computed(() => {
 const effectiveAtticMinDistanceMm = computed(() => {
   const rawMinDistanceMm = (state.value.atticMinDistance || 0) * 10
   return rawMinDistanceMm + hiddenDistanceMm.value
-})
-
-// Suma grubości ściany + ocieplenie 1 + ocieplenie 2 (cm)
-const atticTotalThickness = computed(() => {
-  const wallThickness = state.value.atticWallThickness || 25
-  const insulation1 = state.value.atticHasInsulation ? (state.value.atticInsulationThickness || 0) : 0
-  const insulation2 = state.value.atticBackHasInsulation ? (state.value.atticBackInsulationThickness || 0) : 0
-  return wallThickness + insulation1 + insulation2
 })
 
 // Maksymalna grubość murka dla bigfoot/custom-base
@@ -1156,10 +1148,11 @@ function calculateModules(rungCount: number) {
 function calculateCageHoops(
   firstRungHeight: number,
   modules: ReturnType<typeof calculateModules>,
-  suspended: boolean = false,
-  suspendedHeightMm: number = 0,
+  _suspended: boolean = false,
+  _suspendedHeightMm: number = 0,
   scheme: string = 'no-platform'
 ) {
+  void _suspended; void _suspendedHeightMm; // Reserved for future use
   // Środek pierwszej obręczy jest 112.2cm nad górnym szczeblem
   const firstHoopHeight = firstRungHeight + LADDER_CONSTANTS.CAGE_START_OFFSET
 
@@ -1182,9 +1175,6 @@ function calculateCageHoops(
   if (scheme === 'attic-passage') {
     maxHolesAvailable += 3
   }
-
-  // Poziom gruntu (dla zawieszonej drabiny - to punkt zawieszenia, ale kosz liczymy od ziemi)
-  const groundLevel = (suspended && suspendedHeightMm > 0) ? suspendedHeightMm : 0
 
   // KLUCZOWE: Ostatnia obręcz musi być między 2.2m a 3m od ZIEMI (bezwzględnie)
   // Nie od punktu zawieszenia!
