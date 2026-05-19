@@ -4236,6 +4236,30 @@ function toggleCageClosing() {
                         </div>
                       </div>
                     </div>
+
+                    <!-- Przeszkody - rozwijalna edycja -->
+                    <div class="summary-expand-item" :class="{ expanded: summaryExpandedItem === 'obstacles' }">
+                      <div class="summary-expand-header" @click="summaryExpandedItem = summaryExpandedItem === 'obstacles' ? null : 'obstacles'">
+                        <div class="summary-edit-content">
+                          <span class="summary-edit-label">Przeszkody</span>
+                          <span class="summary-edit-value">{{ state.obstacles.length > 0 ? state.obstacles.length + ' szt.' : 'Brak' }}</span>
+                        </div>
+                        <span class="summary-expand-icon">{{ summaryExpandedItem === 'obstacles' ? '▲' : '▼' }}</span>
+                      </div>
+                      <div v-if="summaryExpandedItem === 'obstacles'" class="summary-expand-content">
+                        <div class="toggle-options compact">
+                          <button class="toggle-btn" :class="{ selected: state.obstacles.length === 0 }" @click="state.hasObstacles = false; state.obstacles = []">Brak</button>
+                          <button class="toggle-btn" :class="{ selected: state.obstacles.length > 0 }" @click="state.hasObstacles = true; if (state.obstacles.length === 0) addObstacle()">Są przeszkody</button>
+                        </div>
+                        <div v-if="state.obstacles.length > 0" class="obstacles-summary-list">
+                          <div v-for="(obs, index) in state.obstacles" :key="obs.id" class="obstacle-summary-item">
+                            <span class="obstacle-info">{{ index + 1 }}. {{ obs.type }} - {{ obs.heightFrom }}m ({{ obs.height }}cm)</span>
+                            <button class="obstacle-remove-btn" @click="removeObstacle(obs.id)">×</button>
+                          </div>
+                          <button class="add-obstacle-btn" @click="addObstacle">+ Dodaj przeszkodę</button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
                   <!-- Szybkie opcje -->
@@ -4280,12 +4304,14 @@ function toggleCageClosing() {
 
                 <!-- Fixed buttons for step 9 -->
                 <div v-if="customerWizardStep === 9" class="summary-fixed-actions">
-                  <button class="btn-back" @click="customerPrevStep">
-                    ← Wstecz
-                  </button>
-                  <button class="btn-secondary" @click="addAnotherLadder">
-                    + Dodaj kolejną drabinę
-                  </button>
+                  <div class="summary-actions-row">
+                    <button class="wizard-nav-btn prev" @click="customerPrevStep">
+                      Wstecz
+                    </button>
+                    <button class="btn-secondary" @click="addAnotherLadder">
+                      + Dodaj kolejną drabinę
+                    </button>
+                  </div>
                   <button class="btn-primary" @click="goToSummary">
                     Przejdź do wyceny
                   </button>
@@ -9804,17 +9830,71 @@ body {
   background: #2980b9;
 }
 
-.customer-wizard .summary-fixed-actions .btn-back {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  padding: 10px;
+.customer-wizard .summary-actions-row {
+  display: flex;
+  gap: 10px;
+}
+
+.customer-wizard .summary-actions-row .wizard-nav-btn {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 14px 20px;
+}
+
+.customer-wizard .summary-actions-row .btn-secondary {
+  flex: 1;
+}
+
+/* Obstacles summary list */
+.customer-wizard .obstacles-summary-list {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.customer-wizard .obstacle-summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-secondary);
+  padding: 8px 12px;
+  border-radius: 6px;
   font-size: 0.9rem;
 }
 
-.customer-wizard .summary-fixed-actions .btn-back:hover {
-  border-color: var(--text-primary);
+.customer-wizard .obstacle-info {
   color: var(--text-primary);
+}
+
+.customer-wizard .obstacle-remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.customer-wizard .obstacle-remove-btn:hover {
+  color: #e74c3c;
+}
+
+.customer-wizard .add-obstacle-btn {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--accent);
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.customer-wizard .add-obstacle-btn:hover {
+  border-color: var(--accent);
+  background: rgba(52, 152, 219, 0.1);
 }
 
 /* Reset button in header - same style as back button */
