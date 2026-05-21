@@ -63,6 +63,10 @@ export interface LadderConfig {
     suspended: boolean
     suspendedHeight: number
   }
+
+  // Connector types from 3D model (uchwyt, sciskany, lacznik)
+  connectorTypes?: string[]
+  wspornikTypes?: string[]
 }
 
 export interface CalculateRequest {
@@ -615,17 +619,53 @@ export function calculateLocal(config: LadderConfig): Partial<CalculateResponse>
     })
   }
 
-  if (connectorCount > 0) {
+  // Count connector types from 3D model if available
+  const connTypes = config.connectorTypes || []
+  const uchwytCount = connTypes.filter(t => t === 'uchwyt').length || connectorCount
+  const sciskanyCount = connTypes.filter(t => t === 'sciskany').length
+  const lacznikCount = connTypes.filter(t => t === 'lacznik').length
+
+  // If no connectorTypes provided, use fallback (all as uchwyt)
+  const totalConnectors = uchwytCount + sciskanyCount + lacznikCount
+
+  if (uchwytCount > 0) {
     components.push({
       code: 'uchwyt_montazowo_laczacy',
       name: 'Uchwyt montazowo-laczacy (para L+P)',
-      quantity: connectorCount,
+      quantity: uchwytCount,
       unit: 'par',
       unitPrice: 0,
       totalPrice: 0,
       category: 'mounting'
     })
+  }
 
+  if (sciskanyCount > 0) {
+    components.push({
+      code: 'uchwyt_sciskany',
+      name: 'Uchwyt sciskany (para L+P)',
+      quantity: sciskanyCount,
+      unit: 'par',
+      unitPrice: 0,
+      totalPrice: 0,
+      category: 'mounting'
+    })
+  }
+
+  if (lacznikCount > 0) {
+    components.push({
+      code: 'lacznik_drabin',
+      name: 'Lacznik drabin (para L+P)',
+      quantity: lacznikCount,
+      unit: 'par',
+      unitPrice: 0,
+      totalPrice: 0,
+      category: 'mounting'
+    })
+  }
+
+  // Add wsporniki for all connectors
+  if (totalConnectors > 0 || connectorCount > 0) {
     const wspornikCode = config.bracketType === 'short' ? 'wspornik_16_26' :
                          config.bracketType === 'medium' ? 'wspornik_26_36' : 'wspornik_36_46'
     const wspornikName = config.bracketType === 'short' ? 'Wspornik 16-26cm' :
@@ -634,7 +674,7 @@ export function calculateLocal(config: LadderConfig): Partial<CalculateResponse>
     components.push({
       code: wspornikCode,
       name: `${wspornikName} (para L+P)`,
-      quantity: connectorCount,
+      quantity: totalConnectors > 0 ? totalConnectors : connectorCount,
       unit: 'par',
       unitPrice: 0,
       totalPrice: 0,

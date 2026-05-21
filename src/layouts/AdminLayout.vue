@@ -276,7 +276,10 @@ const threeState = ref({
   totalHeightMm: 0,
   // Watchdog - ciągłe pomiary
   lastRungToGround: 0,
-  lastHoopToGround: 0
+  lastHoopToGround: 0,
+  // Typy łączników i wsporników (z ThreeCanvas)
+  connectorTypes: [] as string[],
+  wspornikTypes: [] as string[]
 })
 
 const threeReady = ref(false)
@@ -397,6 +400,8 @@ function onThreeUpdate(data: {
   totalHeightMm: number;
   lastRungToGround?: number;
   lastHoopToGround?: number;
+  connectorTypes?: string[];
+  wspornikTypes?: string[];
 }) {
   threeState.value.totalRungs = data.totalRungs
   threeState.value.totalHeightMm = data.totalHeightMm
@@ -405,6 +410,12 @@ function onThreeUpdate(data: {
   }
   if (data.lastHoopToGround !== undefined) {
     threeState.value.lastHoopToGround = data.lastHoopToGround
+  }
+  if (data.connectorTypes) {
+    threeState.value.connectorTypes = data.connectorTypes
+  }
+  if (data.wspornikTypes) {
+    threeState.value.wspornikTypes = data.wspornikTypes
   }
 }
 
@@ -1499,7 +1510,10 @@ async function fetchCalculation() {
       type: obs.type,
       bottomHeightMm: obs.heightFrom * 1000,
       heightMm: obs.height * 1000
-    }))
+    })),
+    // Typy łączników z modelu 3D (uchwyt, sciskany, lacznik)
+    connectorTypes: threeState.value.connectorTypes,
+    wspornikTypes: threeState.value.wspornikTypes
   }
 
   try {
