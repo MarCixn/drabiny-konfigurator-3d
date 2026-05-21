@@ -621,11 +621,22 @@ export function calculateLocal(config: LadderConfig): Partial<CalculateResponse>
 
   // Count connector types from 3D model if available
   const connTypes = config.connectorTypes || []
-  const uchwytCount = connTypes.filter(t => t === 'uchwyt').length || connectorCount
-  const sciskanyCount = connTypes.filter(t => t === 'sciskany').length
-  const lacznikCount = connTypes.filter(t => t === 'lacznik').length
 
-  // If no connectorTypes provided, use fallback (all as uchwyt)
+  // If connectorTypes array is provided and has values, count each type
+  // Otherwise fallback to counting all as uchwyt
+  let uchwytCount = 0
+  let sciskanyCount = 0
+  let lacznikCount = 0
+
+  if (connTypes.length > 0) {
+    uchwytCount = connTypes.filter(t => t === 'uchwyt').length
+    sciskanyCount = connTypes.filter(t => t === 'sciskany').length
+    lacznikCount = connTypes.filter(t => t === 'lacznik').length
+  } else {
+    // Fallback - all connectors are uchwyt
+    uchwytCount = connectorCount
+  }
+
   const totalConnectors = uchwytCount + sciskanyCount + lacznikCount
 
   if (uchwytCount > 0) {

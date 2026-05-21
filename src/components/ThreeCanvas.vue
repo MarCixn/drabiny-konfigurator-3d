@@ -4091,6 +4091,7 @@ function renderAtticPassage(totalHeight: number) {
     attyka.position.y = (topOfMainRails + DIMS.atticRailHeight / 2) * SCALE
     attyka.position.z = (-535 - 3) * SCALE  // Korekta -3mm
     attyka.userData.ladderNum = 0
+    attyka.userData.isAtticPassage = true
     addOutlineToModel(attyka)
     ladderContainer.add(attyka)
   }
@@ -4153,7 +4154,7 @@ function renderAtticPassage(totalHeight: number) {
       prowadnica.position.x = 0
       prowadnica.position.y = (bigfootBaseY + 33) * SCALE  // 33mm wyżej
       prowadnica.position.z = bigfootZ * SCALE
-      prowadnica.userData.isBigfoot = true
+      prowadnica.userData.isBigfootGuide = true
       addOutlineToModel(prowadnica)
       ladderContainer.add(prowadnica)
     }
@@ -6498,6 +6499,8 @@ function generateBOM(): BOMData {
       const connType = child.userData.connectorType || 'uchwyt'
       if (connType === 'sciskany') {
         itemKey = 'connector_sciskany'
+      } else if (connType === 'lacznik') {
+        itemKey = 'connector_lacznik'
       } else {
         itemKey = 'connector_uchwyt'
       }
