@@ -233,7 +233,7 @@ export async function generateBOMPdf(bomData: BOMData, options: PDFGeneratorOpti
   // Title and dimensions (like .nazwa)
   doc.setFontSize(18)
   doc.setFont('helvetica', 'bold')
-  doc.text('STRONA WEJSCIA', pageWidth / 2, y, { align: 'center' })
+  doc.text('ZLECENIE', pageWidth / 2, y, { align: 'center' })
   y += 8
 
   doc.setFontSize(10)
@@ -433,126 +433,6 @@ export async function generateBOMPdf(bomData: BOMData, options: PDFGeneratorOpti
     drawBox(boxStartY2 - 3, boxEndY2)
   }
 
-  // ============================================
-  // SUMMARY PAGE
-  // ============================================
-  doc.addPage()
-  y = margin
-  addPageHeader()
-
-  doc.setFontSize(12)
-  doc.setFont('helvetica', 'normal')
-  doc.text('Zlecenie nr:', pageWidth / 2, y, { align: 'center' })
-  y += 6
-
-  doc.setFontSize(20)
-  doc.setFont('helvetica', 'bold')
-  doc.text(orderNumber, pageWidth / 2, y, { align: 'center' })
-  y += 14
-
-  doc.setFontSize(18)
-  doc.setFont('helvetica', 'bold')
-  doc.text('PODSUMOWANIE', pageWidth / 2, y, { align: 'center' })
-  y += 12
-
-  const summaryBoxStart = y
-
-  // Combine all items
-  const allItems: BOMItem[] = [...bomData.ladder1.items]
-  if (bomData.ladder2) {
-    allItems.push(...bomData.ladder2.items)
-  }
-
-  // Group by category
-  const byCategory: Record<string, BOMItem[]> = {}
-  for (const item of allItems) {
-    if (!byCategory[item.category]) {
-      byCategory[item.category] = []
-    }
-    // Check if same item exists, if so add quantities
-    const existing = byCategory[item.category].find(i => i.namePL === item.namePL)
-    if (existing) {
-      existing.quantity += item.quantity
-    } else {
-      byCategory[item.category].push({ ...item })
-    }
-  }
-
-  // Category order
-  const categoryOrder = ['drabina', 'lacznik', 'wspornik', 'kosz', 'porecz', 'podest', 'montaz', 'attyka']
-
-  doc.setFontSize(14)
-  doc.setFont('helvetica', 'bold')
-  doc.text('Wszystkie elementy:', margin + 10, y)
-  y += 8
-
-  // Table header
-  doc.setFontSize(9)
-  doc.setFont('helvetica', 'bold')
-  doc.text('Zdj.', colImg, y)
-  doc.text('Nazwa elementu', col2, y)
-  doc.text('Ilosc', col3, y)
-  doc.text('OK', col4, y)
-  y += 3
-  drawLine(margin + 5, pageWidth - margin - 5)
-  y += 2
-
-  doc.setFont('helvetica', 'normal')
-
-  for (const category of categoryOrder) {
-    const items = byCategory[category]
-    if (!items || items.length === 0) continue
-
-    // Category header
-    checkPageBreak(15)
-    doc.setFontSize(8)
-    doc.setFont('helvetica', 'bold')
-    doc.setTextColor(80, 80, 80)
-    doc.text(polishToAscii(translateCategory(category).toUpperCase()), col2, y)
-    doc.setTextColor(0, 0, 0)
-    y += 5
-
-    for (const item of items) {
-      checkPageBreak(rowHeight + 2)
-
-      const rowStartY = y
-
-      // Add image at start of row (centered)
-      addItemImage(item, colImg, y)
-
-      // Text vertically centered in row
-      const textY = y + imgSize / 2 + 1
-
-      doc.setFontSize(9)
-      doc.setFont('helvetica', 'normal')
-      doc.text(polishToAscii(item.namePL), col2, textY)
-      doc.text(`${item.quantity} ${polishToAscii(item.unit)}`, col3, textY)
-
-      // Checkbox centered vertically
-      doc.setDrawColor(100, 100, 100)
-      doc.rect(col4, textY - 2, 4, 4)
-
-      // Move y to after the row
-      y = rowStartY + rowHeight
-      drawLine(margin + 5, pageWidth - margin - 5)
-      y += 2
-    }
-  }
-
-  y += 5
-  const summaryBoxEnd = y
-  drawBox(summaryBoxStart - 3, summaryBoxEnd)
-
-  // Footer with generation info
-  y += 10
-  doc.setFontSize(8)
-  doc.setFont('helvetica', 'italic')
-  doc.setTextColor(120, 120, 120)
-  doc.text(`Wygenerowano: ${formatDate(bomData.generatedAt)}`, pageWidth / 2, y, { align: 'center' })
-  y += 4
-  doc.text('Kalkulator Drabin', pageWidth / 2, y, { align: 'center' })
-  doc.setTextColor(0, 0, 0)
-
   // Add page numbers to all pages
   const totalPages = doc.getNumberOfPages()
   for (let i = 1; i <= totalPages; i++) {
@@ -578,16 +458,6 @@ function generateOrderNumber(): string {
   const hours = String(now.getHours()).padStart(2, '0')
   const minutes = String(now.getMinutes()).padStart(2, '0')
   return `${year}-${month}-${day}/${hours}${minutes}`
-}
-
-function formatDate(date: Date): string {
-  return date.toLocaleDateString('pl-PL', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
 }
 
 function translateScheme(scheme: string): string {
@@ -633,18 +503,4 @@ function translateMountType(type: string): string {
     'self': 'Samodzielny'
   }
   return translations[type] || type
-}
-
-function translateCategory(category: string): string {
-  const translations: Record<string, string> = {
-    'drabina': 'Moduly drabiny',
-    'lacznik': 'Laczniki',
-    'wspornik': 'Wsporniki',
-    'kosz': 'Kosz bezpieczenstwa',
-    'porecz': 'Porecze',
-    'podest': 'Podesty',
-    'montaz': 'Elementy montazowe',
-    'attyka': 'Przejscie przez attyke'
-  }
-  return translations[category] || category
 }

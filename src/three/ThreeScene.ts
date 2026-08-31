@@ -104,6 +104,10 @@ export class ThreeScene {
   private modelsLoaded = false
   private pendingConfig: { config: LadderConfig; state: ThreeDState } | null = null
 
+  // Debug mode
+  private debugMode = false
+  private measurementBoxes: THREE.Mesh[] = []
+
   constructor(container: HTMLElement) {
     this.container = container
     this.loader = new GLTFLoader()
@@ -418,6 +422,9 @@ export class ThreeScene {
       this.ladderContainer.remove(this.ladderContainer.children[0])
     }
 
+    // Wyczyść boxy mierzenia
+    this.measurementBoxes = []
+
     const totalHeight = this.getTotalHeight(state.numX7Ladders, state.finalLadderRungs)
     const geoConfig = LADDER_GEOMETRY_CONFIG
 
@@ -660,6 +667,29 @@ export class ThreeScene {
         hoop.position.z = (geoConfig.zOffset + 241) * SCALE
 
         this.ladderContainer.add(hoop)
+
+        // Box mierzenia na górze pierwszej obręczy
+        if (i === 0) {
+          // Box o wymiarach 100x50x100mm na górze obręczy
+          const boxHeight = 50 // mm
+          const boxWidth = 100 // mm
+          const boxDepth = 100 // mm
+          const boxYPos = yPos + 300 // 300mm nad obręczą (góra obręczy)
+
+          const measureBox = this.createMeasurementBox(
+            boxWidth * SCALE,
+            boxHeight * SCALE,
+            boxDepth * SCALE,
+            new THREE.Vector3(
+              0,
+              boxYPos * SCALE,
+              (geoConfig.zOffset + 241) * SCALE
+            ),
+            0xff00ff // Magenta
+          )
+          measureBox.userData.measurementBoxType = 'firstHoopTop'
+          this.ladderContainer.add(measureBox)
+        }
       }
     }
   }
@@ -720,6 +750,49 @@ export class ThreeScene {
     )
     this.controls.target.set(0, 2.5, 0)
     this.controls.update()
+  }
+
+  /**
+   * Utwórz measurement box (box mierzenia) z odpowiednią widocznością
+   * Miarka zawsze ignoruje te boxy
+   */
+  private createMeasurementBox(
+    width: number,
+    height: number,
+    depth: number,
+    position: THREE.Vector3,
+    color: number = 0xff00ff
+  ): THREE.Mesh {
+    const geometry = new THREE.BoxGeometry(width, height, depth)
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: this.debugMode ? 0.5 : 0,
+      depthWrite: false
+    })
+    const box = new THREE.Mesh(geometry, material)
+    box.position.copy(position)
+    box.userData.isMeasurementBox = true
+    this.measurementBoxes.push(box)
+    return box
+  }
+
+  /**
+   * Ustaw tryb debug - widoczność boxów mierzenia
+   */
+  setDebugMode(enabled: boolean): void {
+    this.debugMode = enabled
+    for (const box of this.measurementBoxes) {
+      const mat = box.material as THREE.MeshBasicMaterial
+      mat.opacity = enabled ? 0.5 : 0
+    }
+  }
+
+  /**
+   * Pobierz stan trybu debug
+   */
+  isDebugModeEnabled(): boolean {
+    return this.debugMode
   }
 
   /**

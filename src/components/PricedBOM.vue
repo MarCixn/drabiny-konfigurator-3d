@@ -218,7 +218,7 @@ const codeMapping: Record<string, string> = {
 
   // Kosz bezpieczeństwa
   'cage_hoop': 'obrecz_kosza',
-  'cage_closing': 'zamkniecie_kosza',
+  'cage_closing': 'blokada_dostepu',
   'angle_bracket_x2': 'katownik_2_otworowy',
   'angle_bracket_x3': 'katownik_3_otworowy',
   'angle_bracket_x4': 'katownik_4_otworowy',

@@ -23,6 +23,7 @@ const props = defineProps<{
   // Optional advanced props
   cageClosing?: boolean
   restingPlatform?: boolean
+  hasHandrails?: boolean  // Czy renderować poręcze (+1.1m)
   distanceFromGround?: number  // in mm, default 160
   showWsporniki?: boolean  // Show/hide wspornik models (default true)
   eave?: { height: number; depth: number } | null  // Eave/overhang at top of wall
@@ -51,6 +52,12 @@ const props = defineProps<{
   insulationThickness?: number  // Grubość ocieplenia w mm
   // Ściana strony zejścia dla płaskiego/okapu
   showDescentWall?: boolean  // Pokaż ścianę zejścia (dla płaskiego dachu)
+  // Początkowe pozycje ściskanych uchwytów (dla trybu podglądu)
+  initialSciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
+  // Początkowe typy łączników (dla trybu podglądu)
+  initialConnectorTypes?: string[]
+  // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
+  descentWspornikDistance?: number  // w mm
 }>()
 
 // ============================================
@@ -64,8 +71,10 @@ const emit = defineEmits<{
     safetyCageCount: number
     connectorTypes: string[]
     wspornikTypes: string[]
+    sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
     lastRungToGround?: number
     lastHoopToGround?: number
+    bomData?: BOMData
   }): void
   (e: 'stateChange', data: object): void
   (e: 'editConnector', data: {
@@ -114,6 +123,12 @@ const emit = defineEmits<{
     position: { x: number; y: number; z: number }
     rotation: { x: number; y: number; z: number }
     scale?: { x: number; y: number; z: number }
+  }): void
+  (e: 'deleteRequest', data: {
+    objectName: string
+    objectType: string
+    elementId: string
+    objectData: any
   }): void
 }>()
 
@@ -257,6 +272,11 @@ let savedBackground: THREE.Color | null = null
 // Debug mode
 let debugMode = false
 let debugObjects: THREE.Object3D[] = []
+let measurementBoxes: THREE.Mesh[] = [] // Boxy mierzenia (opacity 0 gdy nie w debug mode, miarka zawsze ignoruje)
+
+// Osobne kontrolki widoczności wymiarów (niezależne od debug mode)
+let showMeasurementBoxes = false // Widoczność boxów mierzenia
+let showDimensions = false // Widoczność linii wymiarowej, etykiety i dysków
 
 // Debug editor state
 interface DebugObject {
@@ -369,6 +389,16 @@ let measureSphere2: THREE.Mesh | null = null
 let measureLine: THREE.Line | null = null
 let measurePreviewSphere: THREE.Mesh | null = null
 
+// Delete mode (for seller mode)
+let deleteMode = false
+let deleteHighlightedObject: THREE.Object3D | null = null
+let originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]> = new Map()
+
+// Hidden elements system - elementy "usunięte" przez sprzedawcę
+// Przechowuje ID elementów (np. "cage_hoop_1_3", "connector_1_2_left")
+// Przeżywa regenerację modelu - elementy są ukrywane po renderowaniu
+let hiddenElements: Set<string> = new Set()
+
 // ============================================
 // STATE VARIABLES
 // ============================================
@@ -442,6 +472,7 @@ let midRungBracketDistance2 = 215
 
 // Other state
 let handrailType = 'none'
+let hasHandrailsLocal = true
 let wallHeightConfig = 0
 let wallWidthConfig = 3000  // in mm, default 3000
 let showWall = true
@@ -571,6 +602,10 @@ onMounted(() => {
   loadModels()
   setupControls()
   requestRender() // Initial render (on-demand rendering system)
+  // Additional render after short delay to ensure lighting is fully applied
+  setTimeout(() => {
+    requestRender()
+  }, 100)
   window.addEventListener('resize', handleResize)
 })
 
@@ -609,12 +644,32 @@ watch(() => [
   props.suspendedHeight,
   props.cageClosing,
   props.restingPlatform,
+  props.hasHandrails,
   props.distanceFromGround,
   props.showWsporniki,
   props.eave,
   props.descentLadder,
-  props.descentMountType
+  props.descentMountType,
+  // Insulation props
+  props.hasInsulation,
+  props.insulationThickness,
+  props.atticHasInsulation,
+  props.atticInsulationThickness,
+  props.atticBackHasInsulation,
+  props.atticBackInsulationThickness,
+  props.atticWallThickness,
+  // Descent ladder wspornik distance
+  props.descentWspornikDistance
 ], () => {
+  console.log('[ThreeCanvas] Watch triggered - props changed:', {
+    wspornikDistance: props.wspornikDistance,
+    descentWspornikDistance: props.descentWspornikDistance,
+    hasInsulation: props.hasInsulation,
+    insulationThickness: props.insulationThickness,
+    atticHasInsulation: props.atticHasInsulation,
+    atticInsulationThickness: props.atticInsulationThickness,
+    scheme: props.scheme
+  })
   syncPropsToState()
   if (modelsLoaded) {
     createLadder()
@@ -660,10 +715,32 @@ function mapSchemeToHandrailType(scheme: string): string {
 }
 
 function syncPropsToState() {
+  // Initialize sciskaneHandles from props if provided (for view mode)
+  if (props.initialSciskaneHandles && props.initialSciskaneHandles.length > 0 && sciskaneHandles1.length === 0) {
+    for (const handle of props.initialSciskaneHandles) {
+      sciskaneHandles1.push({
+        offsetFromBottom: handle.offsetFromBottom,
+        connType: handle.connType,
+        wspornikType: 'krotki',
+        wspornikDistance: 215,
+        autoAdded: false  // Mark as manually added
+      })
+    }
+  }
+
+  // Initialize connectorTypes from props if provided (for view mode)
+  if (props.initialConnectorTypes && props.initialConnectorTypes.length > 0 && connectorTypes1.length === 0) {
+    connectorTypes1.length = 0
+    for (const type of props.initialConnectorTypes) {
+      connectorTypes1.push(type)
+    }
+  }
+
   numX7Ladders1 = props.numX7Ladders
   finalLadderRungs1 = props.finalLadderRungs
   safetyCageCount1 = props.safetyCageCount
   handrailType = mapSchemeToHandrailType(props.scheme)
+  hasHandrailsLocal = props.hasHandrails !== false  // domyślnie true
   wallHeightConfig = props.wallHeight * 1000  // Convert meters to mm
   showWall = props.showWall
   showGround = props.showGround
@@ -673,12 +750,21 @@ function syncPropsToState() {
   restingPlatform1 = props.restingPlatform || false
   obstaclesFromConfigurator = props.obstacles || []
 
+  // Mid-rung bracket: dla wysokości <= 1.96m użyj ściskanych zamiast uchwytów
+  if (wallHeightConfig > 0 && wallHeightConfig <= 1960) {
+    midRungBracketConnType1 = 'sciskany'
+  } else {
+    midRungBracketConnType1 = 'uchwyt'
+  }
+
   // Update wspornik settings
   // Always update distance for wall positioning (even when wsporniki hidden)
+  console.log('[ThreeCanvas] syncPropsToState wspornikDistance:', props.wspornikDistance, 'current globalWspornikDistance1:', globalWspornikDistance1)
   if (props.wspornikDistance > 0) {
     globalWspornikDistance1 = props.wspornikDistance
     defaultWspornik1 = getWspornikTypeFromDistance(props.wspornikDistance)
     updateGlobalWspornikDistance(1, props.wspornikDistance)
+    console.log('[ThreeCanvas] Updated globalWspornikDistance1 to:', globalWspornikDistance1)
   }
 
   if (props.showWsporniki !== false && props.wspornikDistance > 0) {
@@ -688,6 +774,15 @@ function syncPropsToState() {
     if (props.wspornikDistance <= 0) {
       defaultWspornik1 = 'none'
     }
+  }
+
+  // Update wspornik settings for ladder 2 (descent) if provided
+  if (props.descentWspornikDistance && props.descentWspornikDistance > 0 && props.descentMountType === 'brackets') {
+    console.log('[ThreeCanvas] syncPropsToState descentWspornikDistance:', props.descentWspornikDistance, 'current globalWspornikDistance2:', globalWspornikDistance2)
+    globalWspornikDistance2 = props.descentWspornikDistance
+    defaultWspornik2 = getWspornikTypeFromDistance(props.descentWspornikDistance)
+    updateGlobalWspornikDistance(2, props.descentWspornikDistance)
+    console.log('[ThreeCanvas] Updated globalWspornikDistance2 to:', globalWspornikDistance2)
   }
 
   // Remove sciskane handles that are outside the current ladder height
@@ -748,6 +843,12 @@ function initScene() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+  // Critical for mobile touch support - prevent browser default touch handling
+  renderer.domElement.style.touchAction = 'none'
+  renderer.domElement.style.userSelect = 'none'
+  renderer.domElement.style.webkitUserSelect = 'none'
+
   container.appendChild(renderer.domElement)
 
   // Pivot group for rotation (contains ladderContainer)
@@ -924,6 +1025,42 @@ function setupControls() {
 
     raycaster.setFromCamera(mouse, camera)
 
+    // Delete mode - click on element to request deletion
+    if (deleteMode) {
+      const intersects = raycaster.intersectObjects(ladderContainer.children, true)
+
+      for (const intersect of intersects) {
+        const obj = intersect.object
+        if (!obj.visible) continue
+
+        // Skip helper objects
+        if (obj.userData.isMeasureObject) continue
+        if (obj.userData.isOutline) continue
+        if (obj.userData.isGreenCollisionBox) continue
+        if (obj.userData.isCollisionZone) continue
+        if (obj.userData.isWallIndicator) continue
+        if (obj.userData.isGroundIndicator) continue
+        if (obj.userData.isInsulation) continue
+
+        // Find the parent group that represents a deletable element
+        const deletableElement = findDeletableParent(obj)
+        if (deletableElement && deletableElement.userData.elementId) {
+          const elementInfo = getElementInfo(deletableElement)
+          emit('deleteRequest', {
+            objectName: elementInfo.name,
+            objectType: elementInfo.type,
+            elementId: deletableElement.userData.elementId,
+            objectData: {
+              object: deletableElement,
+              userData: deletableElement.userData
+            }
+          })
+          return
+        }
+      }
+      return
+    }
+
     // Measure mode - click on any object to add measurement point
     if (measureMode) {
       const intersects = raycaster.intersectObjects(ladderContainer.children, true)
@@ -934,6 +1071,15 @@ function setupControls() {
         if (obj.userData.isMeasureObject) continue
         if (!obj.visible) continue
 
+        // Pomiń boxy mierzenia tylko gdy debug mode OFF
+        if (!showMeasurementBoxes && obj.userData.isMeasurementBox) continue
+
+        // Pomiń obiekty z opacity 0
+        if ((obj as THREE.Mesh).material) {
+          const mat = (obj as THREE.Mesh).material
+          if (!Array.isArray(mat) && (mat as THREE.MeshBasicMaterial).opacity === 0) continue
+        }
+
         // Sprawdź flagi debug w hierarchii
         let isDebug = false
         let checkObj: THREE.Object3D | null = obj
@@ -942,6 +1088,7 @@ function setupControls() {
               checkObj.userData.isCollisionZone ||
               checkObj.userData.isMidRungBox ||
               checkObj.userData.isSciskaneBox ||
+              (!showMeasurementBoxes && checkObj.userData.isMeasurementBox) ||
               greenCollisionBoxes.includes(checkObj)) {
             isDebug = true
             break
@@ -1333,8 +1480,15 @@ function setupControls() {
 
         // Pan ortho camera - adjust position based on current zoom level
         const panScale = (orthoCamera.right - orthoCamera.left) / containerRef.value!.clientWidth
-        orthoCamera.position.x -= deltaX * panScale
-        orthoCamera.position.y += deltaY * panScale
+
+        // W widoku side: lewo/prawo przesuwa Z, góra/dół przesuwa Y
+        if (techDrawingView === 'side') {
+          orthoCamera.position.z += deltaX * panScale
+          orthoCamera.position.y += deltaY * panScale
+        } else {
+          orthoCamera.position.x -= deltaX * panScale
+          orthoCamera.position.y += deltaY * panScale
+        }
 
         previousPosition = { x: e.clientX, y: e.clientY }
         requestRender() // Render during pan
@@ -1406,8 +1560,8 @@ function setupControls() {
       const zoomFactor = 1 + e.deltaY * 0.001
       const currentSize = orthoCamera.top
 
-      // Clamp zoom between 1 and 50
-      const newSize = Math.max(1, Math.min(50, currentSize * zoomFactor))
+      // Clamp zoom between 1 and 150 (większy limit dla oddalenia)
+      const newSize = Math.max(1, Math.min(300, currentSize * zoomFactor))
 
       const container = containerRef.value!
       const aspect = container.clientWidth / container.clientHeight
@@ -1427,13 +1581,23 @@ function setupControls() {
   }, { passive: false })
 
   // Touch events
+  let lastOrthoZoom = 20 // Dla pinch-to-zoom w trybie technicznym
+
   dom.addEventListener('touchstart', (e) => {
     if (e.touches.length === 1) {
       e.preventDefault()
-      onPointerStart(e.touches[0].clientX, e.touches[0].clientY)
+      // W trybie technicznym: jeden palec = panning
+      if (isTechDrawingMode) {
+        isPanning = true
+        previousPosition = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        startAnimation()
+      } else {
+        onPointerStart(e.touches[0].clientX, e.touches[0].clientY)
+      }
     } else if (e.touches.length === 2) {
       e.preventDefault()
       isDragging = false
+      isPanning = false
 
       const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2
       const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2
@@ -1443,13 +1607,33 @@ function setupControls() {
       const dy = e.touches[0].clientY - e.touches[1].clientY
       initialPinchDistance = Math.sqrt(dx * dx + dy * dy)
       lastZoom = camera.position.z
+      lastOrthoZoom = orthoCamera.top
     }
   }, { passive: false })
 
   dom.addEventListener('touchmove', (e) => {
     if (e.touches.length === 1) {
       e.preventDefault()
-      onPointerMove(e.touches[0].clientX, e.touches[0].clientY)
+      // W trybie technicznym: jeden palec = panning
+      if (isTechDrawingMode && isPanning) {
+        const deltaX = e.touches[0].clientX - previousPosition.x
+        const deltaY = e.touches[0].clientY - previousPosition.y
+
+        const panScale = (orthoCamera.right - orthoCamera.left) / containerRef.value!.clientWidth
+
+        if (techDrawingView === 'side') {
+          orthoCamera.position.z += deltaX * panScale
+          orthoCamera.position.y += deltaY * panScale
+        } else {
+          orthoCamera.position.x -= deltaX * panScale
+          orthoCamera.position.y += deltaY * panScale
+        }
+
+        previousPosition = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        requestRender()
+      } else if (!isTechDrawingMode) {
+        onPointerMove(e.touches[0].clientX, e.touches[0].clientY)
+      }
     } else if (e.touches.length === 2) {
       e.preventDefault()
 
@@ -1459,28 +1643,61 @@ function setupControls() {
       const panDeltaX = centerX - lastPanCenter.x
       const panDeltaY = centerY - lastPanCenter.y
 
-      const touchPanScale = camera.position.z * 0.0015
-      cameraOffset.x -= panDeltaX * touchPanScale
-      cameraOffset.y += panDeltaY * touchPanScale
-
-      lastPanCenter = { x: centerX, y: centerY }
-
+      // Pinch-to-zoom
       const dx = e.touches[0].clientX - e.touches[1].clientX
       const dy = e.touches[0].clientY - e.touches[1].clientY
       const distance = Math.sqrt(dx * dx + dy * dy)
 
-      if (initialPinchDistance) {
-        const delta = initialPinchDistance - distance
-        camera.position.z = lastZoom * (1 + delta * 0.005)
-        camera.position.z = Math.max(3, Math.min(300, camera.position.z))
+      if (isTechDrawingMode) {
+        // Tech drawing mode: pan i zoom ortho camera
+        const panScale = (orthoCamera.right - orthoCamera.left) / containerRef.value!.clientWidth
+
+        if (techDrawingView === 'side') {
+          orthoCamera.position.z += panDeltaX * panScale
+          orthoCamera.position.y += panDeltaY * panScale
+        } else {
+          orthoCamera.position.x -= panDeltaX * panScale
+          orthoCamera.position.y += panDeltaY * panScale
+        }
+
+        // Pinch zoom dla ortho
+        if (initialPinchDistance) {
+          const scale = initialPinchDistance / distance
+          const newSize = Math.max(1, Math.min(300, lastOrthoZoom * scale))
+
+          const container = containerRef.value!
+          const aspect = container.clientWidth / container.clientHeight
+
+          orthoCamera.left = -newSize * aspect
+          orthoCamera.right = newSize * aspect
+          orthoCamera.top = newSize
+          orthoCamera.bottom = -newSize
+          orthoCamera.updateProjectionMatrix()
+        }
+
+        requestRender()
+      } else {
+        // Normal mode: pan i zoom perspective camera
+        const touchPanScale = camera.position.z * 0.0015
+        cameraOffset.x -= panDeltaX * touchPanScale
+        cameraOffset.y += panDeltaY * touchPanScale
+
+        if (initialPinchDistance) {
+          const delta = initialPinchDistance - distance
+          camera.position.z = lastZoom * (1 + delta * 0.005)
+          camera.position.z = Math.max(3, Math.min(300, camera.position.z))
+        }
+
+        startAnimation()
       }
 
-      startAnimation() // Render during pinch/pan
+      lastPanCenter = { x: centerX, y: centerY }
     }
   }, { passive: false })
 
   dom.addEventListener('touchend', (e) => {
     e.preventDefault()
+    isPanning = false
     onPointerEnd()
     if (e.touches.length < 2) {
       initialPinchDistance = null
@@ -1507,6 +1724,8 @@ function loadModels() {
       syncPropsToState()
       createLadder()
       emit('ready')
+      // Extra render to ensure lighting is applied
+      setTimeout(() => requestRender(), 50)
     }
   }
 
@@ -1893,7 +2112,7 @@ function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
 // ============================================
 // CREATE CONNECTOR (uchwyt/lacznik/sciskany)
 // ============================================
-function createConnector(type: string, side: string, ladderNum: number, isMidRung = false): THREE.Group {
+function createConnector(type: string, side: string, ladderNum: number, isMidRung = false, elementId?: string): THREE.Group {
   type = type || 'uchwyt'
   side = side || 'left'
   ladderNum = ladderNum || 1
@@ -1932,13 +2151,21 @@ function createConnector(type: string, side: string, ladderNum: number, isMidRun
     model.userData.isConnector = true
     model.userData.connectorType = type
     model.userData.ladderNum = ladderNum
+    model.userData.side = side  // WAŻNE: dla unikalnego elementId
     model.userData.isMidRungBracket = isMidRung
+    if (elementId) {
+      model.userData.elementId = elementId
+    }
 
     model.traverse((child) => {
       child.userData.isConnector = true
       child.userData.connectorType = type
       child.userData.ladderNum = ladderNum
+      child.userData.side = side
       child.userData.isMidRungBracket = isMidRung
+      if (elementId) {
+        child.userData.elementId = elementId  // Same ID as parent
+      }
       if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
         const mesh = child as THREE.Mesh
         mesh.material = (mesh.material as THREE.MeshStandardMaterial).clone()
@@ -1954,6 +2181,9 @@ function createConnector(type: string, side: string, ladderNum: number, isMidRun
   // Fallback
   const fallbackGroup = new THREE.Group()
   fallbackGroup.userData.isConnector = true
+  if (elementId) {
+    fallbackGroup.userData.elementId = elementId
+  }
   fallbackGroup.userData.connectorType = type
   fallbackGroup.userData.ladderNum = ladderNum
   fallbackGroup.userData.isMidRungBracket = isMidRung
@@ -1964,7 +2194,7 @@ function createConnector(type: string, side: string, ladderNum: number, isMidRun
 // ============================================
 // CREATE WSPORNIK (wall bracket) - FIXED ROTATION
 // ============================================
-function createWspornik(type: string, side: string, ladderNum: number, isMidRung = false): THREE.Group | null {
+function createWspornik(type: string, side: string, ladderNum: number, isMidRung = false, elementId?: string): THREE.Group | null {
   // Skip if wsporniki are disabled for this ladder
   if ((ladderNum === 1 && wspornikDisabled1) || (ladderNum === 2 && wspornikDisabled2)) {
     return null
@@ -2060,12 +2290,18 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   model.userData.extraXOffset = extraXOffset
   model.userData.extraYOffset = extraYOffset
   model.userData.extraZOffset = baseZOffset
+  if (elementId) {
+    model.userData.elementId = elementId
+  }
 
   model.traverse((child) => {
     child.userData.isWspornik = true
     child.userData.ladderNum = ladderNum
     child.userData.side = side
     child.userData.isMidRungBracket = isMidRung
+    if (elementId) {
+      child.userData.elementId = elementId  // Same ID as parent
+    }
   })
 
   addOutlineToModel(model)
@@ -2074,10 +2310,1153 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
 }
 
 // ============================================
+// MEASUREMENT BOXES (boxy mierzenia)
+// ============================================
+let measurementLine: THREE.Line | null = null
+let measurementLabel: THREE.Sprite | null = null
+let measurementDiskTop: THREE.Mesh | null = null
+let measurementDiskBottom: THREE.Mesh | null = null
+let firstHoopBoxY: number | null = null  // Dół boxa magenta (góra ściany)
+let lastHoopBoxY: number | null = null   // Góra boxa cyan (dół drabiny końcowej)
+let lastFinalLadderBottomY: number | null = null  // Dół ostatniej drabiny końcowej
+
+// Drugi wymiar: Dł. Drabiny (zielony → żółty)
+let ladderLengthLine: THREE.Line | null = null
+let ladderLengthLabel: THREE.Sprite | null = null
+let ladderLengthDiskTop: THREE.Mesh | null = null
+let ladderLengthDiskBottom: THREE.Mesh | null = null
+let roofTopBoxY: number | null = null  // Dół zielonego boxa (góra ściany)
+let finalLadderBottomBoxY: number | null = null  // Dół żółtego boxa (dół drabiny końcowej)
+
+// Trzeci wymiar: Wys. Kosza (cyan → niebieski/podłoga)
+let cageHeightLine: THREE.Line | null = null
+let cageHeightLabel: THREE.Sprite | null = null
+let cageHeightDiskTop: THREE.Mesh | null = null
+let cageHeightDiskBottom: THREE.Mesh | null = null
+let groundTopBoxY: number | null = null  // Góra niebieskiego boxa (góra podłogi)
+
+// Czwarty wymiar: Wys. z poręczami (zielony → pomarańczowy)
+let handrailHeightLine: THREE.Line | null = null
+let handrailHeightLabel: THREE.Sprite | null = null
+let handrailHeightDiskTop: THREE.Mesh | null = null
+let handrailHeightDiskBottom: THREE.Mesh | null = null
+let handrailTopBoxY: number | null = null  // Dół pomarańczowego boxa (góra poręczy)
+
+// Info label z tyłu sceny
+let infoLabel: THREE.Sprite | null = null
+let atticInfoLabel: THREE.Sprite | null = null  // Info label dla attyki
+
+// Piąty wymiar: Wysokość zawieszenia (żółty → niebieski) - gdy lastRungToGround > 350mm
+let suspensionHeightLine: THREE.Line | null = null
+let suspensionHeightLabel: THREE.Sprite | null = null
+let suspensionHeightDiskTop: THREE.Mesh | null = null
+let suspensionHeightDiskBottom: THREE.Mesh | null = null
+
+// Szósty wymiar: Zielony → Czerwony (dół zielonego → dół czerwonego)
+let greenRedLine: THREE.Line | null = null
+let greenRedLabel: THREE.Sprite | null = null
+let greenRedDiskTop: THREE.Mesh | null = null
+let greenRedDiskBottom: THREE.Mesh | null = null
+let wallTopBoxY: number | null = null  // Dół czerwonego boxa (góra ściany bez platformOffset)
+let descentWallTopBoxY: number | null = null  // Góra ściany zejścia (dół fioletowego boxa)
+
+// Siódmy wymiar: Dł. Drabiny strona zejścia (fioletowy → zielony)
+let descentLadderLengthLine: THREE.Line | null = null
+let descentLadderLengthLabel: THREE.Sprite | null = null
+let descentLadderLengthDiskTop: THREE.Mesh | null = null
+let descentLadderLengthDiskBottom: THREE.Mesh | null = null
+
+// Dane do utworzenia żółtego boxa (po clearMeasurementBoxes)
+let savedYellowBoxData: {
+  boxYPos: number
+  boxSize: number
+  boxZOffset: number
+  ladderNum: number
+  sectionIndex: number
+} | null = null
+
+function createMeasurementBox(
+  width: number,
+  height: number,
+  depth: number,
+  position: THREE.Vector3,
+  color: number = 0xff00ff
+): THREE.Mesh {
+  const geometry = new THREE.BoxGeometry(width, height, depth)
+
+  // Widoczne tylko w debug mode
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false
+  })
+  const box = new THREE.Mesh(geometry, material)
+  box.position.copy(position)
+  box.userData.isMeasurementBox = true // Miarka ignoruje gdy showMeasurementBoxes OFF
+  box.visible = showMeasurementBoxes // Kontrolowane osobną zmienną
+  measurementBoxes.push(box)
+
+  return box
+}
+
+function clearMeasurementBoxes() {
+  for (const box of measurementBoxes) {
+    ladderContainer.remove(box)
+    box.geometry.dispose()
+    ;(box.material as THREE.MeshBasicMaterial).dispose()
+  }
+  measurementBoxes = []
+
+  // Wyczyść linię i label
+  if (measurementLine) {
+    ladderContainer.remove(measurementLine)
+    measurementLine.geometry.dispose()
+    ;(measurementLine.material as THREE.LineBasicMaterial).dispose()
+    measurementLine = null
+  }
+  if (measurementLabel) {
+    ladderContainer.remove(measurementLabel)
+    ;(measurementLabel.material as THREE.SpriteMaterial).dispose()
+    measurementLabel = null
+  }
+
+  // Reset pozycji boxów kosza (te są tworzone w renderSafetyCage po clearMeasurementBoxes)
+  firstHoopBoxY = null
+  lastHoopBoxY = null
+  // NIE resetuj lastFinalLadderBottomY tutaj - jest ustawiane przed renderSafetyCage
+
+  // Wyczyść drugi wymiar (Dł. Drabiny)
+  if (ladderLengthLine) {
+    ladderContainer.remove(ladderLengthLine)
+    ladderLengthLine.geometry.dispose()
+    ;(ladderLengthLine.material as THREE.LineBasicMaterial).dispose()
+    ladderLengthLine = null
+  }
+  if (ladderLengthLabel) {
+    ladderContainer.remove(ladderLengthLabel)
+    ;(ladderLengthLabel.material as THREE.SpriteMaterial).dispose()
+    ladderLengthLabel = null
+  }
+  if (ladderLengthDiskTop) {
+    ladderContainer.remove(ladderLengthDiskTop)
+    ladderLengthDiskTop.geometry.dispose()
+    ;(ladderLengthDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    ladderLengthDiskTop = null
+  }
+  if (ladderLengthDiskBottom) {
+    ladderContainer.remove(ladderLengthDiskBottom)
+    ladderLengthDiskBottom.geometry.dispose()
+    ;(ladderLengthDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    ladderLengthDiskBottom = null
+  }
+  // NIE resetuj roofTopBoxY i finalLadderBottomBoxY tutaj!
+  // Są one resetowane na początku createLadder() i ustawiane w różnych miejscach.
+}
+
+// Tworzy żółty box mierzenia (wywoływane PO clearMeasurementBoxes w renderSafetyCage)
+function renderYellowMeasurementBox() {
+  if (!savedYellowBoxData) return
+
+  const { boxYPos, boxSize, boxZOffset, ladderNum, sectionIndex } = savedYellowBoxData
+
+  const measureBox = createMeasurementBox(
+    boxSize,
+    boxSize,
+    boxSize,
+    new THREE.Vector3(0, boxYPos, boxZOffset),
+    0xffff00 // Żółty
+  )
+  measureBox.userData.measurementBoxType = 'finalLadderBottom'
+  measureBox.userData.ladderNum = ladderNum
+  measureBox.userData.sectionIndex = sectionIndex
+  ladderContainer.add(measureBox)
+}
+
+function updateMeasurementBoxesVisibility() {
+  // Boxy mierzenia - widoczne gdy showMeasurementBoxes = true
+  for (const box of measurementBoxes) {
+    box.visible = showMeasurementBoxes
+  }
+  // Linia, label i dyski - widoczne gdy showDimensions = true
+  if (measurementLine) measurementLine.visible = showDimensions
+  if (measurementLabel) measurementLabel.visible = showDimensions
+  if (measurementDiskTop) measurementDiskTop.visible = showDimensions
+  if (measurementDiskBottom) measurementDiskBottom.visible = showDimensions
+  // Drugi wymiar (Dł. Drabiny)
+  if (ladderLengthLine) ladderLengthLine.visible = showDimensions
+  if (ladderLengthLabel) ladderLengthLabel.visible = showDimensions
+  if (ladderLengthDiskTop) ladderLengthDiskTop.visible = showDimensions
+  if (ladderLengthDiskBottom) ladderLengthDiskBottom.visible = showDimensions
+  // Trzeci wymiar (Wys. Kosza)
+  if (cageHeightLine) cageHeightLine.visible = showDimensions
+  if (cageHeightLabel) cageHeightLabel.visible = showDimensions
+  if (cageHeightDiskTop) cageHeightDiskTop.visible = showDimensions
+  if (cageHeightDiskBottom) cageHeightDiskBottom.visible = showDimensions
+  // Czwarty wymiar (Wys. z poręczami)
+  if (handrailHeightLine) handrailHeightLine.visible = showDimensions
+  if (handrailHeightLabel) handrailHeightLabel.visible = showDimensions
+  if (handrailHeightDiskTop) handrailHeightDiskTop.visible = showDimensions
+  if (handrailHeightDiskBottom) handrailHeightDiskBottom.visible = showDimensions
+  // Info label
+  if (infoLabel) infoLabel.visible = showDimensions
+  if (atticInfoLabel) atticInfoLabel.visible = showDimensions
+  // Piąty wymiar (Wys. zawieszenia)
+  if (suspensionHeightLine) suspensionHeightLine.visible = showDimensions
+  if (suspensionHeightLabel) suspensionHeightLabel.visible = showDimensions
+  if (suspensionHeightDiskTop) suspensionHeightDiskTop.visible = showDimensions
+  if (suspensionHeightDiskBottom) suspensionHeightDiskBottom.visible = showDimensions
+  if (greenRedLine) greenRedLine.visible = showDimensions
+  if (greenRedLabel) greenRedLabel.visible = showDimensions
+  if (greenRedDiskTop) greenRedDiskTop.visible = showDimensions
+  if (greenRedDiskBottom) greenRedDiskBottom.visible = showDimensions
+  if (descentLadderLengthLine) descentLadderLengthLine.visible = showDimensions
+  if (descentLadderLengthLabel) descentLadderLengthLabel.visible = showDimensions
+  if (descentLadderLengthDiskTop) descentLadderLengthDiskTop.visible = showDimensions
+  if (descentLadderLengthDiskBottom) descentLadderLengthDiskBottom.visible = showDimensions
+}
+
+function drawMeasurementLineBetweenBoxes(zPos: number) {
+  // Usuń poprzednią linię, label i dyski
+  if (measurementLine) {
+    ladderContainer.remove(measurementLine)
+    measurementLine.geometry.dispose()
+    ;(measurementLine.material as THREE.LineBasicMaterial).dispose()
+    measurementLine = null
+  }
+  if (measurementLabel) {
+    ladderContainer.remove(measurementLabel)
+    ;(measurementLabel.material as THREE.SpriteMaterial).dispose()
+    measurementLabel = null
+  }
+  if (measurementDiskTop) {
+    ladderContainer.remove(measurementDiskTop)
+    measurementDiskTop.geometry.dispose()
+    ;(measurementDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    measurementDiskTop = null
+  }
+  if (measurementDiskBottom) {
+    ladderContainer.remove(measurementDiskBottom)
+    measurementDiskBottom.geometry.dispose()
+    ;(measurementDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    measurementDiskBottom = null
+  }
+
+  if (firstHoopBoxY === null || lastHoopBoxY === null) return
+
+  // Pozycje krawędzi boxów (wysokość boxa = 50mm, połowa = 25mm)
+  const boxHalfHeight = 25 * SCALE
+  const magentaBottom = firstHoopBoxY - boxHalfHeight // Dół magenta
+  const cyanTop = lastHoopBoxY + boxHalfHeight // Góra cyan
+
+  // Oblicz dystans w mm (od dołu magenta do góry cyan)
+  const distanceMm = Math.round(Math.abs(magentaBottom - cyanTop) / SCALE)
+
+  // Rysuj linię od dołu magenta do góry cyan (czarna, przesunięta do przodu o 200mm)
+  const xOffset = 150 * SCALE // Linia obok boxów
+  const lineZOffset = 200 * SCALE // Przesunięcie do przodu
+  const points = [
+    new THREE.Vector3(xOffset, magentaBottom, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, cyanTop, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 }) // Czarna linia
+  measurementLine = new THREE.Line(geometry, material)
+  measurementLine.visible = showDimensions
+  ladderContainer.add(measurementLine)
+
+  // Dyski na końcach linii (płaskie kółka - wymiarowanie techniczne)
+  const diskRadius = 100 * SCALE // Duży dysk
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk górny (przy magenta)
+  measurementDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  measurementDiskTop.position.set(xOffset, magentaBottom, zPos + lineZOffset)
+  measurementDiskTop.rotation.x = -Math.PI / 2 // Poziomo - widoczny z góry, kreska z boku
+  measurementDiskTop.visible = showDimensions
+  ladderContainer.add(measurementDiskTop)
+
+  // Dysk dolny (przy cyan)
+  measurementDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  measurementDiskBottom.position.set(xOffset, cyanTop, zPos + lineZOffset)
+  measurementDiskBottom.rotation.x = -Math.PI / 2 // Poziomo - widoczny z góry, kreska z boku
+  measurementDiskBottom.visible = showDimensions
+  ladderContainer.add(measurementDiskBottom)
+
+  // Utwórz label z dystansem (większy, obrócony 90 stopni, bez tła)
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 128
+  canvas.height = 512
+  // Przezroczyste tło - nie rysujemy fillRect
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 64px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // Obróć tekst 90 stopni
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`${distanceMm} mm`, 0, 0)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  measurementLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii (przesunięty do przodu)
+  const midY = (magentaBottom + cyanTop) / 2
+  const labelZOffset = 200 * SCALE
+  measurementLabel.position.set(xOffset + 300 * SCALE, midY, zPos + labelZOffset)
+  measurementLabel.scale.set(1.25, 5.0, 1) // Większy, pionowy
+  measurementLabel.visible = showDimensions
+  measurementLabel.userData.isMeasurementLabel = true // Do skalowania z kamerą
+  ladderContainer.add(measurementLabel)
+
+  console.log(`[MeasurementBoxes] Dystans (dół magenta → góra cyan): ${distanceMm} mm`)
+}
+
+// Drugi wymiar: Dł. Drabiny (zielony → żółty) - tylko dla klasycznej/z podestem
+function drawLadderLengthDimension(zPos: number, frontSide: boolean = false) {
+  // Usuń poprzednią linię, label i dyski
+  if (ladderLengthLine) {
+    ladderContainer.remove(ladderLengthLine)
+    ladderLengthLine.geometry.dispose()
+    ;(ladderLengthLine.material as THREE.LineBasicMaterial).dispose()
+    ladderLengthLine = null
+  }
+  if (ladderLengthLabel) {
+    ladderContainer.remove(ladderLengthLabel)
+    ;(ladderLengthLabel.material as THREE.SpriteMaterial).dispose()
+    ladderLengthLabel = null
+  }
+  if (ladderLengthDiskTop) {
+    ladderContainer.remove(ladderLengthDiskTop)
+    ladderLengthDiskTop.geometry.dispose()
+    ;(ladderLengthDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    ladderLengthDiskTop = null
+  }
+  if (ladderLengthDiskBottom) {
+    ladderContainer.remove(ladderLengthDiskBottom)
+    ladderLengthDiskBottom.geometry.dispose()
+    ;(ladderLengthDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    ladderLengthDiskBottom = null
+  }
+
+  if (roofTopBoxY === null || finalLadderBottomBoxY === null) return
+
+  // Pozycje: góra zielonego boxa → góra żółtego boxa
+  const greenTop = roofTopBoxY
+  const yellowTop = finalLadderBottomBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(greenTop - yellowTop) / SCALE)
+
+  // Rysuj linię - pozycja zależy od strony
+  const xOffset = -150 * SCALE // Linia po lewej stronie
+  const lineZOffset = frontSide ? 800 * SCALE : -900 * SCALE // Przód 800mm lub tył
+  const points = [
+    new THREE.Vector3(xOffset, greenTop, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, yellowTop, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  ladderLengthLine = new THREE.Line(geometry, material)
+  ladderLengthLine.visible = showDimensions
+  ladderContainer.add(ladderLengthLine)
+
+  // Dyski na końcach linii
+  const diskRadius = 100 * SCALE
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk górny (przy zielonym)
+  ladderLengthDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  ladderLengthDiskTop.position.set(xOffset, greenTop, zPos + lineZOffset)
+  ladderLengthDiskTop.rotation.x = -Math.PI / 2
+  ladderLengthDiskTop.visible = showDimensions
+  ladderContainer.add(ladderLengthDiskTop)
+
+  // Dysk dolny (przy żółtym)
+  ladderLengthDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  ladderLengthDiskBottom.position.set(xOffset, yellowTop, zPos + lineZOffset)
+  ladderLengthDiskBottom.rotation.x = -Math.PI / 2
+  ladderLengthDiskBottom.visible = showDimensions
+  ladderContainer.add(ladderLengthDiskBottom)
+
+  // Utwórz label z dystansem i przedrostkiem "Dł. Drabiny" (bez tła)
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 512
+  // Przezroczyste tło - nie rysujemy fillRect
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 48px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // Obróć tekst 90 stopni
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`Dł. Drabiny`, 0, -35)
+  ctx.fillText(`${distanceMm} mm`, 0, 35)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  ladderLengthLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii - offset zależy od strony
+  const midY = (greenTop + yellowTop) / 2
+  const labelZOffset = frontSide ? 100 * SCALE : -100 * SCALE  // Przód: 100mm, Tył: 100mm do tyłu
+  ladderLengthLabel.position.set(xOffset + 300 * SCALE, midY, zPos + lineZOffset + labelZOffset)
+  ladderLengthLabel.scale.set(2.5, 6.0, 1)
+  ladderLengthLabel.visible = showDimensions
+  ladderLengthLabel.userData.isLadderLengthLabel = true
+  ladderLengthLabel.userData.frontSide = frontSide  // Zapamiętaj stronę dla skalowania
+  ladderContainer.add(ladderLengthLabel)
+}
+
+// Wyczyść wymiar Wys. Kosza
+function clearCageHeightDimension() {
+  if (cageHeightLine) {
+    ladderContainer.remove(cageHeightLine)
+    cageHeightLine.geometry.dispose()
+    ;(cageHeightLine.material as THREE.LineBasicMaterial).dispose()
+    cageHeightLine = null
+  }
+  if (cageHeightLabel) {
+    ladderContainer.remove(cageHeightLabel)
+    ;(cageHeightLabel.material as THREE.SpriteMaterial).dispose()
+    cageHeightLabel = null
+  }
+  if (cageHeightDiskTop) {
+    ladderContainer.remove(cageHeightDiskTop)
+    cageHeightDiskTop.geometry.dispose()
+    ;(cageHeightDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    cageHeightDiskTop = null
+  }
+  if (cageHeightDiskBottom) {
+    ladderContainer.remove(cageHeightDiskBottom)
+    cageHeightDiskBottom.geometry.dispose()
+    ;(cageHeightDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    cageHeightDiskBottom = null
+  }
+}
+
+// Trzeci wymiar: Wys. Kosza (cyan → niebieski/podłoga)
+function drawCageHeightDimension(zPos: number) {
+  // Usuń poprzednią linię, label i dyski
+  clearCageHeightDimension()
+
+  if (lastHoopBoxY === null || groundTopBoxY === null) return
+
+  // Pozycje: góra cyan → góra niebieskiego (podłoga)
+  const boxHalfHeight = 25 * SCALE
+  const cyanTop = lastHoopBoxY + boxHalfHeight
+  const groundTop = groundTopBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(cyanTop - groundTop) / SCALE)
+
+  // Rysuj linię (w tym samym miejscu co wymiar kosza)
+  const xOffset = 150 * SCALE
+  const lineZOffset = 200 * SCALE
+  const points = [
+    new THREE.Vector3(xOffset, cyanTop, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, groundTop, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  cageHeightLine = new THREE.Line(geometry, material)
+  cageHeightLine.visible = showDimensions
+  ladderContainer.add(cageHeightLine)
+
+  // Dyski na końcach linii
+  const diskRadius = 100 * SCALE
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk górny (przy cyan)
+  cageHeightDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  cageHeightDiskTop.position.set(xOffset, cyanTop, zPos + lineZOffset)
+  cageHeightDiskTop.rotation.x = -Math.PI / 2
+  cageHeightDiskTop.visible = showDimensions
+  ladderContainer.add(cageHeightDiskTop)
+
+  // Dysk dolny (przy podłodze)
+  cageHeightDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  cageHeightDiskBottom.position.set(xOffset, groundTop, zPos + lineZOffset)
+  cageHeightDiskBottom.rotation.x = -Math.PI / 2
+  cageHeightDiskBottom.visible = showDimensions
+  ladderContainer.add(cageHeightDiskBottom)
+
+  // Utwórz label z dystansem
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 128
+  canvas.height = 512
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 64px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`${distanceMm} mm`, 0, 0)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  cageHeightLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii
+  const midY = (cyanTop + groundTop) / 2
+  const labelZOffsetPos = 200 * SCALE
+  cageHeightLabel.position.set(xOffset + 300 * SCALE, midY, zPos + labelZOffsetPos)
+  cageHeightLabel.scale.set(1.25, 5.0, 1)
+  cageHeightLabel.visible = showDimensions
+  cageHeightLabel.userData.isCageHeightLabel = true
+  ladderContainer.add(cageHeightLabel)
+}
+
+// Czwarty wymiar: Wys. z poręczami (zielony → pomarańczowy)
+function drawHandrailHeightDimension(zPos: number, frontSide: boolean = false) {
+  // Usuń poprzednią linię, label i dyski
+  if (handrailHeightLine) {
+    ladderContainer.remove(handrailHeightLine)
+    handrailHeightLine.geometry.dispose()
+    ;(handrailHeightLine.material as THREE.LineBasicMaterial).dispose()
+    handrailHeightLine = null
+  }
+  if (handrailHeightLabel) {
+    ladderContainer.remove(handrailHeightLabel)
+    ;(handrailHeightLabel.material as THREE.SpriteMaterial).dispose()
+    handrailHeightLabel = null
+  }
+  if (handrailHeightDiskTop) {
+    ladderContainer.remove(handrailHeightDiskTop)
+    handrailHeightDiskTop.geometry.dispose()
+    ;(handrailHeightDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    handrailHeightDiskTop = null
+  }
+  if (handrailHeightDiskBottom) {
+    ladderContainer.remove(handrailHeightDiskBottom)
+    handrailHeightDiskBottom.geometry.dispose()
+    ;(handrailHeightDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    handrailHeightDiskBottom = null
+  }
+
+  if (roofTopBoxY === null || handrailTopBoxY === null) return
+
+  // Pozycje: dół zielonego → dół pomarańczowego (góra poręczy)
+  const greenBottom = roofTopBoxY
+  const orangeBottom = handrailTopBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(orangeBottom - greenBottom) / SCALE)
+
+  // Rysuj linię - pozycja zależy od strony (tak samo jak dł. drabiny)
+  const xOffset = -150 * SCALE // Linia po lewej stronie
+  const lineZOffset = frontSide ? 800 * SCALE : -900 * SCALE // Przód 800mm lub tył
+  const points = [
+    new THREE.Vector3(xOffset, greenBottom, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, orangeBottom, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  handrailHeightLine = new THREE.Line(geometry, material)
+  handrailHeightLine.visible = showDimensions
+  ladderContainer.add(handrailHeightLine)
+
+  // Dyski na końcach linii
+  const diskRadius = 100 * SCALE
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk dolny (przy zielonym)
+  handrailHeightDiskBottom = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  handrailHeightDiskBottom.position.set(xOffset, greenBottom, zPos + lineZOffset)
+  handrailHeightDiskBottom.rotation.x = -Math.PI / 2
+  handrailHeightDiskBottom.visible = showDimensions
+  ladderContainer.add(handrailHeightDiskBottom)
+
+  // Dysk górny (przy pomarańczowym)
+  handrailHeightDiskTop = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  handrailHeightDiskTop.position.set(xOffset, orangeBottom, zPos + lineZOffset)
+  handrailHeightDiskTop.rotation.x = -Math.PI / 2
+  handrailHeightDiskTop.visible = showDimensions
+  ladderContainer.add(handrailHeightDiskTop)
+
+  // Utwórz label z dystansem i przedrostkiem
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 512
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 48px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`Wys. poręczy`, 0, -35)
+  ctx.fillText(`${distanceMm} mm`, 0, 35)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  handrailHeightLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii - offset zależy od strony (tak samo jak dł. drabiny)
+  const midY = (greenBottom + orangeBottom) / 2
+  const labelZOffset = frontSide ? 100 * SCALE : -100 * SCALE  // Przód: 100mm, Tył: 100mm do tyłu
+  handrailHeightLabel.position.set(xOffset + 300 * SCALE, midY, zPos + lineZOffset + labelZOffset)
+  handrailHeightLabel.scale.set(2.5, 6.0, 1)
+  handrailHeightLabel.visible = showDimensions
+  handrailHeightLabel.userData.isHandrailHeightLabel = true
+  handrailHeightLabel.userData.frontSide = frontSide
+  ladderContainer.add(handrailHeightLabel)
+}
+
+// Info label z tyłu sceny (tabelka z parametrami)
+function drawInfoLabel(lastRungToGround: number, wallHeight: number, wspornikType: string, hasCage: boolean, isPlatform: boolean, insulationThickness: number, zPos: number) {
+  // Usuń poprzedni label
+  if (infoLabel) {
+    ladderContainer.remove(infoLabel)
+    ;(infoLabel.material as THREE.SpriteMaterial).dispose()
+    infoLabel = null
+  }
+  // Usuń attic info label (przy przełączaniu schematu)
+  if (atticInfoLabel) {
+    ladderContainer.remove(atticInfoLabel)
+    ;(atticInfoLabel.material as THREE.SpriteMaterial).dispose()
+    atticInfoLabel = null
+  }
+
+  // Mapowanie typów wsporników na nazwy z zakresami
+  const wspornikNames: Record<string, string> = {
+    'krotki': 'Regulowany 160-260mm',
+    'sredni': 'Regulowany 260-360mm',
+    'dlugi': 'Regulowany 360-460mm',
+    'none': 'Brak'
+  }
+  const wspornikName = wspornikNames[wspornikType] || 'Niestandardowy'
+
+  // Przygotuj wiersze tabeli
+  const rows: Array<{label: string, value: string}> = [
+    { label: 'Szerokość drabiny', value: '560 mm' },
+    { label: 'Rozstaw szczebli', value: 'co 276 mm' }
+  ]
+
+  // Dodaj rozstaw obręczy tylko jeśli jest kosz
+  if (hasCage) {
+    rows.push({ label: 'Rozstaw obręczy', value: 'co 640 mm' })
+  }
+
+  // Dodaj długość podestu dla schematu z podestem
+  if (isPlatform) {
+    rows.push({ label: 'Długość podestu', value: '500 mm' })
+  }
+
+  rows.push(
+    { label: 'Wspornik', value: wspornikName },
+    { label: 'Wys. ściany', value: `${wallHeight} mm` },
+    { label: 'Ostatni szczebel → ziemia', value: `${lastRungToGround} mm` },
+    { label: 'Grubość ocieplenia', value: `${insulationThickness} mm` }
+  )
+
+  // Utwórz canvas z tabelą
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+
+  const rowHeight = 45
+  const tableWidth = 750
+  const col1Width = 420
+  const col2Width = tableWidth - col1Width
+  const tableX = 20
+  const tableY = 20
+  const canvasHeight = tableY + (rows.length * rowHeight) + 20
+
+  canvas.width = tableWidth + 40
+  canvas.height = canvasHeight
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+  // Rysuj tabelę
+  ctx.strokeStyle = '#333333'
+  ctx.lineWidth = 2
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 24px Arial'
+  ctx.textBaseline = 'middle'
+
+  for (let i = 0; i < rows.length; i++) {
+    const y = tableY + (i * rowHeight)
+
+    // Tło naprzemienne
+    if (i % 2 === 0) {
+      ctx.fillStyle = '#f5f5f5'
+      ctx.fillRect(tableX, y, tableWidth, rowHeight)
+    }
+
+    // Obramowanie wiersza
+    ctx.strokeRect(tableX, y, col1Width, rowHeight)
+    ctx.strokeRect(tableX + col1Width, y, col2Width, rowHeight)
+
+    // Tekst
+    ctx.fillStyle = '#000000'
+    ctx.textAlign = 'left'
+    ctx.fillText(rows[i].label, tableX + 10, y + rowHeight / 2)
+    ctx.textAlign = 'right'
+    ctx.fillText(rows[i].value, tableX + tableWidth - 10, y + rowHeight / 2)
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  infoLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja z przodu sceny, 1300mm powyżej podłogi
+  const yPos = (groundTopBoxY !== null ? groundTopBoxY : 0) + 1300 * SCALE
+  infoLabel.position.set(0, yPos, zPos + 2800 * SCALE)
+
+  // Dostosuj skalę do liczby wierszy
+  const scaleY = (4.0 + (rows.length * 0.25)) * 0.75
+  infoLabel.scale.set(8.0, scaleY, 1)
+  infoLabel.visible = showDimensions
+  infoLabel.userData.isInfoLabel = true
+  infoLabel.userData.baseScaleY = scaleY
+  ladderContainer.add(infoLabel)
+}
+
+// Info label dla attyki (przejście przez attykę)
+interface AtticInfoParams {
+  wspornikEntry: string       // Wspornik strona wejścia
+  wspornikDescent: string     // Wspornik strona zejścia
+  hasBigfoot: boolean         // Czy jest bigfoot
+  hasCage: boolean            // Czy jest kosz
+  wallHeight: number          // Wysokość ściany
+  lastRungToGround: number    // Ostatni szczebel → ziemia
+  insulationEntry: number     // Grubość ocieplenia wejście
+  insulationDescent: number   // Grubość ocieplenia zejście
+}
+
+function drawAtticInfoLabel(params: AtticInfoParams, zPos: number) {
+  // Usuń poprzedni label
+  if (atticInfoLabel) {
+    ladderContainer.remove(atticInfoLabel)
+    ;(atticInfoLabel.material as THREE.SpriteMaterial).dispose()
+    atticInfoLabel = null
+  }
+  // Usuń klasyczny info label (przy przełączaniu schematu)
+  if (infoLabel) {
+    ladderContainer.remove(infoLabel)
+    ;(infoLabel.material as THREE.SpriteMaterial).dispose()
+    infoLabel = null
+  }
+
+  // Mapowanie typów wsporników na nazwy z zakresami
+  const wspornikNames: Record<string, string> = {
+    'krotki': 'Regulowany 160-260mm',
+    'sredni': 'Regulowany 260-360mm',
+    'dlugi': 'Regulowany 360-460mm',
+    'none': 'Brak'
+  }
+  const wspornikEntryName = wspornikNames[params.wspornikEntry] || 'Niestandardowy'
+  const wspornikDescentName = wspornikNames[params.wspornikDescent] || 'Niestandardowy'
+
+  // Przygotuj wiersze tabeli
+  const rows: Array<{label: string, value: string}> = [
+    { label: 'Szerokość drabiny', value: '560 mm' },
+    { label: 'Rozstaw szczebli', value: 'co 276 mm' },
+    { label: 'Długość przełazu', value: '1120 mm' }
+  ]
+
+  // Dodaj rozstaw obręczy tylko jeśli jest kosz
+  if (params.hasCage) {
+    rows.push({ label: 'Rozstaw obręczy', value: 'co 640 mm' })
+  }
+
+  rows.push(
+    { label: 'Wspornik wejście', value: wspornikEntryName },
+    { label: 'Wspornik zejście', value: wspornikDescentName },
+    { label: 'Bigfoot', value: params.hasBigfoot ? 'Tak' : 'Nie' },
+    { label: 'Wys. ściany', value: `${params.wallHeight} mm` },
+    { label: 'Ostatni szczebel → ziemia', value: `${params.lastRungToGround} mm` },
+    { label: 'Ocieplenie wejście', value: `${params.insulationEntry} mm` },
+    { label: 'Ocieplenie zejście', value: `${params.insulationDescent} mm` }
+  )
+
+  // Utwórz canvas z tabelą
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+
+  const rowHeight = 45
+  const tableWidth = 750
+  const col1Width = 420
+  const col2Width = tableWidth - col1Width
+  const tableX = 20
+  const tableY = 20
+  const canvasHeight = tableY + (rows.length * rowHeight) + 20
+
+  canvas.width = tableWidth + 40
+  canvas.height = canvasHeight
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+  // Rysuj tabelę
+  ctx.strokeStyle = '#333333'
+  ctx.lineWidth = 2
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 24px Arial'
+  ctx.textBaseline = 'middle'
+
+  for (let i = 0; i < rows.length; i++) {
+    const y = tableY + (i * rowHeight)
+
+    // Tło naprzemienne
+    if (i % 2 === 0) {
+      ctx.fillStyle = '#f5f5f5'
+      ctx.fillRect(tableX, y, tableWidth, rowHeight)
+    }
+
+    // Obramowanie wiersza
+    ctx.strokeRect(tableX, y, col1Width, rowHeight)
+    ctx.strokeRect(tableX + col1Width, y, col2Width, rowHeight)
+
+    // Tekst
+    ctx.fillStyle = '#000000'
+    ctx.textAlign = 'left'
+    ctx.fillText(rows[i].label, tableX + 10, y + rowHeight / 2)
+    ctx.textAlign = 'right'
+    ctx.fillText(rows[i].value, tableX + tableWidth - 10, y + rowHeight / 2)
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  atticInfoLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja z tyłu sceny, 1300mm powyżej podłogi
+  const yPos = (groundTopBoxY !== null ? groundTopBoxY : 0) + 1300 * SCALE
+  atticInfoLabel.position.set(0, yPos, zPos + 4200 * SCALE)
+
+  // Dostosuj skalę do liczby wierszy
+  const scaleY = (5.0 + (rows.length * 0.3)) * 0.75
+  atticInfoLabel.scale.set(8.0, scaleY, 1)
+  atticInfoLabel.visible = showDimensions
+  atticInfoLabel.userData.isAtticInfoLabel = true
+  atticInfoLabel.userData.baseScaleY = scaleY
+  ladderContainer.add(atticInfoLabel)
+}
+
+// Piąty wymiar: Wysokość zawieszenia (żółty → niebieski) - gdy lastRungToGround > 350mm
+function drawSuspensionHeightDimension(zPos: number, frontSide: boolean = false) {
+  // Usuń poprzednią linię, label i dyski
+  if (suspensionHeightLine) {
+    ladderContainer.remove(suspensionHeightLine)
+    suspensionHeightLine.geometry.dispose()
+    ;(suspensionHeightLine.material as THREE.LineBasicMaterial).dispose()
+    suspensionHeightLine = null
+  }
+  if (suspensionHeightLabel) {
+    ladderContainer.remove(suspensionHeightLabel)
+    ;(suspensionHeightLabel.material as THREE.SpriteMaterial).dispose()
+    suspensionHeightLabel = null
+  }
+  if (suspensionHeightDiskTop) {
+    ladderContainer.remove(suspensionHeightDiskTop)
+    suspensionHeightDiskTop.geometry.dispose()
+    ;(suspensionHeightDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    suspensionHeightDiskTop = null
+  }
+  if (suspensionHeightDiskBottom) {
+    ladderContainer.remove(suspensionHeightDiskBottom)
+    suspensionHeightDiskBottom.geometry.dispose()
+    ;(suspensionHeightDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    suspensionHeightDiskBottom = null
+  }
+
+  if (finalLadderBottomBoxY === null || groundTopBoxY === null) return
+
+  // Pozycje: góra żółtego boxa → góra niebieskiego boxa
+  const yellowTop = finalLadderBottomBoxY
+  const blueTop = groundTopBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(yellowTop - blueTop) / SCALE)
+
+  // Rysuj linię - pozycja zależy od strony (tak samo jak dł. drabiny)
+  const xOffset = -150 * SCALE // Linia po lewej stronie
+  const lineZOffset = frontSide ? 800 * SCALE : -900 * SCALE // Przód 800mm lub tył
+  const points = [
+    new THREE.Vector3(xOffset, yellowTop, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, blueTop, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  suspensionHeightLine = new THREE.Line(geometry, material)
+  suspensionHeightLine.visible = showDimensions
+  ladderContainer.add(suspensionHeightLine)
+
+  // Dyski na końcach linii
+  const diskRadius = 100 * SCALE
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk górny (przy żółtym)
+  suspensionHeightDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  suspensionHeightDiskTop.position.set(xOffset, yellowTop, zPos + lineZOffset)
+  suspensionHeightDiskTop.rotation.x = -Math.PI / 2
+  suspensionHeightDiskTop.visible = showDimensions
+  ladderContainer.add(suspensionHeightDiskTop)
+
+  // Dysk dolny (przy niebieskim)
+  suspensionHeightDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  suspensionHeightDiskBottom.position.set(xOffset, blueTop, zPos + lineZOffset)
+  suspensionHeightDiskBottom.rotation.x = -Math.PI / 2
+  suspensionHeightDiskBottom.visible = showDimensions
+  ladderContainer.add(suspensionHeightDiskBottom)
+
+  // Utwórz label z dystansem i przedrostkiem "Wys. zawieszenia" (bez tła)
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 512
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 48px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // Obróć tekst 90 stopni
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`Wys. zawieszenia`, 0, -35)
+  ctx.fillText(`${distanceMm} mm`, 0, 35)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  suspensionHeightLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii - offset zależy od strony (tak samo jak dł. drabiny)
+  const midY = (yellowTop + blueTop) / 2
+  const labelZOffset = frontSide ? 100 * SCALE : -100 * SCALE  // Przód: 100mm, Tył: 100mm do tyłu
+  suspensionHeightLabel.position.set(xOffset + 300 * SCALE, midY, zPos + lineZOffset + labelZOffset)
+  suspensionHeightLabel.scale.set(2.5, 6.0, 1)
+  suspensionHeightLabel.visible = showDimensions
+  suspensionHeightLabel.userData.isSuspensionHeightLabel = true
+  suspensionHeightLabel.userData.frontSide = frontSide
+  ladderContainer.add(suspensionHeightLabel)
+}
+
+// Szósty wymiar: Zielony → Czerwony (dół zielonego → dół czerwonego)
+function drawGreenRedDimension(zPos: number, frontSide: boolean = false) {
+  // Usuń poprzednią linię, label i dyski
+  if (greenRedLine) {
+    ladderContainer.remove(greenRedLine)
+    greenRedLine.geometry.dispose()
+    ;(greenRedLine.material as THREE.LineBasicMaterial).dispose()
+    greenRedLine = null
+  }
+  if (greenRedLabel) {
+    ladderContainer.remove(greenRedLabel)
+    ;(greenRedLabel.material as THREE.SpriteMaterial).dispose()
+    greenRedLabel = null
+  }
+  if (greenRedDiskTop) {
+    ladderContainer.remove(greenRedDiskTop)
+    greenRedDiskTop.geometry.dispose()
+    ;(greenRedDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    greenRedDiskTop = null
+  }
+  if (greenRedDiskBottom) {
+    ladderContainer.remove(greenRedDiskBottom)
+    greenRedDiskBottom.geometry.dispose()
+    ;(greenRedDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    greenRedDiskBottom = null
+  }
+
+  if (roofTopBoxY === null || wallTopBoxY === null) return
+
+  // Pozycje: dół zielonego → dół czerwonego
+  // Dla attyki roofTopBoxY to GÓRA boxa, więc dół = góra - wysokość boxa (35mm)
+  const greenBoxHeight = 35 * SCALE
+  const greenBottom = roofTopBoxY - greenBoxHeight  // Faktyczny dół zielonego boxa
+  const redBottom = wallTopBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(greenBottom - redBottom) / SCALE)
+
+  // Rysuj linię - pozycja przy ścianie (750mm w tył od standardowej pozycji)
+  const xOffset = -150 * SCALE // Linia po lewej stronie
+  const lineZOffset = frontSide ? 50 * SCALE : -900 * SCALE // 50mm w przód od ściany
+  const points = [
+    new THREE.Vector3(xOffset, greenBottom, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, redBottom, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  greenRedLine = new THREE.Line(geometry, material)
+  greenRedLine.visible = showDimensions
+  ladderContainer.add(greenRedLine)
+
+  // Stożki (groty) na końcach linii - imitacja wymiaru technicznego
+  const coneRadius = 30 * SCALE  // Połowa rozmiaru
+  const coneHeight = 75 * SCALE  // Połowa rozmiaru
+  const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 16)
+  const coneMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 })
+
+  // Stożek górny (przy zielonym) - skierowany w górę, przesunięty w dół o wysokość stożka
+  greenRedDiskTop = new THREE.Mesh(coneGeometry, coneMaterial.clone())
+  greenRedDiskTop.position.set(xOffset, greenBottom - coneHeight / 2, zPos + lineZOffset)
+  // Domyślnie grot jest w górę
+  greenRedDiskTop.visible = showDimensions
+  ladderContainer.add(greenRedDiskTop)
+
+  // Stożek dolny (przy czerwonym) - skierowany w dół, przesunięty w górę o wysokość stożka
+  greenRedDiskBottom = new THREE.Mesh(coneGeometry.clone(), coneMaterial.clone())
+  greenRedDiskBottom.position.set(xOffset, redBottom + coneHeight / 2, zPos + lineZOffset)
+  greenRedDiskBottom.rotation.x = Math.PI  // Obrót by grot był w dół
+  greenRedDiskBottom.visible = showDimensions
+  ladderContainer.add(greenRedDiskBottom)
+
+  // Utwórz label tylko z dystansem (bez przedrostka) - tekst poziomy, stała skala
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 128
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 48px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(`${distanceMm} mm`, canvas.width / 2, canvas.height / 2)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  greenRedLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii - stała skala, 200mm w tył
+  const midY = (greenBottom + redBottom) / 2
+  greenRedLabel.position.set(xOffset + 2200 * SCALE, midY, zPos + lineZOffset - 200 * SCALE)
+  greenRedLabel.scale.set(4.0, 2.0, 1)
+  greenRedLabel.visible = showDimensions
+  greenRedLabel.userData.isGreenRedLabel = true
+  greenRedLabel.userData.noScaling = true  // Flaga do pominięcia skalowania
+  ladderContainer.add(greenRedLabel)
+}
+
+// Siódmy wymiar: Dł. Drabiny strona zejścia (fioletowy → zielony)
+function drawDescentLadderLengthDimension(zPos: number) {
+  // Usuń poprzednią linię, label i dyski
+  if (descentLadderLengthLine) {
+    ladderContainer.remove(descentLadderLengthLine)
+    descentLadderLengthLine.geometry.dispose()
+    ;(descentLadderLengthLine.material as THREE.LineBasicMaterial).dispose()
+    descentLadderLengthLine = null
+  }
+  if (descentLadderLengthLabel) {
+    ladderContainer.remove(descentLadderLengthLabel)
+    ;(descentLadderLengthLabel.material as THREE.SpriteMaterial).dispose()
+    descentLadderLengthLabel = null
+  }
+  if (descentLadderLengthDiskTop) {
+    ladderContainer.remove(descentLadderLengthDiskTop)
+    descentLadderLengthDiskTop.geometry.dispose()
+    ;(descentLadderLengthDiskTop.material as THREE.MeshBasicMaterial).dispose()
+    descentLadderLengthDiskTop = null
+  }
+  if (descentLadderLengthDiskBottom) {
+    ladderContainer.remove(descentLadderLengthDiskBottom)
+    descentLadderLengthDiskBottom.geometry.dispose()
+    ;(descentLadderLengthDiskBottom.material as THREE.MeshBasicMaterial).dispose()
+    descentLadderLengthDiskBottom = null
+  }
+
+  if (roofTopBoxY === null || descentWallTopBoxY === null) return
+
+  // Pozycje: góra zielonego boxa → dół fioletowego (góra ściany zejścia)
+  const greenTop = roofTopBoxY
+  const purpleBottom = descentWallTopBoxY
+
+  // Oblicz dystans w mm
+  const distanceMm = Math.round(Math.abs(greenTop - purpleBottom) / SCALE)
+
+  // Rysuj linię - z tyłu (jak klasyczna dł. drabiny), przesunięta 600mm w tył
+  const xOffset = -150 * SCALE // Linia po lewej stronie
+  const lineZOffset = -1500 * SCALE // Z tyłu (600mm dalej)
+  const points = [
+    new THREE.Vector3(xOffset, greenTop, zPos + lineZOffset),
+    new THREE.Vector3(xOffset, purpleBottom, zPos + lineZOffset)
+  ]
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({ color: 0x000000 })
+  descentLadderLengthLine = new THREE.Line(geometry, material)
+  descentLadderLengthLine.visible = showDimensions
+  ladderContainer.add(descentLadderLengthLine)
+
+  // Dyski na końcach linii
+  const diskRadius = 100 * SCALE
+  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
+
+  // Dysk górny (przy zielonym)
+  descentLadderLengthDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
+  descentLadderLengthDiskTop.position.set(xOffset, greenTop, zPos + lineZOffset)
+  descentLadderLengthDiskTop.rotation.x = -Math.PI / 2
+  descentLadderLengthDiskTop.visible = showDimensions
+  ladderContainer.add(descentLadderLengthDiskTop)
+
+  // Dysk dolny (przy fioletowym)
+  descentLadderLengthDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
+  descentLadderLengthDiskBottom.position.set(xOffset, purpleBottom, zPos + lineZOffset)
+  descentLadderLengthDiskBottom.rotation.x = -Math.PI / 2
+  descentLadderLengthDiskBottom.visible = showDimensions
+  ladderContainer.add(descentLadderLengthDiskBottom)
+
+  // Utwórz label z dystansem i przedrostkiem "Dł. Drabiny"
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 512
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000000'
+  ctx.font = 'bold 48px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // Obróć tekst 90 stopni
+  ctx.save()
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.fillText(`Dł. Drabiny (zejście)`, 0, -35)
+  ctx.fillText(`${distanceMm} mm`, 0, 35)
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  descentLadderLengthLabel = new THREE.Sprite(spriteMaterial)
+
+  // Pozycja labela na środku linii, 1900mm w prawo
+  const midY = (greenTop + purpleBottom) / 2
+  const labelZOffset = -100 * SCALE  // 100mm do tyłu od linii
+  descentLadderLengthLabel.position.set(xOffset + 2200 * SCALE, midY, zPos + lineZOffset + labelZOffset)
+  descentLadderLengthLabel.scale.set(2.5, 6.0, 1)
+  descentLadderLengthLabel.visible = showDimensions
+  descentLadderLengthLabel.userData.isDescentLadderLengthLabel = true
+  ladderContainer.add(descentLadderLengthLabel)
+}
+
+// ============================================
 // RENDER SAFETY CAGE (obrecze)
 // ============================================
 function renderSafetyCage() {
   if (!loadedModels.obrecz) return
+
+  // Wyczyść poprzednie boxy mierzenia
+  clearMeasurementBoxes()
 
   const hoopSpacing = 641.7  // mm between hoops
 
@@ -2116,8 +3495,64 @@ function renderSafetyCage() {
       hoop.position.z = (geoConfig1.zOffset + 241) * SCALE
       hoop.userData.isSafetyCage = true
       hoop.userData.ladderNum = 1
+      const hoopElementId = `cage_hoop_1_${i}`
+      hoop.userData.elementId = hoopElementId
+      hoop.traverse((child) => {
+        child.userData.isSafetyCage = true
+        child.userData.ladderNum = 1
+        child.userData.elementId = hoopElementId
+      })
       addOutlineToModel(hoop)
       ladderContainer.add(hoop)
+
+      // Box mierzenia na górze pierwszej obręczy (magenta)
+      if (i === 0) {
+        const boxHeight = 50 * SCALE
+        const boxWidth = 100 * SCALE
+        const boxDepth = 100 * SCALE
+        const boxZOffset = 334 * SCALE
+        const boxYPos = (yPos + 45) * SCALE // 45mm nad obręczą
+
+        const measureBox = createMeasurementBox(
+          boxWidth,
+          boxHeight,
+          boxDepth,
+          new THREE.Vector3(0, boxYPos, (geoConfig1.zOffset + 241) * SCALE + boxZOffset),
+          0xff00ff // Magenta
+        )
+        measureBox.userData.measurementBoxType = 'firstHoopTop'
+        measureBox.userData.ladderNum = 1
+        ladderContainer.add(measureBox)
+
+        // Zapisz pozycję Y dla pomiaru
+        firstHoopBoxY = boxYPos
+      }
+
+      // Box mierzenia na dole ostatniej obręczy (cyan)
+      if (i === safetyCageCount1 - 1) {
+        const boxHeight = 50 * SCALE
+        const boxWidth = 100 * SCALE
+        const boxDepth = 100 * SCALE
+        const boxZOffset = 334 * SCALE
+        const boxYPos = (yPos - 45) * SCALE // -45mm od środka obręczy
+
+        const measureBox = createMeasurementBox(
+          boxWidth,
+          boxHeight,
+          boxDepth,
+          new THREE.Vector3(0, boxYPos, (geoConfig1.zOffset + 241) * SCALE + boxZOffset),
+          0x00ffff // Cyan
+        )
+        measureBox.userData.measurementBoxType = 'lastHoopBottom'
+        measureBox.userData.ladderNum = 1
+        ladderContainer.add(measureBox)
+
+        // Zapisz pozycję Y dla pomiaru
+        lastHoopBoxY = boxYPos
+
+        // Rysuj linię między boxami
+        drawMeasurementLineBetweenBoxes((geoConfig1.zOffset + 241) * SCALE + boxZOffset)
+      }
     }
 
     // Cage closing (zamykanie)
@@ -2131,8 +3566,15 @@ function renderSafetyCage() {
       closing.position.x = 0
       closing.position.y = (lastHoopY - 35) * SCALE
       closing.position.z = (geoConfig1.zOffset + 241 + 4) * SCALE
-      closing.userData.isSafetyCage = true
+      closing.userData.isCageClosing = true
       closing.userData.ladderNum = 1
+      const closingElementId = `cage_closing_1`
+      closing.userData.elementId = closingElementId
+      closing.traverse((child) => {
+        child.userData.isCageClosing = true
+        child.userData.ladderNum = 1
+        child.userData.elementId = closingElementId
+      })
       addOutlineToModel(closing)
       ladderContainer.add(closing)
     }
@@ -2150,6 +3592,13 @@ function renderSafetyCage() {
       restPlatform.position.z = (geoConfig1.zOffset + 241 - 40) * SCALE
       restPlatform.userData.ladderNum = 1
       restPlatform.userData.isRestingPlatform = true
+      const restPlatformElementId = `resting_platform_1`
+      restPlatform.userData.elementId = restPlatformElementId
+      restPlatform.traverse((child) => {
+        child.userData.isRestingPlatform = true
+        child.userData.ladderNum = 1
+        child.userData.elementId = restPlatformElementId
+      })
       addOutlineToModel(restPlatform)
       ladderContainer.add(restPlatform)
     }
@@ -2175,6 +3624,13 @@ function renderSafetyCage() {
       hoop.position.z = (geoConfig2.zOffset - 241) * SCALE
       hoop.userData.isSafetyCage = true
       hoop.userData.ladderNum = 2
+      const hoop2ElementId = `cage_hoop_2_${i}`
+      hoop.userData.elementId = hoop2ElementId
+      hoop.traverse((child) => {
+        child.userData.isSafetyCage = true
+        child.userData.ladderNum = 2
+        child.userData.elementId = hoop2ElementId
+      })
       addOutlineToModel(hoop)
       ladderContainer.add(hoop)
     }
@@ -2190,8 +3646,15 @@ function renderSafetyCage() {
       closing.position.x = 0
       closing.position.y = (lastHoopY - 35) * SCALE
       closing.position.z = (geoConfig2.zOffset - 241 - 4) * SCALE
-      closing.userData.isSafetyCage = true
+      closing.userData.isCageClosing = true
       closing.userData.ladderNum = 2
+      const closing2ElementId = `cage_closing_2`
+      closing.userData.elementId = closing2ElementId
+      closing.traverse((child) => {
+        child.userData.isCageClosing = true
+        child.userData.ladderNum = 2
+        child.userData.elementId = closing2ElementId
+      })
       addOutlineToModel(closing)
       ladderContainer.add(closing)
     }
@@ -2280,6 +3743,16 @@ function renderAngleBrackets(
 
         model.userData.isAngleBracket = true
         model.userData.ladderNum = ladderNum
+        model.userData.segments = parseInt(bracket.type.replace('x', ''))
+        const modelElementId = `angle_bracket_${ladderNum}_${b}_${bracketAngles[a]}`
+        model.userData.elementId = modelElementId
+        // Propagate userData to children for BOM counting and deletion
+        model.traverse((child) => {
+          child.userData.isAngleBracket = true
+          child.userData.ladderNum = ladderNum
+          child.userData.segments = parseInt(bracket.type.replace('x', ''))
+          child.userData.elementId = modelElementId  // Same ID as parent
+        })
         addOutlineToModel(model)
         ladderContainer.add(model)
       }
@@ -3873,6 +5346,10 @@ function renderSciskaneHandles() {
 // MAIN CREATE LADDER FUNCTION
 // ============================================
 function createLadder() {
+  // Clear hidden elements on full rebuild (configuration change)
+  // This resets the "deleted" elements when user changes configuration
+  clearHiddenElements()
+
   // Temporarily disable outlines for performance during rebuild
   if (outlineDelayTimer) {
     clearTimeout(outlineDelayTimer)
@@ -3887,6 +5364,14 @@ function createLadder() {
 
   connectorObjects = []
   wspornikObjects = []
+
+  // Reset pozycji boxów mierzenia
+  roofTopBoxY = null
+  finalLadderBottomBoxY = null
+  lastFinalLadderBottomY = null
+  savedYellowBoxData = null
+  groundTopBoxY = null
+  handrailTopBoxY = null
 
   // Determine which ladders to render
   const laddersToRender = [1]
@@ -3936,9 +5421,44 @@ function createLadder() {
         model.userData.isLadderModule = true
         model.userData.rungs = section.rungs
         model.userData.moduleType = section.type // 'standard', 'alt', 'final'
+        const ladderModuleElementId = `ladder_module_${ladderNum}_${s}`
+        model.userData.elementId = ladderModuleElementId
+        model.traverse((child) => {
+          child.userData.isLadderModule = true
+          child.userData.ladderNum = ladderNum
+          child.userData.rungs = section.rungs
+          child.userData.elementId = ladderModuleElementId
+        })
 
         addOutlineToModel(model)
         ladderContainer.add(model)
+
+        // Zapisz dół drabiny końcowej (dla boxa mierzenia - box tworzony później w renderYellowMeasurementBox)
+        if (section.type === 'final' && ladderNum === 1) {
+          const ladderBottomY = yPos - sectionHeight / 2
+          const rungs = section.rungs
+          const bottomOffset = (rungs === 7 || String(rungs) === '7alt') ? 22 : 26
+          // Zapisz pozycję dla żółtego boxa (będzie tworzony po clearMeasurementBoxes)
+          const boxYPos = (ladderBottomY - bottomOffset) * SCALE
+          const boxSize = 50 * SCALE
+          // Zapisz najniższą pozycję
+          if (lastFinalLadderBottomY === null || ladderBottomY < lastFinalLadderBottomY) {
+            lastFinalLadderBottomY = ladderBottomY
+          }
+          // Zapisz górę żółtego boxa dla wymiaru Dł. Drabiny
+          const yellowBoxTop = boxYPos + boxSize / 2
+          if (finalLadderBottomBoxY === null || yellowBoxTop < finalLadderBottomBoxY) {
+            finalLadderBottomBoxY = yellowBoxTop
+            // Zapisz dane do późniejszego utworzenia boxa
+            savedYellowBoxData = {
+              boxYPos,
+              boxSize,
+              boxZOffset: (geoConfig.zOffset + 241) * SCALE,
+              ladderNum,
+              sectionIndex: s
+            }
+          }
+        }
       }
 
       currentHeightOffset += sectionHeight
@@ -3949,10 +5469,10 @@ function createLadder() {
   }
 
   // Add handrails or attic passage
-  if (handrailType === 'safety' && totalHeight > 0) {
+  if (handrailType === 'safety' && totalHeight > 0 && hasHandrailsLocal) {
     renderSafetyHandrails(totalHeight)
   } else if (handrailType === 'platform' && totalHeight > 0) {
-    renderPlatformHandrails(totalHeight)
+    renderPlatformHandrails(totalHeight, hasHandrailsLocal)
   } else if (handrailType === 'attic' && (height1 > 0 || height2 > 0)) {
     renderAtticPassage(totalHeight)
   }
@@ -3975,9 +5495,131 @@ function createLadder() {
     renderSafetyCage()
   }
 
+  // Create yellow measurement box (after clearMeasurementBoxes in renderSafetyCage)
+  renderYellowMeasurementBox()
+
   // Render wall and ground
   if (height1 > 0 && wallHeightConfig > 0) {
     renderWallAndGround(height1, maxHeight)
+
+    // Rysuj wymiar Dł. Drabiny tylko dla klasycznej/z podestem (nie attyka)
+    const isAtticPassage = props.scheme === 'attic-passage'
+    // Offset dla wymiarów z tyłu - bazowany na odległości wsporników
+    const backOffset = (props.wspornikDistance || 0) * SCALE
+    // Dla attyki: gdy nie ma kosza, przesuń wymiary 1200mm do tyłu
+    const noCageBackOffset = (!safetyCageCount1 || safetyCageCount1 === 0) ? 1200 * SCALE : 0
+
+    if (roofTopBoxY !== null && finalLadderBottomBoxY !== null) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      if (isAtticPassage) {
+        // Attyka: wymiar z przodu (jak wymiar kosza), do tyłu gdy brak kosza
+        const boxZOffset = 334 * SCALE
+        const zPos = (geoConfig1.zOffset + 241) * SCALE + boxZOffset - noCageBackOffset
+        drawLadderLengthDimension(zPos, true)
+      } else {
+        // Klasyczna/podest: wymiar z tyłu
+        const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+        drawLadderLengthDimension(zPos, false)
+      }
+    }
+
+    // Rysuj wymiar Wys. z poręczami (zielony → pomarańczowy) gdy są poręcze
+    if (roofTopBoxY !== null && handrailTopBoxY !== null) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      if (isAtticPassage) {
+        // Attyka: wymiar z przodu, do tyłu gdy brak kosza
+        const boxZOffset = 334 * SCALE
+        const zPos = (geoConfig1.zOffset + 241) * SCALE + boxZOffset - noCageBackOffset
+        drawHandrailHeightDimension(zPos, true)
+      } else {
+        // Klasyczna/podest: wymiar z tyłu
+        const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+        drawHandrailHeightDimension(zPos, false)
+      }
+    }
+
+    // Rysuj wymiar Wys. Kosza (cyan → podłoga) gdy jest kosz
+    if (safetyCageCount1 > 0 && lastHoopBoxY !== null && groundTopBoxY !== null) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      const boxZOffset = 334 * SCALE  // Ten sam offset co wymiar kosza
+      const zPos = (geoConfig1.zOffset + 241) * SCALE + boxZOffset
+      drawCageHeightDimension(zPos)
+    } else {
+      // Wyczyść wymiar gdy nie ma kosza
+      clearCageHeightDimension()
+    }
+
+    // Rysuj wymiar Wys. zawieszenia (żółty → niebieski) gdy lastRungToGround > 350mm
+    const distFromGround = props.distanceFromGround || 160
+    const lastRungToGround = distFromGround + suspendedHeight1
+    if (lastRungToGround > 350 && finalLadderBottomBoxY !== null && groundTopBoxY !== null) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      if (isAtticPassage) {
+        // Attyka: wymiar z przodu (jak dł. drabiny), do tyłu gdy brak kosza
+        const boxZOffset = 334 * SCALE
+        const zPos = (geoConfig1.zOffset + 241) * SCALE + boxZOffset - noCageBackOffset
+        drawSuspensionHeightDimension(zPos, true)
+      } else {
+        // Klasyczna/podest: wymiar z tyłu
+        const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+        drawSuspensionHeightDimension(zPos, false)
+      }
+    }
+
+    // Rysuj wymiar zielony → czerwony (tylko dla attyki) - przy ścianie
+    if (isAtticPassage && roofTopBoxY !== null && wallTopBoxY !== null) {
+      const wallThickness = props.atticWallThickness || 250
+      const wallZ = -(globalWspornikDistance1 + (wallThickness / 2) + 33) * SCALE
+      drawGreenRedDimension(wallZ, true)
+    }
+
+    // Rysuj wymiar Dł. Drabiny strona zejścia (fioletowy → zielony) - tylko dla attyki
+    if (isAtticPassage && roofTopBoxY !== null && descentWallTopBoxY !== null) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+      drawDescentLadderLengthDimension(zPos)
+    }
+
+    // Rysuj info label z tyłu sceny (tylko dla klasycznej/z podestem)
+    if (!isAtticPassage) {
+      const geoConfig1 = ladderGeometryConfig[1]
+      const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+      // Pobierz typ wspornika (pierwszy nie-none lub 'none')
+      const wspornikType = wspornikTypes1.find(t => t !== 'none') || 'none'
+      const hasCage = safetyCageCount1 > 0
+      const isPlatform = props.scheme === 'with-platform' || props.scheme === 'platform'
+      const insulationThickness = props.hasInsulation ? (props.insulationThickness || 0) : 0
+      drawInfoLabel(Math.round(lastRungToGround), Math.round(wallHeightConfig), wspornikType, hasCage, isPlatform, insulationThickness, zPos)
+    } else {
+      // Rysuj info label dla attyki
+      const geoConfig1 = ladderGeometryConfig[1]
+      const zPos = (geoConfig1.zOffset + 241) * SCALE - backOffset
+
+      // Pobierz typy wsporników
+      const wspornikEntry = wspornikTypes1.find(t => t !== 'none') || 'none'
+      const wspornikDescent = wspornikTypes2.find(t => t !== 'none') || 'none'
+
+      // Sprawdź czy jest bigfoot
+      const hasBigfoot = props.descentMountType === 'bigfoot'
+
+      // Sprawdź czy jest kosz
+      const hasCage = safetyCageCount1 > 0
+
+      // Grubość ocieplenia
+      const insulationEntry = props.atticHasInsulation ? (props.atticInsulationThickness || 0) : 0
+      const insulationDescent = props.atticBackHasInsulation ? (props.atticBackInsulationThickness || 0) : 0
+
+      drawAtticInfoLabel({
+        wspornikEntry,
+        wspornikDescent,
+        hasBigfoot,
+        hasCage,
+        wallHeight: Math.round(wallHeightConfig),
+        lastRungToGround: Math.round(lastRungToGround),
+        insulationEntry,
+        insulationDescent
+      }, zPos)
+    }
   }
 
   // Render obstacles
@@ -4000,6 +5642,7 @@ function createLadder() {
     outlineDelayTimer = setTimeout(() => {
       outlineEnabled = true
       reapplyOutlines()
+      requestRender() // Render after outlines are applied
     }, 300)
   }
 }
@@ -4020,6 +5663,15 @@ function renderSafetyHandrails(totalHeight: number) {
     leftPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
     leftPorecz.userData.isHandrail = true
     leftPorecz.userData.ladderNum = 1
+    leftPorecz.userData.side = 'left'
+    const leftHandrailId = `handrail_1_left`
+    leftPorecz.userData.elementId = leftHandrailId
+    leftPorecz.traverse((child) => {
+      child.userData.isHandrail = true
+      child.userData.ladderNum = 1
+      child.userData.side = 'left'
+      child.userData.elementId = leftHandrailId
+    })
     addOutlineToModel(leftPorecz)
     ladderContainer.add(leftPorecz)
 
@@ -4032,6 +5684,15 @@ function renderSafetyHandrails(totalHeight: number) {
     rightPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
     rightPorecz.userData.isHandrail = true
     rightPorecz.userData.ladderNum = 1
+    rightPorecz.userData.side = 'right'
+    const rightHandrailId = `handrail_1_right`
+    rightPorecz.userData.elementId = rightHandrailId
+    rightPorecz.traverse((child) => {
+      child.userData.isHandrail = true
+      child.userData.ladderNum = 1
+      child.userData.side = 'right'
+      child.userData.elementId = rightHandrailId
+    })
     addOutlineToModel(rightPorecz)
     ladderContainer.add(rightPorecz)
   }
@@ -4040,17 +5701,29 @@ function renderSafetyHandrails(totalHeight: number) {
 // ============================================
 // RENDER PLATFORM HANDRAILS
 // ============================================
-function renderPlatformHandrails(totalHeight: number) {
+function renderPlatformHandrails(totalHeight: number, shouldRenderHandrails: boolean = true) {
   const topOfLadder = totalHeight / 2
 
-  // Same handrails as safety
-  if (loadedModels.porecz) {
+  // Handrails only if shouldRenderHandrails is true
+  if (loadedModels.porecz && shouldRenderHandrails) {
     const leftPorecz = loadedModels.porecz.clone(true)
     leftPorecz.scale.set(SCALE, SCALE, SCALE)
     leftPorecz.rotation.set(Math.PI * 1.5, 0, Math.PI)
     leftPorecz.position.x = -RAIL_OFFSET * SCALE
     leftPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
     leftPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
+    leftPorecz.userData.isHandrail = true
+    leftPorecz.userData.ladderNum = 1
+    leftPorecz.userData.side = 'left'
+    leftPorecz.userData.handrailType = 'platform'
+    const leftPlatformHandrailId = `handrail_1_left`
+    leftPorecz.userData.elementId = leftPlatformHandrailId
+    leftPorecz.traverse((child) => {
+      child.userData.isHandrail = true
+      child.userData.ladderNum = 1
+      child.userData.side = 'left'
+      child.userData.elementId = leftPlatformHandrailId
+    })
     addOutlineToModel(leftPorecz)
     ladderContainer.add(leftPorecz)
 
@@ -4060,6 +5733,18 @@ function renderPlatformHandrails(totalHeight: number) {
     rightPorecz.position.x = RAIL_OFFSET * SCALE
     rightPorecz.position.y = (topOfLadder + DIMS.handrailVertical / 2) * SCALE
     rightPorecz.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
+    rightPorecz.userData.isHandrail = true
+    rightPorecz.userData.ladderNum = 1
+    rightPorecz.userData.side = 'right'
+    rightPorecz.userData.handrailType = 'platform'
+    const rightPlatformHandrailId = `handrail_1_right`
+    rightPorecz.userData.elementId = rightPlatformHandrailId
+    rightPorecz.traverse((child) => {
+      child.userData.isHandrail = true
+      child.userData.ladderNum = 1
+      child.userData.side = 'right'
+      child.userData.elementId = rightPlatformHandrailId
+    })
     addOutlineToModel(rightPorecz)
     ladderContainer.add(rightPorecz)
   }
@@ -4072,8 +5757,24 @@ function renderPlatformHandrails(totalHeight: number) {
     podest.position.x = 0
     podest.position.y = (topOfLadder + DIMS.handrailVertical / 2 - 536) * SCALE
     podest.position.z = (-245.5 - 3) * SCALE  // Korekta -3mm
+    podest.userData.isPlatform = true
+    podest.userData.ladderNum = 1
+    const platformElementId = `platform_1`
+    podest.userData.elementId = platformElementId
+    podest.traverse((child) => {
+      child.userData.isPlatform = true
+      child.userData.ladderNum = 1
+      child.userData.elementId = platformElementId
+    })
     addOutlineToModel(podest)
     ladderContainer.add(podest)
+
+    // Marker for Krata WEMA 50x50 (part of podest model, but separate BOM item)
+    const krataMarker = new THREE.Group()
+    krataMarker.userData.isKrataWema = true
+    krataMarker.userData.krataSize = '50x50'
+    krataMarker.userData.ladderNum = 1
+    ladderContainer.add(krataMarker)
   }
 }
 
@@ -4104,6 +5805,8 @@ function renderAtticPassage(totalHeight: number) {
     krata.position.y = (topOfMainRails + DIMS.atticRailHeight / 2 - 430) * SCALE
     krata.position.z = (-535 - 3) * SCALE  // Korekta -3mm
     krata.userData.ladderNum = 0
+    krata.userData.isKrataWema = true
+    krata.userData.krataSize = '100x50'
     addOutlineToModel(krata)
     ladderContainer.add(krata)
   }
@@ -4113,15 +5816,15 @@ function renderAtticPassage(totalHeight: number) {
     // Stała pozycja Z (bigfoot nie przesuwa się z drabiną)
     // Oryginalna formuła: -(215 + 250 + 33 + 250 + 1000 - 678) = -1070, + korekta -3mm
     const bigfootZ = -1070 - 3
-    
+
     // Oblicz pozycję na szczycie ściany zejścia (dachu)
     const atticDist = props.atticPlatformDistance ?? 0
     const topOffset = -161 + 511 - atticDist
     const ladderTop = totalHeight / 2
     const groundLevel = ladderTop - wallHeightConfig + topOffset
     const groundThickness = 50
-    
-    // Wysokość ściany zejścia = główna ściana - atticWallHeight
+
+    // Wysokość ściany zejścia = główna ściana - atticWallHeight (wartość wpisana przez użytkownika w mm)
     const descentWallHeight = wallHeightConfig - (props.atticWallHeight ?? 0)
     // Bigfoot stoi na szczycie ściany zejścia (dachu) + 45mm
     const bigfootBaseY = groundLevel + groundThickness / 2 + descentWallHeight + 45
@@ -4223,6 +5926,7 @@ function renderAtticPassage(totalHeight: number) {
     const ladderTop = totalHeight / 2
     const groundLevel = ladderTop - wallHeightConfig + topOffset
     const groundThickness = 50
+    // Wysokość ściany zejścia = główna ściana - atticWallHeight
     const descentWallHeight = wallHeightConfig - (props.atticWallHeight ?? 0)
     const roofTopY = groundLevel + groundThickness / 2 + descentWallHeight
 
@@ -4603,7 +6307,7 @@ function renderConnectorsForLadder(ladderNum: number, maxHeight: number) {
 
   let pairIndex = 0
 
-  // Top connector (for safety or attic handrails)
+  // Top connector (for safety or attic handrails) - NOT for platform (connectors built into podest model)
   if ((handrailType === 'safety' || handrailType === 'attic') && connSections.length > 0) {
     const topY = (maxHeight / 2) - (DIMS.connectorHeight / 2) - 50
     const topConnectorType = (handrailType === 'safety') ? 'uchwytPoreczy' : connConnectorTypes[pairIndex]
@@ -4856,6 +6560,104 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
     wall.receiveShadow = true
     ladderContainer.add(wall)
 
+    // Trzeci box mierzenia na górze ściany (zielony)
+    const wallTopY = (wallCenterY + wallHeightConfig / 2) * SCALE
+    // Wysokość boxa: 35mm dla attyki, 50mm dla reszty
+    const roofBoxHeight = isAtticPassage ? 35 * SCALE : 50 * SCALE
+    const roofBoxWidth = 100 * SCALE
+    const roofBoxDepth = 100 * SCALE
+    const roofBoxZOffset = (334 - 882) * SCALE // Do tyłu o 882mm
+
+    let roofBoxYPos: number
+    if (isAtticPassage) {
+      // Dla attyki: pozycja przy modelu przełazu attykowego
+      // Model przełazu: Y = (totalHeight/2 + DIMS.atticRailHeight/2) * SCALE
+      const topOfMainRails = height1 / 2
+      const atticModelCenterY = (topOfMainRails + DIMS.atticRailHeight / 2) * SCALE
+      // Box przesunięty w dół o 425mm
+      roofBoxYPos = atticModelCenterY - 425 * SCALE
+    } else {
+      // Dół boxa na górze ściany (50mm wyżej dla podestu)
+      const platformOffset = handrailType === 'platform' ? 50 * SCALE : 0
+      roofBoxYPos = wallTopY + roofBoxHeight / 2 + platformOffset
+    }
+
+    const roofMeasureBox = createMeasurementBox(
+      roofBoxWidth,
+      roofBoxHeight,
+      roofBoxDepth,
+      new THREE.Vector3(0, roofBoxYPos, roofBoxZOffset),
+      0x00ff00 // Zielony
+    )
+    roofMeasureBox.userData.measurementBoxType = 'roofTop'
+    ladderContainer.add(roofMeasureBox)
+
+    // Zapisz pozycję boxa dla wymiaru Dł. Drabiny
+    // Dla attyki: GÓRA boxa, dla reszty: DÓŁ boxa
+    roofTopBoxY = isAtticPassage
+      ? roofBoxYPos + roofBoxHeight / 2
+      : roofBoxYPos - roofBoxHeight / 2
+
+    // Box na ścianie bez offsetu podestu (czerwony)
+    // Użyj standardowej wysokości 50mm dla czerwonego boxa (nie zależy od attyki)
+    const redBoxHeight = 50 * SCALE
+    const wallBoxYPos = wallTopY + redBoxHeight / 2  // Bez platformOffset
+    const wallMeasureBox = createMeasurementBox(
+      roofBoxWidth,
+      redBoxHeight,
+      roofBoxDepth,
+      new THREE.Vector3(0, wallBoxYPos, roofBoxZOffset),
+      0xff0000 // Czerwony
+    )
+    wallMeasureBox.userData.measurementBoxType = 'wallTop'
+
+    // Zapisz DÓŁ czerwonego boxa dla wymiaru zielony → czerwony
+    wallTopBoxY = wallTopY
+    ladderContainer.add(wallMeasureBox)
+
+    // Box na podłodze (niebieski) - góra boxa = góra podłogi
+    const groundTopYCalc = groundLevel * SCALE + 25 * SCALE  // groundLevel + połowa grubości podłogi (50/2)
+    const groundBoxYPos = groundTopYCalc - roofBoxHeight / 2  // Góra boxa na górze podłogi
+    const groundMeasureBox = createMeasurementBox(
+      roofBoxWidth,
+      roofBoxHeight,
+      roofBoxDepth,
+      new THREE.Vector3(0, groundBoxYPos, roofBoxZOffset),
+      0x0000ff // Niebieski
+    )
+    groundMeasureBox.userData.measurementBoxType = 'groundTop'
+    ladderContainer.add(groundMeasureBox)
+
+    // Zapisz GÓRĘ niebieskiego boxa dla wymiaru Wys. Kosza
+    groundTopBoxY = groundTopYCalc
+
+    // Box na wysokości poręczy asekuracyjnych (pomarańczowy) - dla poręczy lub attyki
+    if (handrailType === 'safety' || handrailType === 'platform' || handrailType === 'attic') {
+      let handrailTopY: number
+      if (handrailType === 'attic') {
+        // Dla attyki: góra modelu przełazu attykowego
+        const topOfMainRails = height1 / 2
+        handrailTopY = (topOfMainRails + DIMS.atticRailHeight) * SCALE
+      } else {
+        // Góra poręczy = góra drabiny + wysokość poręczy (1011mm)
+        handrailTopY = (ladderTop + DIMS.handrailVertical) * SCALE
+      }
+      // Dół boxa na górze poręczy/przełazu
+      const handrailBoxYPos = handrailTopY + roofBoxHeight / 2
+      const handrailMeasureBox = createMeasurementBox(
+        roofBoxWidth,
+        roofBoxHeight,
+        roofBoxDepth,
+        new THREE.Vector3(0, handrailBoxYPos, roofBoxZOffset),
+        0xffa500 // Pomarańczowy
+      )
+      handrailMeasureBox.userData.measurementBoxType = 'handrailTop'
+      ladderContainer.add(handrailMeasureBox)
+
+      // Zapisz DÓŁ pomarańczowego boxa dla wymiaru
+      handrailTopBoxY = handrailTopY
+    }
+
     // Insulation layer (semi-transparent)
     // Dla attyki: używaj atticHasInsulation i atticInsulationThickness
     // Dla klasycznej/z podestem: używaj hasInsulation i insulationThickness (lub showInsulation jako fallback)
@@ -4946,8 +6748,9 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
     // Wysokość = główna ściana - wartość wpisana przez użytkownika
     // Renderuj dla attic-passage LUB gdy showDescentWall jest ustawione (płaski dach/okap)
     if ((handrailType === 'attic' || props.showDescentWall) && props.atticWallHeight !== undefined) {
+      // Wysokość ściany zejścia = główna ściana - atticWallHeight
       const descentWallHeight = wallHeightConfig - props.atticWallHeight  // mm
-      
+
       // Renderuj tylko jeśli ściana zejścia ma dodatnią wysokość
       if (descentWallHeight > 0) {
         const descentWallDepth = 2000  // 2 metry w tył
@@ -4974,11 +6777,31 @@ function renderWallAndGround(height1: number, _maxHeight: number) {
         descentWall.receiveShadow = true
         ladderContainer.add(descentWall)
 
+        // Box pomiarowy na górze ściany zejścia (fioletowy)
+        const descentWallTop = (groundLevel + groundThickness / 2 + descentWallHeight) * SCALE
+        const descentBoxHeight = 50 * SCALE
+        const descentBoxWidth = 100 * SCALE
+        const descentBoxDepth = 100 * SCALE
+        const descentBoxYPos = descentWallTop + descentBoxHeight / 2  // Dół boxa na górze ściany
+        const descentBoxZOffset = descentWallZ * SCALE  // Przy ścianie zejścia
+        const descentMeasureBox = createMeasurementBox(
+          descentBoxWidth,
+          descentBoxHeight,
+          descentBoxDepth,
+          new THREE.Vector3(0, descentBoxYPos, descentBoxZOffset),
+          0x9932cc // Fioletowy
+        )
+        descentMeasureBox.userData.measurementBoxType = 'descentWallTop'
+        ladderContainer.add(descentMeasureBox)
+
+        // Zapisz GÓRĘ ściany zejścia (dół fioletowego boxa)
+        descentWallTopBoxY = descentWallTop
+
         // Ocieplenie po drugiej stronie ściany (strona zejścia)
-        // Wysokość = wysokość ściany strona zejścia (od góry ściany w dół)
+        // Wysokość = wysokość ściany strona zejścia (atticWallHeight - wartość wpisana przez użytkownika)
         if (props.atticBackHasInsulation && props.atticBackInsulationThickness) {
           const backInsulationThickness = props.atticBackInsulationThickness
-          const backInsulationHeight = props.atticWallHeight  // wysokość ściany zejścia
+          const backInsulationHeight = props.atticWallHeight || descentWallHeight  // użyj faktycznej wysokości ściany zejścia
           const backInsulationGeometry = new THREE.BoxGeometry(
             wallWidthConfig * SCALE,
             backInsulationHeight * SCALE,
@@ -5086,14 +6909,28 @@ function emitUpdate() {
     lastHoopToGround = Math.round(lastHoopY - groundLevel)
   }
 
+  // Assign element IDs to all objects (for delete/hide functionality)
+  assignElementIds()
+
+  // Apply hidden elements before generating BOM
+  applyHiddenElements()
+
+  // Generate BOM from actual 3D scene (will skip hidden elements)
+  const bomData = generateBOM()
+
   emit('update', {
     totalRungs,
     totalHeightMm,
     safetyCageCount: safetyCageCount1,
     connectorTypes: connectorTypes1.slice(),
     wspornikTypes: wspornikTypes1.slice(),
+    sciskaneHandles: sciskaneHandles1.map(h => ({
+      offsetFromBottom: h.offsetFromBottom,
+      connType: h.connType
+    })),
     lastRungToGround: Math.round(lastRungToGround),
-    lastHoopToGround
+    lastHoopToGround,
+    bomData
   })
 
   // Re-center camera in tech drawing mode after model update
@@ -5161,6 +6998,320 @@ function animate() {
     perspectiveCamera.position.x = cameraOffset.x
     perspectiveCamera.position.y = 0
     perspectiveCamera.lookAt(cameraOffset.x, 0, 0)
+  }
+
+  // Skaluj measurement label wraz z odległością kamery / zoom
+  if (measurementLabel && measurementLabel.visible) {
+    const baseScale = 0.5
+    let scaleFactor: number
+
+    if (isTechDrawingMode && orthoCamera) {
+      // Tryb rysunku technicznego - skaluj przez rozmiar widoku ortho (top - bottom)
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie w przód przy oddaleniu (bazowy zoom ~20, max ~300)
+      // Im większy viewHeight, tym bardziej do przodu
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      const zOffset = zoomDiff * 0.03  // Przesunięcie w przód proporcjonalne do oddalenia
+
+      // Aktualizuj pozycję Z (przesuń w przód = zwiększ Z)
+      if (measurementLabel.userData.baseZ === undefined) {
+        measurementLabel.userData.baseZ = measurementLabel.position.z
+      }
+      measurementLabel.position.z = measurementLabel.userData.baseZ + zOffset
+    } else {
+      // Tryb perspektywiczny - skaluj przez odległość kamery
+      const labelWorldPos = new THREE.Vector3()
+      measurementLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    measurementLabel.scale.set(baseScale * scaleFactor, baseScale * 4 * scaleFactor, 1)
+  }
+
+  // Skaluj ladder length label wraz z odległością kamery / zoom
+  if (ladderLengthLabel && ladderLengthLabel.visible) {
+    const baseScale = 0.7
+    let scaleFactor: number
+    const isFrontSide = ladderLengthLabel.userData.frontSide === true
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      // Różne współczynniki dla wymiaru (linia/dyski) i napisu
+      const zOffsetDimension = zoomDiff * 0.04  // Dla wymiaru
+      const zOffsetLabel = zoomDiff * 0.06      // Większy dla napisu
+
+      // Aktualizuj pozycję Z napisu
+      if (ladderLengthLabel.userData.baseZ === undefined) {
+        ladderLengthLabel.userData.baseZ = ladderLengthLabel.position.z
+      }
+      // Front: przesuń w przód (+), Tył: przesuń w tył (-)
+      ladderLengthLabel.position.z = ladderLengthLabel.userData.baseZ + (isFrontSide ? zOffsetLabel : -zOffsetLabel)
+
+      // Dla frontSide: przesuń też linię i dyski (mniejszy współczynnik)
+      if (isFrontSide) {
+        if (ladderLengthLine) {
+          if (ladderLengthLine.userData.baseZ === undefined) {
+            ladderLengthLine.userData.baseZ = ladderLengthLine.position.z
+          }
+          ladderLengthLine.position.z = ladderLengthLine.userData.baseZ + zOffsetDimension
+        }
+        if (ladderLengthDiskTop) {
+          if (ladderLengthDiskTop.userData.baseZ === undefined) {
+            ladderLengthDiskTop.userData.baseZ = ladderLengthDiskTop.position.z
+          }
+          ladderLengthDiskTop.position.z = ladderLengthDiskTop.userData.baseZ + zOffsetDimension
+        }
+        if (ladderLengthDiskBottom) {
+          if (ladderLengthDiskBottom.userData.baseZ === undefined) {
+            ladderLengthDiskBottom.userData.baseZ = ladderLengthDiskBottom.position.z
+          }
+          ladderLengthDiskBottom.position.z = ladderLengthDiskBottom.userData.baseZ + zOffsetDimension
+        }
+      }
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      ladderLengthLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    ladderLengthLabel.scale.set(baseScale * scaleFactor * 2.0, baseScale * 4.8 * scaleFactor, 1)
+  }
+
+  // Skaluj cage height label wraz z odległością kamery / zoom
+  if (cageHeightLabel && cageHeightLabel.visible) {
+    const baseScale = 0.5
+    let scaleFactor: number
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie w przód przy oddaleniu (tak samo jak wymiar kosza)
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      const zOffset = zoomDiff * 0.03
+
+      if (cageHeightLabel.userData.baseZ === undefined) {
+        cageHeightLabel.userData.baseZ = cageHeightLabel.position.z
+      }
+      cageHeightLabel.position.z = cageHeightLabel.userData.baseZ + zOffset
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      cageHeightLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    cageHeightLabel.scale.set(baseScale * scaleFactor, baseScale * 4 * scaleFactor, 1)
+  }
+
+  // Skaluj handrail height label wraz z odległością kamery / zoom (tak samo jak dł. drabiny)
+  if (handrailHeightLabel && handrailHeightLabel.visible) {
+    const baseScale = 0.7
+    let scaleFactor: number
+    const isFrontSide = handrailHeightLabel.userData.frontSide === true
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      // Różne współczynniki dla wymiaru (linia/dyski) i napisu
+      const zOffsetDimension = zoomDiff * 0.04  // Dla wymiaru
+      const zOffsetLabel = zoomDiff * 0.06      // Większy dla napisu
+
+      // Aktualizuj pozycję Z napisu
+      if (handrailHeightLabel.userData.baseZ === undefined) {
+        handrailHeightLabel.userData.baseZ = handrailHeightLabel.position.z
+      }
+      // Front: przesuń w przód (+), Tył: przesuń w tył (-)
+      handrailHeightLabel.position.z = handrailHeightLabel.userData.baseZ + (isFrontSide ? zOffsetLabel : -zOffsetLabel)
+
+      // Dla frontSide: przesuń też linię i dyski (mniejszy współczynnik)
+      if (isFrontSide) {
+        if (handrailHeightLine) {
+          if (handrailHeightLine.userData.baseZ === undefined) {
+            handrailHeightLine.userData.baseZ = handrailHeightLine.position.z
+          }
+          handrailHeightLine.position.z = handrailHeightLine.userData.baseZ + zOffsetDimension
+        }
+        if (handrailHeightDiskTop) {
+          if (handrailHeightDiskTop.userData.baseZ === undefined) {
+            handrailHeightDiskTop.userData.baseZ = handrailHeightDiskTop.position.z
+          }
+          handrailHeightDiskTop.position.z = handrailHeightDiskTop.userData.baseZ + zOffsetDimension
+        }
+        if (handrailHeightDiskBottom) {
+          if (handrailHeightDiskBottom.userData.baseZ === undefined) {
+            handrailHeightDiskBottom.userData.baseZ = handrailHeightDiskBottom.position.z
+          }
+          handrailHeightDiskBottom.position.z = handrailHeightDiskBottom.userData.baseZ + zOffsetDimension
+        }
+      }
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      handrailHeightLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    handrailHeightLabel.scale.set(baseScale * scaleFactor * 2.0, baseScale * 4.8 * scaleFactor, 1)
+  }
+
+  // Skaluj info label wraz z odległością kamery / zoom (tak samo jak attic info label)
+  if (infoLabel && infoLabel.visible) {
+    const baseScale = 1.0
+    let scaleFactor: number
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu (jak attic info label)
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      const zOffsetLabel = zoomDiff * 0.2
+
+      if (infoLabel.userData.baseZ === undefined) {
+        infoLabel.userData.baseZ = infoLabel.position.z
+      }
+      infoLabel.position.z = infoLabel.userData.baseZ + zOffsetLabel
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      infoLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    const baseScaleY = infoLabel.userData.baseScaleY || 2.0
+    infoLabel.scale.set(baseScale * scaleFactor * 8.0, baseScale * scaleFactor * baseScaleY, 1)
+  }
+
+  // Skaluj attic info label (tak samo jak dł. drabiny frontSide)
+  if (atticInfoLabel && atticInfoLabel.visible) {
+    const baseScale = 1.0
+    let scaleFactor: number
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      const zOffsetLabel = zoomDiff * 0.2
+
+      if (atticInfoLabel.userData.baseZ === undefined) {
+        atticInfoLabel.userData.baseZ = atticInfoLabel.position.z
+      }
+      atticInfoLabel.position.z = atticInfoLabel.userData.baseZ + zOffsetLabel
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      atticInfoLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    const baseScaleY = atticInfoLabel.userData.baseScaleY || 6.0
+    atticInfoLabel.scale.set(baseScale * scaleFactor * 8.0, baseScale * scaleFactor * baseScaleY, 1)
+  }
+
+  // Skaluj suspension height label wraz z odległością kamery / zoom (tak samo jak dł. drabiny)
+  if (suspensionHeightLabel && suspensionHeightLabel.visible) {
+    const baseScale = 0.7
+    let scaleFactor: number
+    const isFrontSide = suspensionHeightLabel.userData.frontSide === true
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      // Różne współczynniki dla wymiaru (linia/dyski) i napisu
+      const zOffsetDimension = zoomDiff * 0.04  // Dla wymiaru
+      const zOffsetLabel = zoomDiff * 0.06      // Większy dla napisu
+
+      // Aktualizuj pozycję Z napisu
+      if (suspensionHeightLabel.userData.baseZ === undefined) {
+        suspensionHeightLabel.userData.baseZ = suspensionHeightLabel.position.z
+      }
+      // Front: przesuń w przód (+), Tył: przesuń w tył (-)
+      suspensionHeightLabel.position.z = suspensionHeightLabel.userData.baseZ + (isFrontSide ? zOffsetLabel : -zOffsetLabel)
+
+      // Dla frontSide: przesuń też linię i dyski (mniejszy współczynnik)
+      if (isFrontSide) {
+        if (suspensionHeightLine) {
+          if (suspensionHeightLine.userData.baseZ === undefined) {
+            suspensionHeightLine.userData.baseZ = suspensionHeightLine.position.z
+          }
+          suspensionHeightLine.position.z = suspensionHeightLine.userData.baseZ + zOffsetDimension
+        }
+        if (suspensionHeightDiskTop) {
+          if (suspensionHeightDiskTop.userData.baseZ === undefined) {
+            suspensionHeightDiskTop.userData.baseZ = suspensionHeightDiskTop.position.z
+          }
+          suspensionHeightDiskTop.position.z = suspensionHeightDiskTop.userData.baseZ + zOffsetDimension
+        }
+        if (suspensionHeightDiskBottom) {
+          if (suspensionHeightDiskBottom.userData.baseZ === undefined) {
+            suspensionHeightDiskBottom.userData.baseZ = suspensionHeightDiskBottom.position.z
+          }
+          suspensionHeightDiskBottom.position.z = suspensionHeightDiskBottom.userData.baseZ + zOffsetDimension
+        }
+      }
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      suspensionHeightLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    suspensionHeightLabel.scale.set(baseScale * scaleFactor * 2.0, baseScale * 4.8 * scaleFactor, 1)
+  }
+
+  // Green-red label - stała skala, bez skalowania dynamicznego
+  // (skala ustawiona w drawGreenRedDimension)
+
+  // Skaluj descent ladder length label (jak klasyczna dł. drabiny z tyłu)
+  if (descentLadderLengthLabel && descentLadderLengthLabel.visible) {
+    const baseScale = 0.7
+    let scaleFactor: number
+
+    if (isTechDrawingMode && orthoCamera) {
+      const viewHeight = orthoCamera.top - orthoCamera.bottom
+      scaleFactor = viewHeight * 0.05
+
+      // Dynamiczne przesunięcie przy oddaleniu (w tył)
+      const baseZoomLevel = 20
+      const zoomDiff = Math.max(0, viewHeight - baseZoomLevel)
+      const zOffsetLabel = zoomDiff * 0.03
+
+      if (descentLadderLengthLabel.userData.baseZ === undefined) {
+        descentLadderLengthLabel.userData.baseZ = descentLadderLengthLabel.position.z
+      }
+      descentLadderLengthLabel.position.z = descentLadderLengthLabel.userData.baseZ - zOffsetLabel
+    } else {
+      const labelWorldPos = new THREE.Vector3()
+      descentLadderLengthLabel.getWorldPosition(labelWorldPos)
+      const cameraDistance = camera.position.distanceTo(labelWorldPos)
+      scaleFactor = cameraDistance * 0.08
+    }
+
+    descentLadderLengthLabel.scale.set(baseScale * scaleFactor * 2.0, baseScale * 4.8 * scaleFactor, 1)
   }
 
   // Render the frame
@@ -5305,6 +7456,15 @@ function updateMeasurePreview(clientX: number, clientY: number) {
     if (obj.userData.isMeasureObject) continue
     if (!obj.visible) continue
 
+    // Pomiń boxy mierzenia tylko gdy debug mode OFF
+    if (!showMeasurementBoxes && obj.userData.isMeasurementBox) continue
+
+    // Pomiń obiekty z opacity 0
+    if ((obj as THREE.Mesh).material) {
+      const mat = (obj as THREE.Mesh).material
+      if (!Array.isArray(mat) && (mat as THREE.MeshBasicMaterial).opacity === 0) continue
+    }
+
     // Sprawdź flagi debug w hierarchii
     let isDebug = false
     let checkObj: THREE.Object3D | null = obj
@@ -5313,6 +7473,7 @@ function updateMeasurePreview(clientX: number, clientY: number) {
           checkObj.userData.isCollisionZone ||
           checkObj.userData.isMidRungBox ||
           checkObj.userData.isSciskaneBox ||
+          (!showMeasurementBoxes && checkObj.userData.isMeasurementBox) ||
           greenCollisionBoxes.includes(checkObj)) {
         isDebug = true
         break
@@ -5429,6 +7590,340 @@ function setMeasureMode(enabled: boolean) {
 
 function setMeasureAxisMode(mode: '3d' | 'x' | 'y' | 'z') {
   measureAxisMode = mode
+}
+
+// ============================================
+// DELETE MODE FUNCTIONS (for seller mode)
+// ============================================
+function setDeleteMode(enabled: boolean) {
+  deleteMode = enabled
+  if (!enabled) {
+    clearDeleteHighlight()
+  }
+  requestRender()
+}
+
+function findDeletableParent(obj: THREE.Object3D): THREE.Object3D | null {
+  let current: THREE.Object3D | null = obj
+  let candidateWithoutId: THREE.Object3D | null = null
+
+  while (current && current !== ladderContainer) {
+    // Check if this object has deletable flags
+    const isDeletable = current.userData.isDeletable ||
+        current.userData.isLadderModule ||
+        current.userData.isSafetyCage ||
+        current.userData.isCageHoop ||
+        current.userData.isConnector ||
+        current.userData.isWspornik ||
+        current.userData.isHandrail ||
+        current.userData.isPlatform ||
+        current.userData.isAngleBracket ||
+        current.userData.isSciskaneHandle ||
+        current.userData.isSciskanePlaced ||
+        current.userData.isSciskaneWspornik
+
+    if (isDeletable) {
+      // Prefer element with elementId
+      if (current.userData.elementId) {
+        return current
+      }
+      // Store candidate without ID, keep searching up
+      if (!candidateWithoutId) {
+        candidateWithoutId = current
+      }
+    }
+
+    // Check by name patterns
+    const name = current.name?.toLowerCase() || ''
+    const matchesName = name.includes('cage') ||
+        name.includes('hoop') ||
+        name.includes('wspornik') ||
+        name.includes('bracket') ||
+        name.includes('connector') ||
+        name.includes('handrail') ||
+        name.includes('platform') ||
+        name.includes('ladder') ||
+        name.includes('katownik') ||
+        name.includes('sciskane') ||
+        name.includes('uchwyt')
+
+    if (matchesName) {
+      // Prefer element with elementId
+      if (current.userData.elementId) {
+        return current
+      }
+      if (!candidateWithoutId) {
+        candidateWithoutId = current
+      }
+    }
+
+    current = current.parent
+  }
+
+  // Return candidate without ID as fallback
+  return candidateWithoutId
+}
+
+function getElementInfo(obj: THREE.Object3D): { name: string; type: string } {
+  const userData = obj.userData || {}
+  const objName = obj.name?.toLowerCase() || ''
+
+  // Determine type and name based on userData or object name
+  // Check isSafetyCage first (for cage hoops)
+  if (userData.isSafetyCage || userData.isCageHoop || objName.includes('hoop')) {
+    return { name: 'Obręcz kosza bezpieczeństwa', type: 'cage_hoop' }
+  }
+  // Check angle brackets (kątowniki)
+  if (userData.isAngleBracket || objName.includes('katownik')) {
+    const segments = userData.segments || 2
+    return { name: `Kątownik kosza x${segments}`, type: 'angle_bracket' }
+  }
+  // Check sciskane handles (ściskany/uchwyty)
+  if (userData.isSciskaneHandle || userData.isSciskanePlaced) {
+    return { name: 'Uchwyt ściskany', type: 'sciskane_handle' }
+  }
+  // Check sciskane wsporniki
+  if (userData.isSciskaneWspornik) {
+    return { name: 'Wspornik ściskany', type: 'sciskane_wspornik' }
+  }
+  if (userData.isWspornik || objName.includes('wspornik') || objName.includes('bracket')) {
+    return { name: 'Wspornik', type: 'wspornik' }
+  }
+  if (userData.isConnector || objName.includes('connector')) {
+    return { name: 'Łącznik', type: 'connector' }
+  }
+  if (userData.isHandrail || objName.includes('handrail')) {
+    return { name: 'Poręcz asekuracyjna', type: 'handrail' }
+  }
+  if (userData.isPlatform || objName.includes('platform')) {
+    return { name: 'Podest', type: 'platform' }
+  }
+  if (userData.isLadderModule || objName.includes('ladder')) {
+    return { name: 'Moduł drabiny', type: 'ladder_module' }
+  }
+
+  return { name: obj.name || 'Element', type: 'unknown' }
+}
+
+function clearDeleteHighlight() {
+  if (deleteHighlightedObject) {
+    // Restore original materials
+    deleteHighlightedObject.traverse((child) => {
+      if (child instanceof THREE.Mesh && originalMaterials.has(child)) {
+        child.material = originalMaterials.get(child)!
+      }
+    })
+    originalMaterials.clear()
+    deleteHighlightedObject = null
+  }
+}
+
+// ============================================
+// HIDDEN ELEMENTS SYSTEM (seller mode delete)
+// ============================================
+
+// Nadaj unikalne elementId wszystkim elementom w scenie
+// Wywoływane po renderowaniu, przed applyHiddenElements
+function assignElementIds() {
+  // Counters for generating unique IDs
+  const counters: Record<string, number> = {}
+
+  ladderContainer.traverse((child) => {
+    // Skip if already has elementId
+    if (child.userData.elementId) return
+
+    const userData = child.userData
+    let elementId: string | null = null
+
+    // Cage hoops
+    if (userData.isSafetyCage) {
+      const key = `cage_hoop_${userData.ladderNum || 1}`
+      counters[key] = (counters[key] || 0)
+      elementId = `${key}_${counters[key]++}`
+    }
+    // Cage closing
+    else if (userData.isCageClosing) {
+      elementId = `cage_closing_${userData.ladderNum || 1}`
+    }
+    // Resting platform
+    else if (userData.isRestingPlatform) {
+      elementId = `resting_platform_${userData.ladderNum || 1}`
+    }
+    // Angle brackets
+    else if (userData.isAngleBracket) {
+      const key = `angle_bracket_${userData.ladderNum || 1}`
+      counters[key] = (counters[key] || 0)
+      elementId = `${key}_${counters[key]++}`
+    }
+    // Ladder modules
+    else if (userData.isLadderModule) {
+      const key = `ladder_module_${userData.ladderNum || 1}`
+      counters[key] = (counters[key] || 0)
+      elementId = `${key}_${counters[key]++}`
+    }
+    // Connectors
+    else if (userData.isConnector) {
+      const ladderNum = userData.ladderNum || 1
+      const pairIndex = userData.pairIndex
+      const side = userData.side || (child.position.x < 0 ? 'left' : 'right')
+      if (pairIndex !== undefined) {
+        elementId = `connector_${ladderNum}_${pairIndex}_${side}`
+      } else {
+        // Use counter for connectors without pairIndex (handrail connectors)
+        const key = `connector_${ladderNum}_${side}`
+        counters[key] = (counters[key] || 0)
+        elementId = `${key}_${counters[key]++}`
+      }
+    }
+    // Wsporniki
+    else if (userData.isWspornik) {
+      const ladderNum = userData.ladderNum || 1
+      const pairIndex = userData.pairIndex
+      const side = userData.side || (child.position.x < 0 ? 'left' : 'right')
+      if (pairIndex !== undefined) {
+        elementId = `wspornik_${ladderNum}_${pairIndex}_${side}`
+      } else {
+        // Use counter for wsporniki without pairIndex
+        const key = `wspornik_${ladderNum}_${side}`
+        counters[key] = (counters[key] || 0)
+        elementId = `${key}_${counters[key]++}`
+      }
+    }
+    // Sciskane handles
+    else if (userData.isSciskaneHandle || userData.isSciskanePlaced) {
+      const ladderNum = userData.ladderNum || 1
+      const offset = userData.offsetFromBottom || 0
+      const side = userData.side || (child.position.x < 0 ? 'left' : 'right')
+      elementId = `sciskane_${ladderNum}_${offset}_${side}`
+    }
+    // Sciskane wsporniki
+    else if (userData.isSciskaneWspornik) {
+      const ladderNum = userData.ladderNum || 1
+      const offset = userData.offsetFromBottom || 0
+      const side = userData.side || (child.position.x < 0 ? 'left' : 'right')
+      elementId = `sciskane_wsp_${ladderNum}_${offset}_${side}`
+    }
+    // Handrails
+    else if (userData.isHandrail) {
+      const side = userData.side || (child.position.x < 0 ? 'left' : 'right')
+      elementId = `handrail_${userData.ladderNum || 1}_${side}`
+    }
+    // Platform
+    else if (userData.isPlatform) {
+      elementId = `platform_${userData.ladderNum || 1}`
+    }
+    // Descent ladder connectors
+    else if (userData.isDescentConnector) {
+      const key = `descent_connector`
+      counters[key] = (counters[key] || 0)
+      elementId = `${key}_${counters[key]++}`
+    }
+    // Descent ladder modules
+    else if (userData.isDescentLadder) {
+      const key = `descent_ladder`
+      counters[key] = (counters[key] || 0)
+      elementId = `${key}_${counters[key]++}`
+    }
+
+    if (elementId) {
+      // Propagate elementId to this object AND all its descendants
+      child.traverse((descendant) => {
+        descendant.userData.elementId = elementId
+      })
+    }
+  })
+}
+
+// Ukryj element po jego ID
+function hideElement(elementId: string): boolean {
+  console.log('[hideElement] Called with elementId:', elementId)
+  if (!elementId) return false
+
+  hiddenElements.add(elementId)
+
+  // Znajdź obiekt w scenie i ukryj go
+  let found = false
+  ladderContainer.traverse((child) => {
+    if (child.userData.elementId === elementId) {
+      console.log('[hideElement] Found element, setting visible=false')
+      child.visible = false
+      found = true
+    }
+  })
+
+  console.log('[hideElement] Element found:', found, 'calling emitUpdate')
+  if (found) {
+    emitUpdate() // Przelicz BOM (pominie ukryte elementy)
+    requestRender()
+  }
+
+  return found
+}
+
+// Pokaż element po jego ID
+function showElement(elementId: string): boolean {
+  if (!elementId) return false
+
+  hiddenElements.delete(elementId)
+
+  // Znajdź obiekt w scenie i pokaż go
+  let found = false
+  ladderContainer.traverse((child) => {
+    if (child.userData.elementId === elementId) {
+      child.visible = true
+      found = true
+    }
+  })
+
+  if (found) {
+    emitUpdate() // Przelicz BOM
+    requestRender()
+  }
+
+  return found
+}
+
+// Wyczyść wszystkie ukryte elementy (przy zmianie konfiguracji)
+function clearHiddenElements() {
+  hiddenElements.clear()
+}
+
+// Pobierz listę ukrytych elementów (do zapisu)
+function getHiddenElements(): string[] {
+  return Array.from(hiddenElements)
+}
+
+// Ustaw listę ukrytych elementów (przy wczytywaniu)
+function setHiddenElements(ids: string[]) {
+  hiddenElements = new Set(ids)
+  applyHiddenElements()
+}
+
+// Zastosuj ukrycie do wszystkich elementów w scenie
+// Wywoływane po renderowaniu modelu
+function applyHiddenElements() {
+  if (hiddenElements.size === 0) return
+
+  ladderContainer.traverse((child) => {
+    if (child.userData.elementId && hiddenElements.has(child.userData.elementId)) {
+      child.visible = false
+    }
+  })
+}
+
+// Stare funkcje dla kompatybilności (używane przez AdminLayout)
+function performDelete(data: { object: THREE.Object3D }): string | null {
+  const obj = data.object
+  if (obj && obj.userData.elementId) {
+    const elementId = obj.userData.elementId
+    hideElement(elementId)
+    return elementId
+  }
+  return null
+}
+
+function restoreDeleted(data: { elementId: string }): boolean {
+  return showElement(data.elementId)
 }
 
 // ============================================
@@ -5663,8 +8158,36 @@ function setDebugMode(enabled: boolean) {
     clearDebugObjects()
   }
 
+  // Aktualizuj widoczność boxów mierzenia
+  updateMeasurementBoxesVisibility()
+
   // Rebuild ladder to show/hide collision boxes
   createLadder()
+
+  // Force immediate render update
+  scheduleFrame()
+}
+
+// Kontrola widoczności boxów mierzenia (niezależna od debug mode)
+function setShowMeasurementBoxes(enabled: boolean) {
+  showMeasurementBoxes = enabled
+  updateMeasurementBoxesVisibility()
+  scheduleFrame()
+}
+
+function getShowMeasurementBoxes(): boolean {
+  return showMeasurementBoxes
+}
+
+// Kontrola widoczności wymiarów (linia, label, dyski) - niezależna od debug mode
+function setShowDimensions(enabled: boolean) {
+  showDimensions = enabled
+  updateMeasurementBoxesVisibility()
+  scheduleFrame()
+}
+
+function getShowDimensions(): boolean {
+  return showDimensions
 }
 
 function emitDebugInfo() {
@@ -5770,6 +8293,8 @@ function toggleSciskaneMode() {
   } else {
     clearSciskanePreview()
   }
+  // Force immediate render update
+  scheduleFrame()
 }
 
 function createSciskanePreview() {
@@ -5977,12 +8502,17 @@ function addSciskaneHandle(yPos: number, ladderNum: number = 1) {
     }
   }
 
-  // Add new handle
+  // Get global wspornik settings for this ladder (same as auto-added handles)
+  const globalDistance = (ladderNum === 1) ? globalWspornikDistance1 : globalWspornikDistance2
+  const globalType = getWspornikTypeFromDistance(globalDistance)
+  const isDisabled = (ladderNum === 1) ? wspornikDisabled1 : wspornikDisabled2
+
+  // Add new handle with current global settings
   handles.push({
     offsetFromBottom,
     connType: 'sciskany',
-    wspornikType: 'krotki',
-    wspornikDistance: 215,
+    wspornikType: isDisabled ? 'none' : globalType,
+    wspornikDistance: globalDistance,
     autoAdded: false
   })
 
@@ -6454,11 +8984,11 @@ function generateBOM(): BOMData {
   // Counters for ladder 2 (descent)
   const counts2: Record<string, { count: number; details?: string }> = {}
 
-  console.log('ladderContainer children count:', ladderContainer.children.length)
-
   // Traverse all children
   ladderContainer.traverse((child) => {
     if (child === ladderContainer) return
+    // Skip hidden elements (deleted by seller)
+    if (!child.visible) return
     // Skip helper/debug objects
     if (child.userData.isOutline) return
     if (child.userData.isMeasureObject) return
@@ -6488,11 +9018,19 @@ function generateBOM(): BOMData {
 
     if (child.userData.isLadderModule) {
       const rungs = child.userData.rungs || 7
+      const moduleType = child.userData.moduleType || 'standard'
+
       if (rungs === 7) {
-        itemKey = 'ladder_x7'
+        // Rozróżnij powielaną od końcowej 7-szczeblowej
+        if (moduleType === 'final' || moduleType === 'alt') {
+          itemKey = 'ladder_final_x7'  // Drabina końcowa 7-szczeblowa
+        } else {
+          itemKey = 'ladder_x7'  // Drabina powielana 7-szczeblowa
+        }
       } else if (rungs === 8) {
         itemKey = 'ladder_x8'
       } else {
+        // Końcowe x1-x6
         itemKey = `ladder_x${rungs}`
       }
     } else if (child.userData.isConnector) {
@@ -6500,7 +9038,9 @@ function generateBOM(): BOMData {
       if (connType === 'sciskany') {
         itemKey = 'connector_sciskany'
       } else if (connType === 'lacznik') {
-        itemKey = 'connector_lacznik'
+        itemKey = 'element_laczacy'
+      } else if (connType === 'uchwytPoreczy') {
+        itemKey = 'handrail_connector'
       } else {
         itemKey = 'connector_uchwyt'
       }
@@ -6531,16 +9071,21 @@ function generateBOM(): BOMData {
     } else if (child.userData.isHandrailConnector) {
       itemKey = 'handrail_connector'
     } else if (child.userData.isPlatform) {
-      itemKey = 'platform'
+      itemKey = 'katownik_podestu'
     } else if (child.userData.isAtticPassage) {
       itemKey = 'attic_passage'
+    } else if (child.userData.isKrataWema) {
+      const size = child.userData.krataSize || '100x50'
+      itemKey = `krata_wema_${size}`
     } else if (child.userData.isAngleBracket) {
       const segments = child.userData.segments || 2
+      console.log('AngleBracket found, segments:', segments, 'elementId:', child.userData.elementId, 'visible:', child.visible, 'name:', child.name)
       itemKey = `angle_bracket_x${segments}`
     } else if (child.userData.isBigfoot) {
       itemKey = 'bigfoot'
     } else if (child.userData.isBigfootGuide) {
-      itemKey = 'bigfoot_guide'
+      // Skip - part of bigfoot assembly, not counted separately
+      return
     } else if (child.userData.isModuleLacznik) {
       itemKey = 'module_connector'
     } else if (child.userData.isSciskanePlaced) {
@@ -6565,11 +9110,24 @@ function generateBOM(): BOMData {
   console.log('counts1:', counts1)
   console.log('counts2:', counts2)
 
+  // For safety/platform handrails: convert first X7 to "Początkowy moduł drabiny"
+  if (handrailType === 'safety' || handrailType === 'platform') {
+    if (counts1['ladder_x7'] && counts1['ladder_x7'].count > 0) {
+      counts1['ladder_x7'].count--
+      if (counts1['ladder_x7'].count === 0) {
+        delete counts1['ladder_x7']
+      }
+      counts1['drabina_poczatkowa_7'] = { count: 1, details: undefined }
+    }
+  }
+
   // Convert counts to BOM items
   const itemDefinitions: Record<string, { namePL: string; unit: string; category: string; image?: string }> = {
-    'ladder_x7': { namePL: 'Moduł drabiny X7 (7 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x7' },
+    'drabina_poczatkowa_7': { namePL: 'Początkowy moduł drabiny (7 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x7' },
+    'ladder_x7': { namePL: 'Drabina powielana X7 (7 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x7' },
+    'ladder_final_x7': { namePL: 'Drabina końcowa X7 (7 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x7' },
     'ladder_x8': { namePL: 'Moduł drabiny X8 (8 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-x8' },
-    'ladder_x1': { namePL: 'Moduł końcowy X1 (1 szczebel)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x1' },
+    'ladder_x1': { namePL: 'Drabina końcowa X1 (1 szczebel)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x1' },
     'ladder_x2': { namePL: 'Moduł końcowy X2 (2 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x2' },
     'ladder_x3': { namePL: 'Moduł końcowy X3 (3 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x3' },
     'ladder_x4': { namePL: 'Moduł końcowy X4 (4 szczeble)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x4' },
@@ -6577,21 +9135,23 @@ function generateBOM(): BOMData {
     'ladder_x6': { namePL: 'Moduł końcowy X6 (6 szczebli)', unit: 'szt.', category: 'drabina', image: 'drabina-koncowa-x6' },
     'connector_uchwyt': { namePL: 'Uchwyt montażowy (para)', unit: 'szt.', category: 'łącznik', image: 'lacznik-drabin' },
     'connector_sciskany': { namePL: 'Uchwyt ściskany (para)', unit: 'szt.', category: 'łącznik', image: 'wspornik-sciskany' },
+    'element_laczacy': { namePL: 'Element łączący', unit: 'szt.', category: 'łącznik', image: 'lacznik-drabin' },
     'wspornik_krotki': { namePL: 'Wspornik krótki (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-krotki' },
     'wspornik_sredni': { namePL: 'Wspornik średni (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-sredni' },
     'wspornik_dlugi': { namePL: 'Wspornik długi (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-dlugi' },
     'cage_hoop': { namePL: 'Obręcz kosza bezpieczeństwa', unit: 'szt.', category: 'kosz', image: 'obrecz' },
     'cage_closing': { namePL: 'Zamknięcie kosza', unit: 'szt.', category: 'kosz' },
     'resting_platform': { namePL: 'Podest spoczynkowy', unit: 'szt.', category: 'podest' },
-    'handrail': { namePL: 'L-ki (poręcze)', unit: 'szt.', category: 'poręcz', image: 'l-ki' },
-    'handrail_connector': { namePL: 'Łącznik poręczy', unit: 'para', category: 'poręcz', image: 'lacznik-poreczy' },
-    'platform': { namePL: 'Podest z poręczami', unit: 'kpl.', category: 'podest' },
+    'handrail': { namePL: 'Poręcze asekuracyjne (L-ki)', unit: 'szt.', category: 'poręcz', image: 'l-ki' },
+    'handrail_connector': { namePL: 'Łącznik poręczy asekuracyjnych', unit: 'para', category: 'poręcz', image: 'lacznik-poreczy' },
+    'katownik_podestu': { namePL: 'Łączniki poręczy z podestem', unit: 'kpl.', category: 'podest' },
     'attic_passage': { namePL: 'Przejście przez attykę', unit: 'kpl.', category: 'attyka' },
-    'angle_bracket_x2': { namePL: 'Kątownik łączący kosz (2 segmenty)', unit: 'szt.', category: 'kosz' },
-    'angle_bracket_x3': { namePL: 'Kątownik łączący kosz (3 segmenty)', unit: 'szt.', category: 'kosz' },
-    'angle_bracket_x4': { namePL: 'Kątownik łączący kosz (4 segmenty)', unit: 'szt.', category: 'kosz', image: 'katownik-x4' },
+    'krata_wema_100x50': { namePL: 'Krata WEMA 100x50cm', unit: 'szt.', category: 'attyka' },
+    'krata_wema_50x50': { namePL: 'Krata WEMA 50x50cm', unit: 'szt.', category: 'podest' },
+    'angle_bracket_x4': { namePL: 'Kątownik kosza x4 otwory', unit: 'szt.', category: 'kosz', image: 'katownik-x4' },
+    'angle_bracket_x3': { namePL: 'Kątownik kosza x3 otwory', unit: 'szt.', category: 'kosz', image: 'katownik-x4' },
+    'angle_bracket_x2': { namePL: 'Kątownik kosza x2 otwory', unit: 'szt.', category: 'kosz', image: 'katownik-x4' },
     'bigfoot': { namePL: 'Stopa BIGFOOT', unit: 'szt.', category: 'montaż' },
-    'bigfoot_guide': { namePL: 'Prowadnica BIGFOOT', unit: 'szt.', category: 'montaż' },
     'module_connector': { namePL: 'Łącznik modułowy', unit: 'szt.', category: 'łącznik', image: 'lacznik-drabin' }
   }
 
@@ -6661,13 +9221,57 @@ function generateBOM(): BOMData {
         })
       }
     }
-    // Sort by category, then by name
+    // Sort by specific order
+    const itemOrder: Record<string, number> = {
+      // Poręcze / przełaz attykowy na górze
+      'handrail': 1,
+      'attic_passage': 2,
+      // Początkowy moduł
+      'drabina_poczatkowa_7': 10,
+      // Moduły powielane
+      'ladder_x7': 20,
+      'ladder_x8': 21,
+      // Moduły końcowe
+      'ladder_final_x7': 25,  // Drabina końcowa 7-szczeblowa
+      'ladder_x1': 30,
+      'ladder_x2': 31,
+      'ladder_x3': 32,
+      'ladder_x4': 33,
+      'ladder_x5': 34,
+      'ladder_x6': 35,
+      // Obręcze
+      'cage_hoop': 40,
+      // Kątowniki
+      'angle_bracket_x4': 50,
+      'angle_bracket_x3': 51,
+      'angle_bracket_x2': 52,
+      // Uchwyty drabinowe
+      'connector_uchwyt': 60,
+      // Ściskane
+      'connector_sciskany': 70,
+      // Wsporniki
+      'wspornik_krotki': 80,
+      'wspornik_sredni': 81,
+      'wspornik_dlugi': 82,
+      // Łączniki drabinowe / elementy łączące
+      'element_laczacy': 90,
+      'module_connector': 91,
+      // Łączniki poręczy
+      'handrail_connector': 100,
+      'katownik_podestu': 101,
+      // Zamykanie, podest spoczynkowy
+      'cage_closing': 110,
+      'resting_platform': 120,
+      // Bigfoot
+      'bigfoot': 130,
+      // Krata WEMA
+      'krata_wema_100x50': 140,
+      'krata_wema_50x50': 141,
+    }
     items.sort((a, b) => {
-      const catOrder = ['drabina', 'łącznik', 'wspornik', 'kosz', 'poręcz', 'podest', 'montaż', 'attyka']
-      const catA = catOrder.indexOf(a.category)
-      const catB = catOrder.indexOf(b.category)
-      if (catA !== catB) return catA - catB
-      return a.namePL.localeCompare(b.namePL)
+      const orderA = itemOrder[a.name] ?? 999
+      const orderB = itemOrder[b.name] ?? 999
+      return orderA - orderB
     })
     return items
   }
@@ -7884,6 +10488,17 @@ defineExpose({
   isTechDrawingMode: () => isTechDrawingMode,
   toggleSciskaneMode,
   isSciskaneMode: () => sciskaneMode,
+  // Delete mode (seller mode)
+  setDeleteMode,
+  isDeleteMode: () => deleteMode,
+  performDelete,
+  restoreDeleted,
+  // Hidden elements system
+  hideElement,
+  showElement,
+  clearHiddenElements,
+  getHiddenElements,
+  setHiddenElements,
   updateSciskaneHandle,
   removeSciskaneHandle,
   updateJointConnector,
@@ -7893,6 +10508,11 @@ defineExpose({
   setDebugMode,
   emitDebugInfo,
   isDebugMode: () => debugMode,
+  // Kontrola widoczności wymiarów
+  setShowMeasurementBoxes,
+  getShowMeasurementBoxes,
+  setShowDimensions,
+  getShowDimensions,
   setGlobalWspornikDistance,
   getGlobalWspornikDistance,
   getWspornikTypeForDistance,
@@ -7929,7 +10549,42 @@ defineExpose({
   cancelExtrudeMode,
   getExtrudeState,
   // BOM generation
-  generateBOM
+  generateBOM,
+  // Zoom controls
+  zoomIn: () => {
+    if (isTechDrawingMode && orthoCamera) {
+      const currentSize = orthoCamera.top
+      const newSize = Math.max(1, currentSize * 0.8)
+      const container = containerRef.value!
+      const aspect = container.clientWidth / container.clientHeight
+      orthoCamera.left = -newSize * aspect
+      orthoCamera.right = newSize * aspect
+      orthoCamera.top = newSize
+      orthoCamera.bottom = -newSize
+      orthoCamera.updateProjectionMatrix()
+      requestRender()
+    } else if (perspectiveCamera) {
+      perspectiveCamera.position.z = Math.max(3, perspectiveCamera.position.z * 0.8)
+      requestRender()
+    }
+  },
+  zoomOut: () => {
+    if (isTechDrawingMode && orthoCamera) {
+      const currentSize = orthoCamera.top
+      const newSize = Math.min(50, currentSize * 1.25)
+      const container = containerRef.value!
+      const aspect = container.clientWidth / container.clientHeight
+      orthoCamera.left = -newSize * aspect
+      orthoCamera.right = newSize * aspect
+      orthoCamera.top = newSize
+      orthoCamera.bottom = -newSize
+      orthoCamera.updateProjectionMatrix()
+      requestRender()
+    } else if (perspectiveCamera) {
+      perspectiveCamera.position.z = Math.min(300, perspectiveCamera.position.z * 1.25)
+      requestRender()
+    }
+  }
 })
 </script>
 
@@ -7942,5 +10597,9 @@ defineExpose({
   width: 100%;
   height: 100%;
   background: #1a1a1a;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 </style>

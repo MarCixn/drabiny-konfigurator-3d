@@ -26,7 +26,7 @@ export interface LadderConfig {
   cage: 'no-cage' | 'with-cage' | 'full-cage'
 
   // Bracket/mounting
-  bracketType: 'short' | 'medium' | 'long'  // 16-26, 26-36, 36-46
+  bracketType: 'short' | 'medium' | 'long' | 'custom'  // 16-26, 26-36, 36-46, niestandardowy
   bracketSpacing: number       // mm, default 1000
   insulationThickness: number  // cm
 
@@ -675,8 +675,8 @@ export function calculateLocal(config: LadderConfig): Partial<CalculateResponse>
     })
   }
 
-  // Add wsporniki for all connectors
-  if (totalConnectors > 0 || connectorCount > 0) {
+  // Add wsporniki for all connectors (skip for custom - individual pricing)
+  if ((totalConnectors > 0 || connectorCount > 0) && config.bracketType !== 'custom') {
     const wspornikCode = config.bracketType === 'short' ? 'wspornik_16_26' :
                          config.bracketType === 'medium' ? 'wspornik_26_36' : 'wspornik_36_46'
     const wspornikName = config.bracketType === 'short' ? 'Wspornik 16-26cm' :

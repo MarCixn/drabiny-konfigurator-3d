@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import ThreeCanvas from '../components/ThreeCanvas.vue'
-import PricedBOM from '../components/PricedBOM.vue'
 import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByRef, type ComponentItem, type LoadedConfiguration } from '../services/api'
 import { generateBOMPdf, type BOMData } from '../services/pdf-generator'
+import { postMessageService, type LadderConfig, type ConfigResult } from '../services/postMessage'
 import type { AppMode } from '../composables/useAppMode'
 
 // ============================================
@@ -17,11 +17,23 @@ const props = withDefaults(defineProps<{
 
 // Computed helpers dla trybu
 const isCustomerMode = computed(() => props.mode === 'customer')
+const isSellerMode = computed(() => props.mode === 'seller')
+const isEmbedMode = computed(() => props.mode === 'embed')
+
+// Seller mode - panel visibility
+const sellerPanelVisible = ref(false)
+
+// Flaga blokująca automatyczną korektę wartości podczas ładowania konfiguracji z zewnątrz
+// (np. z embed.php) - zapobiega nadpisywaniu wartości użytkownika przez watchery
+const isLoadingExternalConfig = ref(false)
 
 // ============================================
 // STAN APLIKACJI (1:1 z oryginału)
 // ============================================
 const currentScreen = ref<'purpose' | 'params' | 'summary'>('purpose')
+
+// Blokada schematu (dla osadzonego konfiguratora na stronie produktu)
+const schemeLocked = ref(false)
 
 const state = ref({
   purpose: '' as '' | 'internal' | 'external',
@@ -67,7 +79,14 @@ const state = ref({
   atticBackInsulationThickness: 0,   // Grubość ocieplenia strona zejścia (cm) - domyślnie 0cm
   // Ocieplenie dla klasycznej i z podestem (przednia ściana)
   hasInsulation: false,              // Czy jest ocieplenie (klasyczna/z podestem)
-  insulationThickness: 0             // Grubość ocieplenia (cm)
+  insulationThickness: 0,            // Grubość ocieplenia (cm)
+  // Poręcze asekuracyjne (+1.1m) - tylko dla no-platform
+  hasHandrails: true,                // Czy pokazywać poręcze asekuracyjne
+  // Malowanie proszkowe RAL
+  painting: false,                   // Czy malowanie RAL
+  ralCode: '' as string,             // Kod koloru RAL (np. "3020")
+  ralColor: '' as string,            // Kolor HEX RAL (np. "#CC0605")
+  ralPriceModifier: 0                // Modyfikator ceny za malowanie
 })
 
 // Zmienne formularza
@@ -78,12 +97,47 @@ const wallHeightWarning = ref('')
 const bracketTypeManualOverride = ref(false)
 const showBracketInfo = ref(false)
 
+// Minimalny typ wspornika - bazowany na ociepleniu i okapie
+const minBracketType = computed(() => {
+  // Oblicz wymaganą odległość dla ocieplenia (cm)
+  let insulationRequired = 0
+  if (state.value.scheme === 'attic-passage') {
+    insulationRequired = Math.max(state.value.atticInsulationThickness || 0, state.value.atticBackInsulationThickness || 0)
+  } else {
+    insulationRequired = state.value.insulationThickness || 0
+  }
+  // Dodaj 5cm marginesu dla ocieplenia
+  const insulationDistanceCm = insulationRequired > 0 ? insulationRequired + 5 : 0
+
+  // Oblicz wymaganą odległość dla okapu (cm)
+  let eaveDistanceCm = 0
+  if (state.value.hasEave && state.value.scheme !== 'attic-passage') {
+    // Drabina musi być 15cm od krawędzi okapu
+    eaveDistanceCm = (state.value.eaveDepth || 0) + 15
+  }
+
+  // Weź większą wartość
+  const requiredCm = Math.max(insulationDistanceCm, eaveDistanceCm)
+
+  // Określ minimalny typ wspornika
+  if (requiredCm <= 26) return 'short'
+  if (requiredCm <= 36) return 'medium'
+  return 'long'
+})
+
+// Czy dany typ wspornika jest dostępny
+function isBracketTypeAvailable(type: 'short' | 'medium' | 'long'): boolean {
+  const order = { 'short': 0, 'medium': 1, 'long': 2 }
+  return order[type] >= order[minBracketType.value]
+}
+
 // ============================================
 // WIZARD DLA TRYBU CUSTOMER
 // ============================================
 const customerWizardStep = ref(1)
 const summaryExpandedItem = ref<string | null>(null)
 const showResetConfirm = ref(false)
+const currentLadderQuantity = ref(1)
 
 // Reset wizard to start
 function resetWizard() {
@@ -92,6 +146,7 @@ function resetWizard() {
   customerLadderEnding.value = null
   summaryExpandedItem.value = null
   showResetConfirm.value = false
+  currentLadderQuantity.value = 1
 }
 
 // Typy dachu dla customer
@@ -142,6 +197,11 @@ function customerNextStep() {
     if (nextStepId === 9 && threeCanvasRef.value) {
       threeCanvasRef.value.exitTechDrawingMode()
       techDrawingActive.value = false
+      // Reset wymiarów
+      showDimensions.value = false
+      showMeasurementBoxes.value = false
+      threeCanvasRef.value.setShowDimensions(false)
+      threeCanvasRef.value.setShowMeasurementBoxes(false)
     }
   }
 }
@@ -239,6 +299,72 @@ function setCustomerLadderEnding(ending: CustomerLadderEnding) {
   })
 }
 
+// ============================================
+// HELPER FUNCTIONS FOR SUMMARY (STEP 9)
+// ============================================
+
+// Etykieta typu drabiny
+function getLadderTypeLabel(): string {
+  const roofLabels: Record<string, string> = {
+    'flat': 'Dach płaski',
+    'with-eave': 'Dach z okapem',
+    'with-parapet': 'Dach z murkiem attykowym'
+  }
+  const endingLabels: Record<string, string> = {
+    'classic': 'Klasyczna',
+    'platform': 'Z podestem',
+    'attic-passage': 'Przejście przez attykę'
+  }
+
+  const roof = customerRoofType.value ? roofLabels[customerRoofType.value] || '' : ''
+  const ending = customerLadderEnding.value ? endingLabels[customerLadderEnding.value] || '' : ''
+
+  if (roof && ending) {
+    return `Drabina zewnętrzna - ${ending}`
+  }
+  return 'Drabina zewnętrzna'
+}
+
+// Tekst parametrów drabiny
+function getLadderParamsText(): string {
+  const params: string[] = []
+
+  // Wysokość ściany
+  params.push(`Wysokość: ${state.value.wallHeight}m`)
+
+  // Kosz bezpieczeństwa
+  if (state.value.cage === 'with-cage') {
+    params.push('Kosz bezpieczeństwa')
+  }
+
+  // Zawieszenie
+  if (state.value.suspended && state.value.suspendedHeight > 0) {
+    params.push(`Zawieszenie: ${state.value.suspendedHeight}m`)
+  }
+
+  // Ocieplenie
+  if (state.value.hasInsulation && state.value.insulationThickness > 0) {
+    params.push(`Ocieplenie: ${state.value.insulationThickness}cm`)
+  }
+
+  // Okap
+  if (state.value.hasEave) {
+    params.push(`Okap: ${state.value.eaveHeight}x${state.value.eaveDepth}cm`)
+  }
+
+  return params.join(' • ')
+}
+
+// Formatowanie ceny
+function formatPrice(value: number): string {
+  return new Intl.NumberFormat('pl-PL', {
+    style: 'currency',
+    currency: 'PLN',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value)
+}
+
 // Computed dla progress bar
 const formProgress = computed(() => {
   let progress = 0
@@ -279,7 +405,9 @@ const threeState = ref({
   lastHoopToGround: 0,
   // Typy łączników i wsporników (z ThreeCanvas)
   connectorTypes: [] as string[],
-  wspornikTypes: [] as string[]
+  wspornikTypes: [] as string[],
+  // Dodatkowe uchwyty ściskane (pozycje)
+  sciskaneHandles: [] as Array<{ offsetFromBottom: number; connType: string }>
 })
 
 const threeReady = ref(false)
@@ -304,12 +432,17 @@ const cageCorrection = ref(0)
 const threeCanvasProps = computed(() => {
   const ladderConfig = calculateLadderStructure()
 
+  // Efektywny schemat - jeśli hasHandrails=false i scheme='no-platform', użyj 'none' (bez poręczy)
+  const effectiveScheme = (state.value.scheme === 'no-platform' && !state.value.hasHandrails)
+    ? 'none'
+    : (state.value.scheme || 'no-platform')
+
   return {
     numX7Ladders: ladderConfig.numX7,
     finalLadderRungs: ladderConfig.finalRungs,
     safetyCageCount: state.value.cage === 'with-cage' ? Math.max(0, ladderConfig.cageHoops + cageCorrection.value) : 0,
     wallHeight: state.value.wallHeight,
-    scheme: state.value.scheme || 'no-platform',
+    scheme: effectiveScheme,
     wspornikDistance: state.value.bracketSpacing || 215,
     showWall: show3DWall.value,
     showGround: show3DGround.value,
@@ -380,6 +513,12 @@ const threeCanvasProps = computed(() => {
     hasInsulation: state.value.scheme !== 'attic-passage' && (state.value.hasInsulation || state.value.insulationThickness > 0),
     insulationThickness: state.value.scheme !== 'attic-passage'
       ? state.value.insulationThickness * 10  // cm -> mm
+      : 0,
+    // Poręcze asekuracyjne (+1.1m) - przekazywane do ThreeCanvas
+    hasHandrails: state.value.hasHandrails,
+    // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
+    descentWspornikDistance: state.value.scheme === 'attic-passage' && state.value.descentMountType === 'brackets'
+      ? state.value.descentBracketSpacing
       : 0
   }
 })
@@ -402,6 +541,8 @@ function onThreeUpdate(data: {
   lastHoopToGround?: number;
   connectorTypes?: string[];
   wspornikTypes?: string[];
+  sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>;
+  bomData?: BOMData;
 }) {
   threeState.value.totalRungs = data.totalRungs
   threeState.value.totalHeightMm = data.totalHeightMm
@@ -416,6 +557,27 @@ function onThreeUpdate(data: {
   }
   if (data.wspornikTypes) {
     threeState.value.wspornikTypes = data.wspornikTypes
+  }
+  if (data.sciskaneHandles) {
+    threeState.value.sciskaneHandles = data.sciskaneHandles
+  }
+
+  // W trybie seller - użyj BOM z eventu (już wygenerowany z aktualnej sceny 3D)
+  if (isSellerMode.value) {
+    console.log('[Seller] onThreeUpdate - bomData:', data.bomData)
+    console.log('[Seller] onThreeUpdate - bomData.ladder1.items count:', data.bomData?.ladder1?.items?.length)
+    if (data.bomData && data.bomData.ladder1) {
+      // Deep copy aby wymusić reaktywność Vue
+      cachedBOMData.value = JSON.parse(JSON.stringify(data.bomData))
+      console.log('[Seller] cachedBOMData updated, allBomItems count:', allBomItems.value.length)
+      // Poczekaj na aktualizację computed przed wysłaniem
+      nextTick(() => {
+        console.log('[Seller] nextTick - sending CONFIG_RESULT with', allBomItems.value.length, 'items')
+        sendPostMessageResult()
+      })
+    } else {
+      console.warn('[Seller] BOM data is empty or missing')
+    }
   }
 }
 
@@ -576,7 +738,11 @@ const atticBackInsulationMax = computed(() => {
 })
 
 // Ostrzeżenie dla bigfoot: wsporniki + ocieplenie zejścia + murek > 870mm
+// Tylko dla przejścia przez attykę
 const atticThicknessWarning = computed(() => {
+  // Tylko dla przełazu attykowego
+  if (state.value.scheme !== 'attic-passage') return null
+
   const mountType = state.value.descentMountType
   if (mountType !== 'bigfoot' && mountType !== 'custom-base') return null
 
@@ -1161,14 +1327,23 @@ function calculateCageHoops(
   modules: ReturnType<typeof calculateModules>,
   _suspended: boolean = false,
   _suspendedHeightMm: number = 0,
-  scheme: string = 'no-platform'
+  scheme: string = 'no-platform',
+  hasHandrails: boolean = true
 ) {
   void _suspended; void _suspendedHeightMm; // Reserved for future use
-  // Środek pierwszej obręczy jest 112.2cm nad górnym szczeblem
-  const firstHoopHeight = firstRungHeight + LADDER_CONSTANTS.CAGE_START_OFFSET
+
+  // Środek pierwszej obręczy:
+  // - z poręczami +1.1m: 112.2cm nad górnym szczeblem
+  // - bez poręczy: 1283mm niżej (kosz zaczyna się niżej)
+  const NO_HANDRAILS_OFFSET = 1283  // mm - przesunięcie w dół gdy brak poręczy
+  let firstHoopHeight = firstRungHeight + LADDER_CONSTANTS.CAGE_START_OFFSET
+  if (!hasHandrails && scheme === 'no-platform') {
+    firstHoopHeight -= NO_HANDRAILS_OFFSET
+  }
 
   // Oblicz maksymalną ilość otworów dostępnych w modułach
-  let maxHolesAvailable = LADDER_CONSTANTS.CAGE_HOLES.handrails  // +2 za poręcze
+  // Bez poręczy: nie dodajemy +2 za poręcze
+  let maxHolesAvailable = hasHandrails ? LADDER_CONSTANTS.CAGE_HOLES.handrails : 0
 
   if (modules.startLadder7 > 0) {
     maxHolesAvailable += LADDER_CONSTANTS.CAGE_HOLES.startLadder  // +3 za pierwszą x7
@@ -1246,8 +1421,9 @@ function calculateLadderStructure() {
   // 2. Oblicz moduły (używaj ladderRungs dla generowania modeli)
   const modules = calculateModules(rungs.ladderRungs)
 
-  // 3. Oblicz kosz
-  const cage = calculateCageHoops(rungs.firstRungHeight, modules, suspended, suspendedHeightMm, scheme)
+  // 3. Oblicz kosz (uwzględnij czy są poręcze +1.1m)
+  const hasHandrails = state.value.hasHandrails
+  const cage = calculateCageHoops(rungs.firstRungHeight, modules, suspended, suspendedHeightMm, scheme, hasHandrails)
 
   // 4. Oblicz numX7 i finalRungs
   const numX7 = modules.startLadder7 + modules.repeatLadder7
@@ -1304,6 +1480,8 @@ watch(
 
 // Auto-korekta wysokości bloczków gdy min się zmienia lub wartość przekracza max
 watch(customBaseHeightMin, (newMin) => {
+  // Nie auto-koryguj gdy ładujemy konfigurację z zewnątrz (embed.php)
+  if (isLoadingExternalConfig.value) return
   if (state.value.descentMountType === 'custom-base') {
     if (state.value.customBaseHeight < newMin) {
       state.value.customBaseHeight = Math.ceil(newMin * 2) / 2  // Zaokrąglij do 0.5
@@ -1444,6 +1622,29 @@ watch(() => state.value.obstacles, (obstacles) => {
   }
 }, { deep: true })
 
+// Seller mode: notify parent when config changes
+watch(() => [
+  state.value.wallHeight,
+  state.value.scheme,
+  state.value.cage,
+  state.value.bracketType,
+  state.value.suspended,
+  state.value.suspendedHeight,
+  state.value.insulationThickness,
+  state.value.hasEave,
+  state.value.cageClosing,
+  state.value.restingPlatform
+], () => {
+  if (isSellerMode.value) {
+    // Konwertuj na zwykły JSON (usuń Vue Proxy)
+    const config = JSON.parse(JSON.stringify(getConfigForPostMessage()))
+    postMessageService.notifyConfigChanged(config)
+    // BOM jest wysyłany w onThreeUpdate po aktualizacji modelu 3D
+  }
+  // Reset deleted items when configuration changes (model is rebuilt)
+  deletedItemsStack.value = []
+}, { deep: true })
+
 function addObstacle() {
   state.value.obstacles.push({
     id: ++obstacleIdCounter,
@@ -1567,13 +1768,59 @@ const loadOfferError = ref('')
 // Lista drabin w ofercie
 interface LadderInOffer {
   id: number
-  wallHeight: number
-  scheme: string
-  cage: string
-  bracketType: string
   quantity: number
   estimatedPrice: number
-  bomItems: Array<{ id: string; name: string; quantity: number }>
+  bomItems: Array<{ id: string; name: string; quantity: number; unit?: string }>
+  // Pełna konfiguracja do odtworzenia
+  config: {
+    // Podstawowe
+    purpose: string
+    scheme: string
+    cage: string
+    wallHeight: number
+    bracketType: string
+    bracketSpacing: number
+    surfaceType: string
+    // Opcje montażu
+    accessLock: boolean
+    restingPlatform: boolean
+    cageClosing: boolean
+    suspended: boolean
+    suspendedHeight: number
+    portableLadder: boolean
+    // Przeszkody
+    hasObstacles: boolean
+    obstacles: Array<{ id: number; heightFrom: number; height: number; type: string; description: string }>
+    // Okap
+    hasEave: boolean
+    eaveHeight: number
+    eaveDepth: number
+    // Ocieplenie (klasyczna/z podestem)
+    hasInsulation: boolean
+    insulationThickness: number
+    // Attyka
+    atticWallHeight: number
+    atticMinDistance: number
+    descentMountType: string
+    descentBracketType: string
+    descentBracketSpacing: number
+    descentCageType: string
+    descentAccessLock: boolean
+    bigfootAllowLowDistance: boolean
+    customBaseAllowLowDistance: boolean
+    customBaseHeight: number
+    selfBracketType: string
+    atticWallThickness: number
+    atticHasInsulation: boolean
+    atticInsulationThickness: number
+    atticBackHasInsulation: boolean
+    atticBackInsulationThickness: number
+    // Customer wizard
+    customerRoofType: string | null
+    customerLadderEnding: string | null
+    // Globalna odległość wsporników
+    globalWspornikDistance: number
+  }
 }
 const laddersInOffer = ref<LadderInOffer[]>([])
 let nextLadderId = 1
@@ -1608,16 +1855,54 @@ async function checkUrlAndLoadOffer() {
       // Załaduj wszystkie drabiny oprócz ostatniej do listy
       laddersInOffer.value = []
       for (let i = 0; i < config.ladders.length - 1; i++) {
-        const l = config.ladders[i]
+        const l = config.ladders[i] as any
+        const lConfig = l.config || l // obsłuż zarówno stary jak i nowy format
         laddersInOffer.value.push({
           id: nextLadderId++,
-          wallHeight: l.wallHeight || l.height || 5,
-          scheme: l.scheme || 'no-platform',
-          cage: l.hasCage || l.cage === 'with-cage' ? 'with-cage' : 'no-cage',
-          bracketType: l.bracketType || 'short',
-          quantity: l.quantity || 1,
+          quantity: lConfig.quantity || l.quantity || 1,
           estimatedPrice: l.price || 0,
-          bomItems: []
+          bomItems: [],
+          config: {
+            purpose: lConfig.purpose || 'external',
+            scheme: lConfig.scheme || 'no-platform',
+            cage: lConfig.hasCage || lConfig.cage === 'with-cage' ? 'with-cage' : 'no-cage',
+            wallHeight: lConfig.wallHeight || lConfig.height || 5,
+            bracketType: lConfig.bracketType || 'short',
+            bracketSpacing: lConfig.bracketSpacing || 1000,
+            surfaceType: lConfig.surfaceType || 'smooth',
+            accessLock: lConfig.accessLock || false,
+            restingPlatform: lConfig.restingPlatform || false,
+            cageClosing: lConfig.cageClosing || false,
+            suspended: lConfig.suspended || false,
+            suspendedHeight: lConfig.suspendedHeight || 0,
+            portableLadder: lConfig.portableLadder || false,
+            hasObstacles: lConfig.hasObstacles || false,
+            obstacles: lConfig.obstacles || [],
+            hasEave: lConfig.hasEave || false,
+            eaveHeight: lConfig.eaveHeight || 0,
+            eaveDepth: lConfig.eaveDepth || 0,
+            hasInsulation: lConfig.hasInsulation || false,
+            insulationThickness: lConfig.insulationThickness || 0,
+            atticWallHeight: lConfig.atticWallHeight || 1,
+            atticMinDistance: lConfig.atticMinDistance || 0.6,
+            descentMountType: lConfig.descentMountType || 'standard',
+            descentBracketType: lConfig.descentBracketType || 'short',
+            descentBracketSpacing: lConfig.descentBracketSpacing || 1000,
+            descentCageType: lConfig.descentCageType || 'none',
+            descentAccessLock: lConfig.descentAccessLock || false,
+            bigfootAllowLowDistance: lConfig.bigfootAllowLowDistance || false,
+            customBaseAllowLowDistance: lConfig.customBaseAllowLowDistance || false,
+            customBaseHeight: lConfig.customBaseHeight || 0,
+            selfBracketType: lConfig.selfBracketType || 'short',
+            atticWallThickness: lConfig.atticWallThickness || 0.25,
+            atticHasInsulation: lConfig.atticHasInsulation || false,
+            atticInsulationThickness: lConfig.atticInsulationThickness || 0,
+            atticBackHasInsulation: lConfig.atticBackHasInsulation || false,
+            atticBackInsulationThickness: lConfig.atticBackInsulationThickness || 0,
+            customerRoofType: lConfig.customerRoofType || null,
+            customerLadderEnding: lConfig.customerLadderEnding || null,
+            globalWspornikDistance: lConfig.globalWspornikDistance || 1000
+          }
         })
       }
 
@@ -1701,17 +1986,63 @@ function getVersionLink(referenceNumber: string): string {
 function addLadderToOffer() {
   const ladder: LadderInOffer = {
     id: nextLadderId++,
-    wallHeight: state.value.wallHeight,
-    scheme: state.value.scheme,
-    cage: state.value.cage,
-    bracketType: state.value.bracketType,
     quantity: 1,
-    estimatedPrice: 0, // TODO: calculate
-    bomItems: cachedBOMData.value?.ladder1?.items?.map(i => ({
+    estimatedPrice: pricing.value.total,
+    bomItems: allBomItems.value.map(i => ({
       id: i.id,
-      name: i.name,
-      quantity: i.quantity
-    })) || []
+      name: i.namePL,
+      quantity: i.quantity,
+      unit: i.unit
+    })),
+    config: {
+      // Podstawowe
+      purpose: state.value.purpose,
+      scheme: state.value.scheme,
+      cage: state.value.cage,
+      wallHeight: state.value.wallHeight,
+      bracketType: state.value.bracketType,
+      bracketSpacing: state.value.bracketSpacing,
+      surfaceType: state.value.surfaceType,
+      // Opcje montażu
+      accessLock: state.value.accessLock,
+      restingPlatform: state.value.restingPlatform,
+      cageClosing: state.value.cageClosing,
+      suspended: state.value.suspended,
+      suspendedHeight: state.value.suspendedHeight,
+      portableLadder: state.value.portableLadder,
+      // Przeszkody
+      hasObstacles: state.value.hasObstacles,
+      obstacles: JSON.parse(JSON.stringify(state.value.obstacles)),
+      // Okap
+      hasEave: state.value.hasEave,
+      eaveHeight: state.value.eaveHeight,
+      eaveDepth: state.value.eaveDepth,
+      // Ocieplenie (klasyczna/z podestem)
+      hasInsulation: state.value.hasInsulation,
+      insulationThickness: state.value.insulationThickness,
+      // Attyka
+      atticWallHeight: state.value.atticWallHeight,
+      atticMinDistance: state.value.atticMinDistance,
+      descentMountType: state.value.descentMountType,
+      descentBracketType: state.value.descentBracketType,
+      descentBracketSpacing: state.value.descentBracketSpacing,
+      descentCageType: state.value.descentCageType,
+      descentAccessLock: state.value.descentAccessLock,
+      bigfootAllowLowDistance: state.value.bigfootAllowLowDistance,
+      customBaseAllowLowDistance: state.value.customBaseAllowLowDistance,
+      customBaseHeight: state.value.customBaseHeight,
+      selfBracketType: state.value.selfBracketType,
+      atticWallThickness: state.value.atticWallThickness,
+      atticHasInsulation: state.value.atticHasInsulation,
+      atticInsulationThickness: state.value.atticInsulationThickness,
+      atticBackHasInsulation: state.value.atticBackHasInsulation,
+      atticBackInsulationThickness: state.value.atticBackInsulationThickness,
+      // Customer wizard
+      customerRoofType: customerRoofType.value,
+      customerLadderEnding: customerLadderEnding.value,
+      // Globalna odległość wsporników
+      globalWspornikDistance: globalWspornikDistance.value
+    }
   }
   laddersInOffer.value.push(ladder)
 }
@@ -1721,6 +2052,80 @@ function addLadderToOffer() {
  */
 function removeLadderFromOffer(id: number) {
   laddersInOffer.value = laddersInOffer.value.filter(l => l.id !== id)
+}
+
+/**
+ * Edytuj zapisaną drabinę - przywróć jej konfigurację
+ */
+function editLadderFromOffer(id: number) {
+  const ladder = laddersInOffer.value.find(l => l.id === id)
+  if (!ladder || !ladder.config) return
+
+  const cfg = ladder.config
+
+  // Przywróć stan
+  state.value.purpose = cfg.purpose as any
+  state.value.scheme = cfg.scheme as any
+  state.value.cage = cfg.cage as any
+  state.value.wallHeight = cfg.wallHeight
+  state.value.bracketType = cfg.bracketType as any
+  state.value.bracketSpacing = cfg.bracketSpacing
+  state.value.surfaceType = cfg.surfaceType as any
+  state.value.accessLock = cfg.accessLock
+  state.value.restingPlatform = cfg.restingPlatform
+  state.value.cageClosing = cfg.cageClosing
+  state.value.suspended = cfg.suspended
+  state.value.suspendedHeight = cfg.suspendedHeight
+  state.value.portableLadder = cfg.portableLadder
+  state.value.hasObstacles = cfg.hasObstacles
+  state.value.obstacles = JSON.parse(JSON.stringify(cfg.obstacles))
+  state.value.hasEave = cfg.hasEave
+  state.value.eaveHeight = cfg.eaveHeight
+  state.value.eaveDepth = cfg.eaveDepth
+  state.value.hasInsulation = cfg.hasInsulation
+  state.value.insulationThickness = cfg.insulationThickness
+  state.value.atticWallHeight = cfg.atticWallHeight
+  state.value.atticMinDistance = cfg.atticMinDistance
+  state.value.descentMountType = cfg.descentMountType as any
+  state.value.descentBracketType = cfg.descentBracketType as any
+  state.value.descentBracketSpacing = cfg.descentBracketSpacing
+  state.value.descentCageType = cfg.descentCageType as any
+  state.value.descentAccessLock = cfg.descentAccessLock
+  state.value.bigfootAllowLowDistance = cfg.bigfootAllowLowDistance
+  state.value.customBaseAllowLowDistance = cfg.customBaseAllowLowDistance
+  state.value.customBaseHeight = cfg.customBaseHeight
+  state.value.selfBracketType = cfg.selfBracketType as any
+  state.value.atticWallThickness = cfg.atticWallThickness
+  state.value.atticHasInsulation = cfg.atticHasInsulation
+  state.value.atticInsulationThickness = cfg.atticInsulationThickness
+  state.value.atticBackHasInsulation = cfg.atticBackHasInsulation
+  state.value.atticBackInsulationThickness = cfg.atticBackInsulationThickness
+
+  // Przywróć customer wizard
+  customerRoofType.value = cfg.customerRoofType as any
+  customerLadderEnding.value = cfg.customerLadderEnding as any
+
+  // Przywróć globalną odległość wsporników
+  globalWspornikDistance.value = cfg.globalWspornikDistance
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.setGlobalWspornikDistance(cfg.globalWspornikDistance, 1)
+  }
+
+  // Usuń tę drabinę z listy (będzie edytowana jako "aktualna")
+  laddersInOffer.value = laddersInOffer.value.filter(l => l.id !== id)
+
+  // Wróć do ekranu konfiguracji
+  if (isCustomerMode.value) {
+    currentScreen.value = 'params'
+    customerWizardStep.value = 9  // Podsumowanie konfiguracji
+  } else {
+    currentScreen.value = 'params'
+  }
+
+  // Przelicz strukturę drabiny
+  nextTick(() => {
+    updateThreeState()
+  })
 }
 
 /**
@@ -1791,27 +2196,33 @@ async function generateOffer() {
 
     // Dodaj drabiny z listy
     for (const ladder of laddersInOffer.value) {
+      const cfg = ladder.config
       let ladderScheme: 'no-platform' | 'with-platform' | 'attic-passage' = 'no-platform'
-      if (ladder.scheme === 'with-platform') ladderScheme = 'with-platform'
-      else if (ladder.scheme === 'attic-passage') ladderScheme = 'attic-passage'
+      if (cfg.scheme === 'with-platform') ladderScheme = 'with-platform'
+      else if (cfg.scheme === 'attic-passage') ladderScheme = 'attic-passage'
 
       let ladderBracket: 'short' | 'medium' | 'long' = 'short'
-      if (ladder.bracketType === 'medium') ladderBracket = 'medium'
-      else if (ladder.bracketType === 'long') ladderBracket = 'long'
+      if (cfg.bracketType === 'medium') ladderBracket = 'medium'
+      else if (cfg.bracketType === 'long') ladderBracket = 'long'
 
       allLadders.push({
         config: {
-          wallHeight: ladder.wallHeight,
+          wallHeight: cfg.wallHeight,
           scheme: ladderScheme,
-          purpose: 'external',
-          cage: ladder.cage === 'with-cage' ? 'with-cage' : 'no-cage',
+          purpose: (cfg.purpose || 'external') as 'external' | 'internal',
+          cage: cfg.cage === 'with-cage' ? 'with-cage' : 'no-cage',
           bracketType: ladderBracket,
-          bracketSpacing: 1000,
-          insulationThickness: 0,
-          suspended: false,
-          suspendedHeight: 0,
-          hasObstacles: false,
-          obstacles: []
+          bracketSpacing: cfg.bracketSpacing || 1000,
+          insulationThickness: cfg.insulationThickness || 0,
+          suspended: cfg.suspended || false,
+          suspendedHeight: cfg.suspendedHeight || 0,
+          hasObstacles: cfg.hasObstacles || false,
+          obstacles: cfg.obstacles ? cfg.obstacles.map(obs => ({
+            id: obs.id,
+            type: obs.type,
+            bottomHeightMm: obs.heightFrom * 1000,
+            heightMm: obs.height * 1000
+          })) : []
         },
         quantity: ladder.quantity
       })
@@ -1957,23 +2368,56 @@ function translateScheme(scheme: string): string {
   return translations[scheme] || scheme
 }
 
-function addAnotherLadder() {
+// Wróć z podsumowania - dla customer mode wraca do kroku 9, dla admin do params
+function goBackFromSummary() {
+  if (isCustomerMode.value) {
+    currentScreen.value = 'params'
+    customerWizardStep.value = 9
+  } else {
+    currentScreen.value = 'params'
+  }
+}
+
+// Dodaj kolejną drabinę - wersja dla customer mode (zewnętrzna, reset do kroku 1)
+function addAnotherLadderCustomer() {
   // Najpierw dodaj aktualną drabinę do listy
   addLadderToOffer()
 
-  // Reset konfiguracji i powrót do pierwszego ekranu
-  state.value.purpose = ''
+  // Reset konfiguracji ale zostaw jako zewnętrzna
+  state.value.purpose = 'external'
   state.value.scheme = ''
   state.value.cage = ''
   state.value.wallHeight = 5
   state.value.bracketType = 'short'
+  state.value.bracketSpacing = 215
   state.value.accessLock = false
+  state.value.cageClosing = false
+  state.value.restingPlatform = false
   state.value.suspended = false
   state.value.suspendedHeight = 0
+  state.value.portableLadder = false
   state.value.hasObstacles = false
   state.value.obstacles = []
+  state.value.hasEave = false
+  state.value.eaveHeight = 20
+  state.value.eaveDepth = 15
+  state.value.hasInsulation = false
+  state.value.insulationThickness = 0
+  state.value.atticWallHeight = 0.2
+  state.value.atticInsulationThickness = 0
+  state.value.atticBackInsulationThickness = 0
+  state.value.atticWallThickness = 25
+
+  // Reset wizard customer
+  customerRoofType.value = null
+  customerLadderEnding.value = null
+  summaryExpandedItem.value = null
+  currentLadderQuantity.value = 1
+
+  // Wróć do customer wizard krok 1
   cachedBOMData.value = null
-  currentScreen.value = 'purpose'
+  currentScreen.value = 'params'
+  customerWizardStep.value = 1
 }
 
 // ============================================
@@ -2019,8 +2463,31 @@ const measureResult = ref<{ distanceMm: number; axisMode: string } | null>(null)
 const techDrawingActive = ref(false)
 const techDrawingView = ref('front')
 
+// Kontrola widoczności wymiarów (dla debug mode i rysunku technicznego)
+const showMeasurementBoxes = ref(false)
+const showDimensions = ref(false)
+
+// Measure warning dialog
+const showMeasureWarning = ref(false)
+const measureWarningDontShow = ref(false)
+const measureWarningHidden = ref(localStorage.getItem('hideMeasureWarning') === 'true')
+
 // Edit mode state (sciskane mode - handled by ThreeCanvas)
 const sciskaneModeActive = ref(false)
+
+// Delete mode state (for seller mode)
+const deleteModeActive = ref(false)
+const deleteConfirmData = ref<{
+  objectName: string
+  objectType: string
+  elementId: string
+} | null>(null)
+const deletedItemsStack = ref<Array<{
+  objectName: string
+  objectType: string
+  elementId: string
+  timestamp: number
+}>>([])
 
 // Sciskane handle edit panel state
 const sciskaneEditPanelActive = ref(false)
@@ -2336,6 +2803,8 @@ watch(
 // ============================================
 function autoSwitchMountTypeByWallHeight() {
   if (state.value.scheme !== 'attic-passage') return
+  // Nie auto-koryguj gdy ładujemy konfigurację z zewnątrz (embed.php)
+  if (isLoadingExternalConfig.value) return
 
   const currentMount = state.value.descentMountType
   const wallHeight = state.value.atticWallHeight || 0
@@ -2384,6 +2853,8 @@ watch(
   (newMountType, oldMountType) => {
     if (state.value.scheme !== 'attic-passage') return
     if (!oldMountType) return  // Pierwsze ustawienie, nie reaguj
+    // Nie auto-koryguj gdy ładujemy konfigurację z zewnątrz (embed.php)
+    if (isLoadingExternalConfig.value) return
 
     const wallHeight = state.value.atticWallHeight || 0
 
@@ -2691,6 +3162,180 @@ function checkExtrudeState() {
 // Poll for extrude state changes
 setInterval(checkExtrudeState, 100)
 
+// ============================================
+// POSTMESSAGE - Seller Mode
+// ============================================
+function getConfigForPostMessage(): LadderConfig {
+  return {
+    purpose: state.value.purpose as 'external' | 'internal',
+    scheme: state.value.scheme as 'no-platform' | 'with-platform' | 'attic-passage',
+    wallHeight: state.value.wallHeight,
+    cage: state.value.cage as 'no-cage' | 'with-cage',
+    cageClosing: state.value.cageClosing,
+    bracketType: state.value.bracketType as 'short' | 'medium' | 'long',
+    bracketSpacing: state.value.bracketSpacing,
+    insulationThickness: state.value.insulationThickness,
+    suspended: state.value.suspended,
+    suspendedHeight: state.value.suspendedHeight,
+    hasEave: state.value.hasEave,
+    eaveDepth: state.value.eaveDepth,
+    eaveHeight: state.value.eaveHeight,
+    atticWallHeight: state.value.atticWallHeight,
+    atticWallThickness: state.value.atticWallThickness,
+    atticInsulationThickness: state.value.atticInsulationThickness,
+    atticBackInsulationThickness: state.value.atticBackInsulationThickness,
+    descentMountType: state.value.descentMountType,
+    descentBracketType: state.value.descentBracketType,
+    restingPlatform: state.value.restingPlatform,
+    portableLadder: state.value.portableLadder,
+    accessLock: state.value.accessLock,
+    hasHandrails: state.value.hasHandrails,
+    hasObstacles: state.value.hasObstacles,
+    obstacles: state.value.obstacles,
+    // RAL
+    painting: state.value.painting,
+    ralCode: state.value.ralCode,
+    ralColor: state.value.ralColor,
+    // Dane 3D - typy łączników i ściskane uchwyty
+    connectorTypes: threeState.value.connectorTypes,
+    wspornikTypes: threeState.value.wspornikTypes,
+    sciskaneHandles: threeState.value.sciskaneHandles,
+    // Wysokości do opłaty stałej (w mm)
+    lastHoopToGround: threeState.value.lastHoopToGround,
+    lastRungToGround: threeState.value.lastRungToGround
+  }
+}
+
+function applyConfigFromPostMessage(config: LadderConfig) {
+  if (config.purpose) state.value.purpose = config.purpose
+  if (config.scheme) state.value.scheme = config.scheme
+  if (config.wallHeight !== undefined) state.value.wallHeight = config.wallHeight
+  if (config.cage) state.value.cage = config.cage
+  if (config.cageClosing !== undefined) state.value.cageClosing = config.cageClosing
+  if (config.bracketType) state.value.bracketType = config.bracketType as any
+  if (config.bracketSpacing !== undefined) state.value.bracketSpacing = config.bracketSpacing
+  if (config.insulationThickness !== undefined) state.value.insulationThickness = config.insulationThickness
+  if (config.suspended !== undefined) state.value.suspended = config.suspended
+  if (config.suspendedHeight !== undefined) state.value.suspendedHeight = config.suspendedHeight
+  if (config.hasEave !== undefined) state.value.hasEave = config.hasEave
+  if (config.eaveDepth !== undefined) state.value.eaveDepth = config.eaveDepth
+  if (config.eaveHeight !== undefined) state.value.eaveHeight = config.eaveHeight
+  if (config.atticWallHeight !== undefined) state.value.atticWallHeight = config.atticWallHeight
+  if (config.atticWallThickness !== undefined) state.value.atticWallThickness = config.atticWallThickness
+  if (config.atticInsulationThickness !== undefined) {
+    state.value.atticInsulationThickness = config.atticInsulationThickness
+    // Automatycznie włącz flagę atticHasInsulation gdy grubość > 0
+    state.value.atticHasInsulation = config.atticInsulationThickness > 0
+  }
+  if (config.atticBackInsulationThickness !== undefined) {
+    state.value.atticBackInsulationThickness = config.atticBackInsulationThickness
+    // Automatycznie włącz flagę atticBackHasInsulation gdy grubość > 0
+    state.value.atticBackHasInsulation = config.atticBackInsulationThickness > 0
+  }
+  if (config.descentMountType) state.value.descentMountType = config.descentMountType as any
+  if (config.customBaseHeight !== undefined) state.value.customBaseHeight = config.customBaseHeight
+  if (config.descentBracketType) state.value.descentBracketType = config.descentBracketType as any
+  if (config.restingPlatform !== undefined) state.value.restingPlatform = config.restingPlatform
+  if (config.portableLadder !== undefined) state.value.portableLadder = config.portableLadder
+  if (config.accessLock !== undefined) state.value.accessLock = config.accessLock
+  if (config.hasHandrails !== undefined) state.value.hasHandrails = config.hasHandrails
+  if (config.hasObstacles !== undefined) state.value.hasObstacles = config.hasObstacles
+  if (config.obstacles) {
+    state.value.obstacles = config.obstacles.map(obs => ({
+      ...obs,
+      description: obs.type || ''
+    }))
+  }
+  // Malowanie RAL
+  if (config.painting !== undefined) state.value.painting = config.painting
+  if (config.ralCode !== undefined) state.value.ralCode = config.ralCode || ''
+  if (config.ralColor !== undefined) state.value.ralColor = config.ralColor || ''
+  if (config.ralPriceModifier !== undefined) state.value.ralPriceModifier = config.ralPriceModifier || 0
+
+  // Ustaw bracketSpacing na podstawie bracketType (domyślna wartość dla typu)
+  if (config.bracketType === 'custom') {
+    // Niestandardowy wspornik - użyj wartości w cm * 10 = mm
+    // Jeśli brak wartości, użyj 300mm (30cm) jako domyślną
+    state.value.bracketSpacing = config.bracketCustom ? config.bracketCustom * 10 : 300
+  } else if (config.bracketType && !config.bracketSpacing) {
+    const bracketDefaults: Record<string, number> = {
+      'short': 215,   // 16-26cm -> środek to 21cm = 210mm
+      'medium': 310,  // 26-36cm -> środek to 31cm = 310mm
+      'long': 410     // 36-46cm -> środek to 41cm = 410mm
+    }
+    state.value.bracketSpacing = bracketDefaults[config.bracketType] || 215
+  }
+}
+
+function sendPostMessageResult() {
+  // Mapowanie kodów wewnętrznych na kody produktów w bazie danych
+  const codeMapping: Record<string, string> = {
+    // Drabiny (moduły)
+    'ladder_x7': 'drabina_powielana_7',
+    'ladder_x8': 'drabina_powielana_7', // X8 uses same price as X7
+    'drabina_poczatkowa_7': 'drabina_poczatkowa_7',
+    'ladder_x1': 'drabina_koncowa_1',
+    'ladder_x2': 'drabina_koncowa_2',
+    'ladder_x3': 'drabina_koncowa_3',
+    'ladder_x4': 'drabina_koncowa_4',
+    'ladder_x5': 'drabina_koncowa_5',
+    'ladder_x6': 'drabina_koncowa_6',
+    // Łączniki i uchwyty
+    'connector_uchwyt': 'uchwyt_montazowo_laczacy',
+    'connector_sciskany': 'uchwyt_montazowo_sciskany',
+    'module_connector': 'element_laczacy',
+    'element_laczacy': 'element_laczacy',
+    // Wsporniki - kluczowe mapowanie
+    'wspornik_krotki': 'wspornik_16_26',
+    'wspornik_sredni': 'wspornik_26_36',
+    'wspornik_dlugi': 'wspornik_36_46',
+    // Poręcze
+    'handrail': 'porece_asekuracyjne',
+    'handrail_connector': 'lacznik_poreczy',
+    // Kosz bezpieczeństwa
+    'cage_hoop': 'obrecz_kosza',
+    'cage_closing': 'blokada_dostepu',
+    'angle_bracket_x2': 'katownik_2_otworowy',
+    'angle_bracket_x3': 'katownik_3_otworowy',
+    'angle_bracket_x4': 'katownik_4_otworowy',
+    // Podest
+    'platform': 'podest_z_poreczami',
+    'resting_platform': 'podest_spoczynkowy',
+    // Attyka i montaż
+    'attic_passage': 'przejscie_attyka',
+    'bigfoot': 'bigfoot',
+    'bigfoot_guide': 'prowadnica_bigfoot'
+  }
+
+  function getProductCode(bomId: string): string {
+    if (codeMapping[bomId]) {
+      return codeMapping[bomId]
+    }
+    // Fallback: convert dashes to underscores
+    return bomId.replace(/-/g, '_')
+  }
+
+  // Konwertuj na zwykły JSON z prawidłowymi kodami produktów
+  const components = allBomItems.value.map(item => ({
+    id: getProductCode(String(item.name)),  // mapowany kod produktu (wspornik_16_26 itp.)
+    name: String(item.namePL),              // nazwa polska do wyświetlenia
+    quantity: Number(item.quantity),
+    unit: String(item.unit || 'szt.')
+  }))
+
+  const result: ConfigResult = {
+    config: JSON.parse(JSON.stringify(getConfigForPostMessage())),
+    components: components,
+    pricing: {
+      netto: pricing.value.total,
+      vat: pricing.value.total * 0.23,
+      brutto: pricing.value.total * 1.23
+    }
+  }
+  console.log('[Seller] Sending CONFIG_RESULT:', result)
+  postMessageService.sendConfigResult(result)
+}
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeyDown)
   // Sprawdź URL i załaduj ofertę jeśli są parametry
@@ -2702,11 +3347,193 @@ onMounted(() => {
     state.value.scheme = 'no-platform'
     state.value.hasInsulation = true
     currentScreen.value = 'params'
+
+    // Parsuj parametry URL dla osadzonego konfiguratora na stronie produktu
+    const urlParams = new URLSearchParams(window.location.search)
+
+    // Schemat (typ drabiny)
+    const schemeParam = urlParams.get('scheme')
+    if (schemeParam === 'no-platform' || schemeParam === 'with-platform' || schemeParam === 'attic-passage') {
+      state.value.scheme = schemeParam
+    }
+
+    // Zablokuj schemat jeśli parametr lockScheme=true
+    if (urlParams.get('lockScheme') === 'true') {
+      schemeLocked.value = true
+    }
+
+    // Wysokość ściany
+    const wallHeightParam = urlParams.get('wallHeight')
+    if (wallHeightParam) {
+      state.value.wallHeight = parseFloat(wallHeightParam) || 5
+    }
+
+    // Kosz ochronny
+    const cageParam = urlParams.get('cage')
+    if (cageParam === 'with-cage' || cageParam === 'no-cage') {
+      state.value.cage = cageParam
+    }
+
+    // Ocieplenie
+    const insulationParam = urlParams.get('insulationThickness')
+    if (insulationParam) {
+      const thickness = parseFloat(insulationParam) || 0
+      state.value.hasInsulation = thickness > 0
+      state.value.insulationThickness = thickness
+    }
+
+    // Zawieszenie
+    if (urlParams.get('suspended') === 'true') {
+      state.value.suspended = true
+      const suspendedHeightParam = urlParams.get('suspendedHeight')
+      if (suspendedHeightParam) {
+        state.value.suspendedHeight = parseFloat(suspendedHeightParam) || 0
+      }
+    }
+
+    // Okap
+    const eaveHeightParam = urlParams.get('eaveHeight')
+    const eaveDepthParam = urlParams.get('eaveDepth')
+    if (eaveHeightParam || eaveDepthParam) {
+      state.value.hasEave = true
+      state.value.eaveHeight = parseFloat(eaveHeightParam || '0') || 0
+      state.value.eaveDepth = parseFloat(eaveDepthParam || '0') || 0
+    }
+
+    // Dla attyki - wysokość ściany zejścia
+    if (schemeParam === 'attic-passage') {
+      const atticWallHeightParam = urlParams.get('atticWallHeight')
+      if (atticWallHeightParam) {
+        state.value.atticWallHeight = parseFloat(atticWallHeightParam) || 3
+      }
+    }
+  }
+
+  // Dla trybu embed - parsuj parametry URL (tak jak customer, ale bez wizarda)
+  if (isEmbedMode.value) {
+    state.value.purpose = 'external'
+    state.value.scheme = 'no-platform'
+    state.value.hasInsulation = true
+    currentScreen.value = 'params'
+
+    const urlParams = new URLSearchParams(window.location.search)
+
+    // Schemat (typ drabiny)
+    const schemeParam = urlParams.get('scheme')
+    if (schemeParam === 'no-platform' || schemeParam === 'with-platform' || schemeParam === 'attic-passage') {
+      state.value.scheme = schemeParam
+    }
+
+    // Wysokość ściany
+    const wallHeightParam = urlParams.get('wallHeight')
+    if (wallHeightParam) {
+      state.value.wallHeight = parseFloat(wallHeightParam) || 5
+    }
+
+    // Kosz ochronny
+    const cageParam = urlParams.get('cage')
+    if (cageParam === 'with-cage' || cageParam === 'no-cage') {
+      state.value.cage = cageParam
+    }
+
+    // Ocieplenie
+    const insulationParam = urlParams.get('insulationThickness')
+    if (insulationParam) {
+      const thickness = parseFloat(insulationParam) || 0
+      state.value.hasInsulation = thickness > 0
+      state.value.insulationThickness = thickness
+    }
+
+    // Zawieszenie
+    if (urlParams.get('suspended') === 'true') {
+      state.value.suspended = true
+      const suspendedHeightParam = urlParams.get('suspendedHeight')
+      if (suspendedHeightParam) {
+        state.value.suspendedHeight = parseFloat(suspendedHeightParam) || 0
+      }
+    }
+
+    // Okap
+    const eaveHeightParam = urlParams.get('eaveHeight')
+    const eaveDepthParam = urlParams.get('eaveDepth')
+    if (eaveHeightParam || eaveDepthParam) {
+      state.value.hasEave = true
+      state.value.eaveHeight = parseFloat(eaveHeightParam || '0') || 0
+      state.value.eaveDepth = parseFloat(eaveDepthParam || '0') || 0
+    }
+
+    // Dla attyki
+    if (schemeParam === 'attic-passage') {
+      const atticWallHeightParam = urlParams.get('atticWallHeight')
+      if (atticWallHeightParam) {
+        state.value.atticWallHeight = parseFloat(atticWallHeightParam) || 3
+      }
+    }
+
+    // Opcje kosza
+    if (urlParams.get('accessLock') === 'true') {
+      state.value.accessLock = true
+    }
+    if (urlParams.get('restingPlatform') === 'true') {
+      state.value.restingPlatform = true
+    }
+
+    // Drabina dostawiana
+    if (urlParams.get('portableLadder') === 'true') {
+      state.value.portableLadder = true
+    }
+  }
+
+  // Dla trybu seller - ustaw domyślne wartości i uruchom PostMessage
+  if (isSellerMode.value) {
+    state.value.purpose = 'external'
+    state.value.scheme = 'no-platform'
+    state.value.hasInsulation = true
+    currentScreen.value = 'params'
+
+    // Start PostMessage listener
+    postMessageService.startListening()
+
+    postMessageService.on('LOAD_CONFIG', (data) => {
+      if (data.payload) {
+        // Zablokuj auto-korektę wartości podczas ładowania konfiguracji z zewnątrz
+        // Zapobiega nadpisywaniu wartości użytkownika przez watchery
+        isLoadingExternalConfig.value = true
+        applyConfigFromPostMessage(data.payload as LadderConfig)
+        // Odblokuj po przetworzeniu watcherów (nextTick)
+        nextTick(() => {
+          isLoadingExternalConfig.value = false
+        })
+        updateThreeState()
+
+        // Wyślij CONFIG_RESULT po krótkim opóźnieniu
+        // (używa cachedBOMData jeśli 3D się nie zmienił, np. przy zmianie malowania)
+        nextTick(() => {
+          setTimeout(() => {
+            if (cachedBOMData.value && cachedBOMData.value.ladder1.items.length > 0) {
+              sendPostMessageResult()
+            }
+          }, 100)
+        })
+      }
+    })
+
+    postMessageService.on('GET_CONFIG', () => {
+      sendPostMessageResult()
+    })
+
+    // Notify parent that we're ready
+    nextTick(() => {
+      postMessageService.notifyReady()
+    })
   }
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown)
+  if (isSellerMode.value) {
+    postMessageService.stopListening()
+  }
 })
 
 // Additional cage options
@@ -2760,10 +3587,41 @@ function toggleMeasureMode() {
   if (threeCanvasRef.value) {
     threeCanvasRef.value.setMeasureMode(measureModeActive.value)
   }
-  // Turn off tech drawing when enabling measure
-  if (measureModeActive.value && techDrawingActive.value) {
-    toggleTechDrawing()
+  // Turn off other modes when enabling measure
+  if (measureModeActive.value) {
+    // Show warning dialog if not hidden
+    if (!measureWarningHidden.value) {
+      showMeasureWarning.value = true
+    }
+    if (techDrawingActive.value) {
+      techDrawingActive.value = false
+      threeCanvasRef.value?.exitTechDrawingMode()
+      // Reset wymiarów
+      showDimensions.value = false
+      showMeasurementBoxes.value = false
+      threeCanvasRef.value?.setShowDimensions(false)
+      threeCanvasRef.value?.setShowMeasurementBoxes(false)
+    }
+    if (deleteModeActive.value) {
+      deleteModeActive.value = false
+      threeCanvasRef.value?.setDeleteMode(false)
+      deleteConfirmData.value = null
+    }
+    if (sciskaneModeActive.value) {
+      sciskaneModeActive.value = false
+      sciskaneEditPanelActive.value = false
+      threeCanvasRef.value?.toggleSciskaneMode()
+    }
   }
+}
+
+// Close measure warning dialog
+function closeMeasureWarning() {
+  if (measureWarningDontShow.value) {
+    localStorage.setItem('hideMeasureWarning', 'true')
+    measureWarningHidden.value = true
+  }
+  showMeasureWarning.value = false
 }
 
 function setMeasureAxis(mode: '3d' | 'x' | 'y' | 'z') {
@@ -2790,13 +3648,29 @@ function toggleTechDrawing() {
   if (threeCanvasRef.value) {
     if (techDrawingActive.value) {
       threeCanvasRef.value.enterTechDrawingMode('front')
-      // Turn off measure when enabling tech drawing
+      // Turn off other modes when enabling tech drawing
       if (measureModeActive.value) {
         measureModeActive.value = false
         threeCanvasRef.value.setMeasureMode(false)
       }
+      if (deleteModeActive.value) {
+        deleteModeActive.value = false
+        threeCanvasRef.value.setDeleteMode(false)
+        deleteConfirmData.value = null
+      }
+      if (sciskaneModeActive.value) {
+        sciskaneModeActive.value = false
+        sciskaneEditPanelActive.value = false
+        sciskaneEditData.value = null
+        threeCanvasRef.value.toggleSciskaneMode()
+      }
     } else {
       threeCanvasRef.value.exitTechDrawingMode()
+      // Reset wymiarów przy wyjściu z rysunku technicznego
+      showDimensions.value = false
+      showMeasurementBoxes.value = false
+      threeCanvasRef.value.setShowDimensions(false)
+      threeCanvasRef.value.setShowMeasurementBoxes(false)
     }
   }
 }
@@ -2813,9 +3687,71 @@ function setTechDrawingView(view: 'front' | 'side' | 'back') {
   }
 }
 
+function exitTechDrawingMode() {
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.exitTechDrawingMode()
+    // Reset wymiarów
+    showDimensions.value = false
+    showMeasurementBoxes.value = false
+    threeCanvasRef.value.setShowDimensions(false)
+    threeCanvasRef.value.setShowMeasurementBoxes(false)
+  }
+}
+
+// Kontrola widoczności wymiarów
+function toggleMeasurementBoxes() {
+  showMeasurementBoxes.value = !showMeasurementBoxes.value
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.setShowMeasurementBoxes(showMeasurementBoxes.value)
+  }
+}
+
+function toggleDimensions() {
+  showDimensions.value = !showDimensions.value
+  if (threeCanvasRef.value) {
+    threeCanvasRef.value.setShowDimensions(showDimensions.value)
+  }
+}
+
+function toggleEmbedFullscreen() {
+  const container = document.querySelector('.app-container')
+  if (!container) return
+
+  if (!document.fullscreenElement) {
+    container.requestFullscreen?.()
+  } else {
+    document.exitFullscreen?.()
+  }
+}
+
+function zoomIn() {
+  threeCanvasRef.value?.zoomIn()
+}
+
+function zoomOut() {
+  threeCanvasRef.value?.zoomOut()
+}
+
 function onTechDrawingChange(data: { enabled: boolean; view: string; totalHeightMm: number }) {
   techDrawingActive.value = data.enabled
   techDrawingView.value = data.view
+
+  // Automatyczna kontrola wymiarów w rysunku technicznym
+  if (data.enabled && data.view === 'side') {
+    // Widok side → wymiary ON
+    showDimensions.value = true
+    threeCanvasRef.value?.setShowDimensions(true)
+  } else if (data.enabled && data.view !== 'side') {
+    // Inne widoki → wymiary OFF
+    showDimensions.value = false
+    threeCanvasRef.value?.setShowDimensions(false)
+  } else if (!data.enabled) {
+    // Wyjście z rysunku technicznego → reset
+    showDimensions.value = false
+    showMeasurementBoxes.value = false
+    threeCanvasRef.value?.setShowDimensions(false)
+    threeCanvasRef.value?.setShowMeasurementBoxes(false)
+  }
 }
 
 // Sciskane mode (edit handles) - delegated to ThreeCanvas
@@ -2830,6 +3766,16 @@ function toggleSciskaneMode() {
     if (techDrawingActive.value) {
       techDrawingActive.value = false
       threeCanvasRef.value?.exitTechDrawingMode()
+      // Reset wymiarów
+      showDimensions.value = false
+      showMeasurementBoxes.value = false
+      threeCanvasRef.value?.setShowDimensions(false)
+      threeCanvasRef.value?.setShowMeasurementBoxes(false)
+    }
+    if (deleteModeActive.value) {
+      deleteModeActive.value = false
+      threeCanvasRef.value?.setDeleteMode(false)
+      deleteConfirmData.value = null
     }
   } else {
     // Close edit panel when exiting sciskane mode
@@ -2838,6 +3784,82 @@ function toggleSciskaneMode() {
   }
   // Call ThreeCanvas method
   threeCanvasRef.value?.toggleSciskaneMode()
+}
+
+// Delete mode (for seller mode) - remove elements from scene
+function toggleDeleteMode() {
+  deleteModeActive.value = !deleteModeActive.value
+  // Turn off other modes
+  if (deleteModeActive.value) {
+    if (measureModeActive.value) {
+      measureModeActive.value = false
+      threeCanvasRef.value?.setMeasureMode(false)
+    }
+    if (sciskaneModeActive.value) {
+      sciskaneModeActive.value = false
+      sciskaneEditPanelActive.value = false
+      sciskaneEditData.value = null
+      threeCanvasRef.value?.toggleSciskaneMode()
+    }
+    if (techDrawingActive.value) {
+      techDrawingActive.value = false
+      threeCanvasRef.value?.exitTechDrawingMode()
+      // Reset wymiarów
+      showDimensions.value = false
+      showMeasurementBoxes.value = false
+      threeCanvasRef.value?.setShowDimensions(false)
+      threeCanvasRef.value?.setShowMeasurementBoxes(false)
+    }
+  } else {
+    deleteConfirmData.value = null
+  }
+  // Call ThreeCanvas method
+  threeCanvasRef.value?.setDeleteMode(deleteModeActive.value)
+}
+
+function onDeleteRequest(data: { objectName: string; objectType: string; elementId: string; objectData: any }) {
+  deleteConfirmData.value = {
+    objectName: data.objectName,
+    objectType: data.objectType,
+    elementId: data.elementId
+  }
+}
+
+function confirmDelete() {
+  console.log('[confirmDelete] Called, deleteConfirmData:', deleteConfirmData.value)
+  if (!deleteConfirmData.value) return
+
+  const { objectName, objectType, elementId } = deleteConfirmData.value
+  console.log('[confirmDelete] Hiding element:', elementId)
+
+  // Store for undo
+  deletedItemsStack.value.push({
+    objectName,
+    objectType,
+    elementId,
+    timestamp: Date.now()
+  })
+
+  // Hide element in ThreeCanvas (using elementId)
+  const result = threeCanvasRef.value?.hideElement(elementId)
+  console.log('[confirmDelete] hideElement result:', result)
+
+  // Close dialog
+  deleteConfirmData.value = null
+}
+
+function cancelDelete() {
+  deleteConfirmData.value = null
+}
+
+function undoLastDelete() {
+  if (deletedItemsStack.value.length === 0) return
+
+  const lastDeleted = deletedItemsStack.value.pop()
+  if (lastDeleted) {
+    // Show element in ThreeCanvas (using elementId)
+    threeCanvasRef.value?.showElement(lastDeleted.elementId)
+  }
 }
 
 // Sciskane handle edit handlers
@@ -3017,7 +4039,7 @@ function toggleCageClosing() {
 </script>
 
 <template>
-  <div class="app-container">
+  <div class="app-container" :class="{ 'seller-mode': isSellerMode }">
     <!-- Debug mode indicator -->
     <div v-if="debugMode" id="debugIndicator">
       DEBUG MODE (Ctrl+Shift+D)
@@ -3195,9 +4217,9 @@ function toggleCageClosing() {
     </div>
 
     <!-- ============================================
-         NAGŁÓWEK GLOBALNY
+         NAGŁÓWEK GLOBALNY (ukryty w seller mode i embed mode)
          ============================================ -->
-    <header class="app-header">
+    <header v-if="!isSellerMode && !isEmbedMode" class="app-header">
       <!-- Przycisk wstecz dla admin / refresh dla customer -->
       <button
         v-if="!isCustomerMode"
@@ -3347,7 +4369,77 @@ function toggleCageClosing() {
                 @editSciskaneHandle="onEditSciskaneHandle"
                 @collisionWarning="onCollisionWarning"
                 @debugObjectUpdated="onDebugObjectUpdated"
+                @deleteRequest="onDeleteRequest"
               />
+
+              <!-- Przyciski widoku dla trybu embed (lewa strona, pionowo) -->
+              <div v-if="isEmbedMode" class="embed-view-selector">
+                <button
+                  class="embed-view-btn"
+                  :class="{ active: techDrawingActive && techDrawingView === 'front' }"
+                  @click="setTechDrawingView('front')"
+                  title="Widok z przodu"
+                >
+                  Przód
+                </button>
+                <button
+                  class="embed-view-btn"
+                  :class="{ active: techDrawingActive && techDrawingView === 'side' }"
+                  @click="setTechDrawingView('side')"
+                  title="Widok z boku"
+                >
+                  Bok
+                </button>
+                <button
+                  class="embed-view-btn"
+                  :class="{ active: !techDrawingActive }"
+                  @click="exitTechDrawingMode"
+                  title="Widok 3D"
+                >
+                  3D
+                </button>
+              </div>
+
+              <!-- Kontrolki w prawym górnym rogu (zoom + fullscreen) -->
+              <div v-if="isEmbedMode" class="embed-top-controls">
+                <button
+                  class="embed-control-btn"
+                  @click="zoomIn"
+                  title="Przybliż"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <circle cx="11" cy="11" r="8"/>
+                    <path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/>
+                  </svg>
+                </button>
+                <button
+                  class="embed-control-btn"
+                  @click="zoomOut"
+                  title="Oddal"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <circle cx="11" cy="11" r="8"/>
+                    <path d="M21 21l-4.35-4.35M8 11h6"/>
+                  </svg>
+                </button>
+                <button
+                  class="embed-control-btn"
+                  @click="toggleEmbedFullscreen"
+                  title="Pełny ekran"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
+                  </svg>
+                </button>
+              </div>
+
+              <!-- Podpowiedź nawigacji (lewy dolny róg) -->
+              <div v-if="isEmbedMode" class="embed-nav-hint">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+                  <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/>
+                </svg>
+                <span>Shift + LPM = przesuwanie</span>
+              </div>
 
               <!-- Lekki popup ostrzeżenia u góry modelu 3D (tylko jeden na raz, priorytet: autoSwitch > thickness > bracket > collision) -->
               <div v-if="(autoSwitchMessage || atticThicknessWarning || atticBracketWarning || collisionWarning) && !warningDismissed" class="model-toast" :class="{ 'model-toast-info': autoSwitchMessage }">
@@ -3374,8 +4466,8 @@ function toggleCageClosing() {
                 <button class="model-toast-close" @click="warningDismissed = true; autoSwitchMessage = null">&times;</button>
               </div>
 
-              <!-- Kontrolki widoczności 3D (prawy górny róg) - ukryte w customer mode -->
-              <div v-if="!isCustomerMode || debugMode" class="viewer3d-visibility">
+              <!-- Kontrolki widoczności 3D (prawy górny róg) - ukryte w customer/embed mode -->
+              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" class="viewer3d-visibility">
                 <button
                   class="viewer3d-visibility-btn"
                   :class="{ active: show3DWall }"
@@ -3400,10 +4492,29 @@ function toggleCageClosing() {
                 >
                   Ocieplenie: {{ show3DInsulation ? 'ON' : 'OFF' }}
                 </button>
+                <!-- Wymiary box i Wymiary - tylko w debug mode -->
+                <button
+                  v-if="debugMode"
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: showMeasurementBoxes }"
+                  @click="toggleMeasurementBoxes"
+                  title="Pokaż/ukryj boxy mierzenia"
+                >
+                  Wymiary box: {{ showMeasurementBoxes ? 'ON' : 'OFF' }}
+                </button>
+                <button
+                  v-if="debugMode"
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: showDimensions }"
+                  @click="toggleDimensions"
+                  title="Pokaż/ukryj wymiary"
+                >
+                  Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
+                </button>
               </div>
 
-              <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer mode -->
-              <div v-if="!isCustomerMode || debugMode" id="controls">
+              <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer/embed mode -->
+              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" id="controls">
                 <button
                   class="btn btn-tech btn-with-tooltip"
                   :class="{ 'btn-active': techDrawingActive }"
@@ -3425,10 +4536,27 @@ function toggleCageClosing() {
                 >
                   🔧<span class="btn-tooltip">Edytuj uchwyty</span>
                 </button>
+                <!-- Delete mode - tylko w seller mode -->
+                <button
+                  v-if="isSellerMode"
+                  class="btn btn-tech btn-with-tooltip"
+                  :class="{ 'btn-active': deleteModeActive }"
+                  @click="toggleDeleteMode"
+                >
+                  🗑️<span class="btn-tooltip">Usuń element</span>
+                </button>
+                <!-- Undo delete - tylko w seller mode gdy są usunięte elementy -->
+                <button
+                  v-if="isSellerMode && deletedItemsStack.length > 0"
+                  class="btn btn-tech btn-with-tooltip btn-undo"
+                  @click="undoLastDelete"
+                >
+                  ↩️<span class="btn-tooltip">Cofnij usunięcie ({{ deletedItemsStack.length }})</span>
+                </button>
               </div>
 
-              <!-- TOOLBAR MIARKI (środek góry) - ukryty w customer mode -->
-              <div v-if="!isCustomerMode || debugMode" id="measureToolbar" :class="{ active: measureModeActive }">
+              <!-- TOOLBAR MIARKI (środek góry) - ukryty w customer/embed mode -->
+              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" id="measureToolbar" :class="{ active: measureModeActive }">
                 <span class="measure-toolbar-label">Tryb:</span>
                 <button
                   class="measure-mode-btn"
@@ -3470,6 +4598,41 @@ function toggleCageClosing() {
               <div v-if="measureResult" id="measureResultPopup">
                 {{ measureResult.distanceMm.toFixed(1) }} mm
                 <button class="measure-result-close-btn" @click="closeMeasureResult">×</button>
+              </div>
+
+              <!-- DIALOG POTWIERDZENIA USUNIĘCIA (środek ekranu) -->
+              <div v-if="deleteConfirmData" class="delete-confirm-dialog">
+                <div class="delete-confirm-content">
+                  <div class="delete-confirm-icon">🗑️</div>
+                  <h3>Usunąć element?</h3>
+                  <p class="delete-confirm-name">{{ deleteConfirmData.objectName }}</p>
+                  <p class="delete-confirm-hint">Element zostanie usunięty ze sceny. Możesz cofnąć tę operację.</p>
+                  <div class="delete-confirm-buttons">
+                    <button class="btn-cancel" @click="cancelDelete">Anuluj</button>
+                    <button class="btn-delete" @click="confirmDelete">Usuń</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- OSTRZEŻENIE MIARKI (środek ekranu) -->
+              <div v-if="showMeasureWarning" class="measure-warning-dialog">
+                <div class="measure-warning-content">
+                  <button class="measure-warning-close" @click="closeMeasureWarning">✕</button>
+                  <div class="measure-warning-icon">📏</div>
+                  <h3>Informacja o miarce</h3>
+                  <p class="measure-warning-text">
+                    Model kosza ochronnego jest tylko orientacyjny - faktyczne wymiary obręczy,
+                    podestu spoczynkowego i zamykania znacznie różnią się od rzeczywistości.
+                    <br><br>
+                    Rozstaw obręczy i wysokość od ziemi są poprawne. Pozostałe elementy drabiny
+                    zgadzają się z rzeczywistością.
+                  </p>
+                  <label class="measure-warning-checkbox">
+                    <input type="checkbox" v-model="measureWarningDontShow">
+                    <span>Nie pokazuj ponownie</span>
+                  </label>
+                  <button class="measure-warning-ok" @click="closeMeasureWarning">OK</button>
+                </div>
               </div>
 
               <!-- PANEL EDYCJI UCHWYTU SCISKANE (środek ekranu) -->
@@ -3572,18 +4735,27 @@ function toggleCageClosing() {
                 <span class="global-type">{{ globalWspornikType }}</span>
               </div>
 
-              <!-- Panel rysunku technicznego (góra środek) -->
-              <div v-if="techDrawingActive && !isCustomerMode" id="techDrawingPanel">
+              <!-- Panel rysunku technicznego (góra środek) - ukryty w customer/embed mode -->
+              <div v-if="techDrawingActive && !isCustomerMode && !isEmbedMode" id="techDrawingPanel">
                 <span class="tech-label">Rysunek techniczny</span>
                 <span class="tech-view">Widok: {{ techDrawingView }}</span>
                 <span class="tech-hint">Przeciągnij = przesuń | Scroll = zoom</span>
+                <!-- Przycisk Wymiary dla widoku side -->
+                <button
+                  v-if="techDrawingView === 'side'"
+                  class="tech-switch-btn"
+                  :class="{ 'tech-btn-active': showDimensions }"
+                  @click="toggleDimensions"
+                >
+                  Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
+                </button>
                 <button class="tech-switch-btn" @click="switchTechDrawingView">Zmień widok</button>
                 <button class="tech-close-btn" @click="toggleTechDrawing">✕</button>
               </div>
 
 
-              <!-- WATCHDOG PANEL (prawy dolny róg) -->
-              <div class="watchdog-panel">
+              <!-- WATCHDOG PANEL (prawy dolny róg) - ukryty w seller/embed mode -->
+              <div v-if="!isSellerMode && !isEmbedMode" class="watchdog-panel">
                 <div class="watchdog-item">
                   <span class="watchdog-label">Ostatni szczebel → ziemia:</span>
                   <span class="watchdog-value">{{ threeState.lastRungToGround }} mm</span>
@@ -3600,8 +4772,8 @@ function toggleCageClosing() {
             </div>
           </div>
 
-          <!-- Prawa strona - panel konfiguracji -->
-          <div class="config-panel-wrapper">
+          <!-- Prawa strona - panel konfiguracji (ukryty w embed mode) -->
+          <div v-if="!isEmbedMode" class="config-panel-wrapper">
             <div class="config-panel">
               <div class="config-panel-header">
                 <h2 v-if="!isCustomerMode">Parametry drabiny</h2>
@@ -4252,25 +5424,21 @@ function toggleCageClosing() {
                     </div>
 
                     <!-- Przeszkody - rozwijalna edycja -->
-                    <div class="summary-expand-item" :class="{ expanded: summaryExpandedItem === 'obstacles' }">
+                    <div v-if="state.obstacles.length > 0" class="summary-expand-item" :class="{ expanded: summaryExpandedItem === 'obstacles' }">
                       <div class="summary-expand-header" @click="summaryExpandedItem = summaryExpandedItem === 'obstacles' ? null : 'obstacles'">
                         <div class="summary-edit-content">
                           <span class="summary-edit-label">Przeszkody</span>
-                          <span class="summary-edit-value">{{ state.obstacles.length > 0 ? state.obstacles.length + ' szt.' : 'Brak' }}</span>
+                          <span class="summary-edit-value">{{ state.obstacles.length }} szt.</span>
                         </div>
                         <span class="summary-expand-icon">{{ summaryExpandedItem === 'obstacles' ? '▲' : '▼' }}</span>
                       </div>
                       <div v-if="summaryExpandedItem === 'obstacles'" class="summary-expand-content">
-                        <div class="toggle-options compact">
-                          <button class="toggle-btn" :class="{ selected: state.obstacles.length === 0 }" @click="state.hasObstacles = false; state.obstacles = []">Brak</button>
-                          <button class="toggle-btn" :class="{ selected: state.obstacles.length > 0 }" @click="state.hasObstacles = true; if (state.obstacles.length === 0) addObstacle()">Są przeszkody</button>
-                        </div>
-                        <div v-if="state.obstacles.length > 0" class="obstacles-summary-list">
-                          <div v-for="(obs, index) in state.obstacles" :key="obs.id" class="obstacle-summary-item">
-                            <span class="obstacle-info">{{ index + 1 }}. {{ obs.type }} - {{ obs.heightFrom }}m ({{ obs.height }}cm)</span>
-                            <button class="obstacle-remove-btn" @click="removeObstacle(obs.id)">×</button>
+                        <div class="obstacles-summary-list">
+                          <div v-for="(obstacle, index) in state.obstacles" :key="obstacle.id" class="obstacle-summary-item">
+                            <span class="obstacle-num">{{ index + 1 }}.</span>
+                            <span class="obstacle-range">{{ obstacle.heightFrom.toFixed(1) }}m - {{ (obstacle.heightFrom + obstacle.height).toFixed(1) }}m</span>
+                            <button class="obstacle-remove-btn" @click="removeObstacle(obstacle.id)">×</button>
                           </div>
-                          <button class="add-obstacle-btn" @click="addObstacle">+ Dodaj przeszkodę</button>
                         </div>
                       </div>
                     </div>
@@ -4318,17 +5486,19 @@ function toggleCageClosing() {
 
                 <!-- Fixed buttons for step 9 -->
                 <div v-if="customerWizardStep === 9" class="summary-fixed-actions">
-                  <div class="summary-actions-row">
-                    <button class="wizard-nav-btn prev" @click="customerPrevStep">
-                      Wstecz
-                    </button>
-                    <button class="btn-secondary" @click="addAnotherLadder">
-                      + Dodaj kolejną drabinę
+                  <div class="back-link-gradient">
+                    <button class="back-link-btn" @click="customerPrevStep">
+                      ← wróć do poprzedniego kroku
                     </button>
                   </div>
-                  <button class="btn-primary" @click="goToSummary">
-                    Przejdź do wyceny
-                  </button>
+                  <div class="summary-buttons-row">
+                    <button class="btn-secondary" @click="addAnotherLadderCustomer">
+                      + Dodaj kolejną drabinę
+                    </button>
+                    <button class="btn-primary" @click="goToSummary">
+                      Przejdź do wyceny
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Nawigacja wizarda (ukryta w podsumowaniu) -->
@@ -4354,7 +5524,7 @@ function toggleCageClosing() {
               <!-- ============================================ -->
               <!-- NORMALNE INPUTY DLA ADMIN MODE -->
               <!-- ============================================ -->
-              <div v-if="!isCustomerMode" class="config-panel-content">
+              <div v-if="!isCustomerMode && !isSellerMode" class="config-panel-content">
                 <!-- Typ drabiny (read-only info) -->
                 <div class="config-type-badge">
                   <span class="type-label">Typ drabiny:</span>
@@ -5418,8 +6588,8 @@ function toggleCageClosing() {
         <div class="summary-full-layout">
           <div class="config-panel summary-panel">
             <div class="config-panel-header">
-              <h2>Podsumowanie zamówienia</h2>
-              <p>Twoja konfiguracja drabiny technicznej</p>
+              <h2 class="summary-main-title">Podsumowanie zamówienia</h2>
+              <p class="summary-subtitle">Twoja konfiguracja drabiny ewakuacyjnej</p>
             </div>
 
             <!-- Banner załadowanej oferty -->
@@ -5451,98 +6621,150 @@ function toggleCageClosing() {
               </div>
             </div>
 
-            <div class="config-panel-content">
-              <!-- Specyfikacja techniczna -->
-              <div class="summary-section">
-                <div class="summary-section-title">Specyfikacja techniczna</div>
-                <div class="summary-card">
-                  <div class="summary-row">
-                    <span class="label">Moduły X7 (7 szczebli):</span>
-                    <span class="value">{{ threeState.numX7Ladders }} szt.</span>
+            <div class="config-panel-content summary-content">
+              <!-- Lista drabin w ofercie -->
+              <div v-for="(ladder, index) in laddersInOffer" :key="ladder.id" class="ladder-card ladder-card-saved">
+                <div class="ladder-card-header">
+                  <div class="ladder-card-title-section">
+                    <h3 class="ladder-card-title">
+                      {{ index + 1 }}. Drabina {{ ladder.config.wallHeight }}m
+                      <span v-if="ladder.config.cage === 'with-cage'" class="ladder-tag-small">Kosz</span>
+                    </h3>
+                    <div class="ladder-card-params">
+                      {{ getSchemeLabel(ladder.config.scheme) }}
+                    </div>
                   </div>
-                  <div class="summary-row">
-                    <span class="label">Moduł końcowy:</span>
-                    <span class="value">{{ threeState.finalLadderRungs }} szczebli</span>
-                  </div>
-                  <div class="summary-row highlight-row">
-                    <span class="label">Całkowita liczba szczebli:</span>
-                    <span class="value">{{ threeState.totalRungs }} szt.</span>
-                  </div>
-                  <div v-if="cachedBOMData?.ladder1?.config?.lastRungToGround" class="summary-row">
-                    <span class="label">Ostatni szczebel od ziemi:</span>
-                    <span class="value">{{ cachedBOMData.ladder1.config.lastRungToGround }} mm</span>
-                  </div>
-                  <div v-if="cachedBOMData?.ladder1?.config?.lastCageToGround && state.cage === 'with-cage'" class="summary-row">
-                    <span class="label">Ostatnia obręcz od ziemi:</span>
-                    <span class="value">{{ cachedBOMData.ladder1.config.lastCageToGround }} mm</span>
+                  <div class="ladder-card-actions">
+                    <button class="ladder-edit-btn" @click="editLadderFromOffer(ladder.id)" title="Edytuj">Edytuj</button>
+                    <button class="ladder-remove-btn-small" @click="removeLadderFromOffer(ladder.id)" title="Usuń">×</button>
                   </div>
                 </div>
-              </div>
 
-              <!-- Lista drabin w ofercie -->
-              <div v-if="laddersInOffer.length > 0" class="ladders-in-offer-section">
-                <div class="summary-section-title">Drabiny w ofercie ({{ laddersInOffer.length }})</div>
-                <div class="ladders-list">
-                  <div v-for="ladder in laddersInOffer" :key="ladder.id" class="ladder-item">
-                    <div class="ladder-item-info">
-                      <div class="ladder-item-title">
-                        Drabina {{ ladder.wallHeight }}m
-                        <span v-if="ladder.cage === 'with-cage'" class="ladder-tag">Kosz</span>
-                      </div>
-                      <div class="ladder-item-details">
-                        {{ getSchemeLabel(ladder.scheme) }}
-                      </div>
+                <!-- Rozwijana lista komponentów -->
+                <details v-if="ladder.bomItems && ladder.bomItems.length > 0" class="components-details">
+                  <summary class="components-summary">
+                    Lista komponentów ({{ ladder.bomItems.length }} pozycji)
+                  </summary>
+                  <div class="components-list">
+                    <div v-for="item in ladder.bomItems" :key="item.id" class="component-row">
+                      <span class="component-name">{{ item.name }}</span>
+                      <span class="component-qty">{{ item.quantity }} {{ item.unit || 'szt.' }}</span>
                     </div>
-                    <div class="ladder-item-quantity">
-                      <button class="qty-btn" @click="updateLadderQuantity(ladder.id, ladder.quantity - 1)">-</button>
+                  </div>
+                </details>
+
+                <div class="ladder-card-footer">
+                  <div class="quantity-section">
+                    <span class="quantity-label">Ilość:</span>
+                    <div class="quantity-controls">
+                      <button class="qty-btn" :disabled="ladder.quantity <= 1" @click="updateLadderQuantity(ladder.id, ladder.quantity - 1)">−</button>
                       <span class="qty-value">{{ ladder.quantity }}</span>
                       <button class="qty-btn" @click="updateLadderQuantity(ladder.id, ladder.quantity + 1)">+</button>
                     </div>
-                    <button class="ladder-remove-btn" @click="removeLadderFromOffer(ladder.id)">
-                      &#10005;
-                    </button>
                   </div>
                 </div>
               </div>
 
-              <!-- Aktualna drabina (jeszcze nie dodana) -->
-              <div class="current-ladder-section">
-                <div class="summary-section-title">
-                  {{ laddersInOffer.length > 0 ? 'Nowa drabina' : 'Aktualna drabina' }}
-                </div>
-                <div class="current-ladder-card">
-                  <div class="ladder-item-info">
-                    <div class="ladder-item-title">
-                      Drabina {{ state.wallHeight }}m
-                      <span v-if="state.cage === 'with-cage'" class="ladder-tag">Kosz</span>
+              <!-- Karta aktualnej drabiny -->
+              <div class="ladder-card">
+                <div class="ladder-card-header">
+                  <div class="ladder-card-title-section">
+                    <h3 class="ladder-card-title">
+                      {{ laddersInOffer.length + 1 }}. {{ getLadderTypeLabel() }}
+                    </h3>
+                    <div class="ladder-card-params">
+                      {{ getLadderParamsText() }}
                     </div>
-                    <div class="ladder-item-details">
-                      {{ getSchemeLabel(state.scheme) }}
+                  </div>
+                  <div class="ladder-card-actions">
+                    <button class="ladder-edit-btn" @click="currentScreen = 'params'">
+                      Edytuj
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Rozwijana lista komponentów -->
+                <details class="components-details">
+                  <summary class="components-summary">
+                    Lista komponentów ({{ allBomItems.length }} pozycji)
+                  </summary>
+                  <div class="components-list">
+                    <div v-for="item in allBomItems" :key="item.id" class="component-row">
+                      <span class="component-name">{{ item.namePL }}</span>
+                      <span class="component-qty">{{ item.quantity }} {{ item.unit }}</span>
+                    </div>
+                  </div>
+                </details>
+
+                <!-- Ilość i cena -->
+                <div class="ladder-card-footer">
+                  <div class="quantity-section">
+                    <span class="quantity-label">Ilość:</span>
+                    <div class="quantity-controls">
+                      <button
+                        class="qty-btn"
+                        :disabled="currentLadderQuantity <= 1"
+                        @click="currentLadderQuantity > 1 && currentLadderQuantity--"
+                      >−</button>
+                      <input
+                        type="number"
+                        v-model.number="currentLadderQuantity"
+                        min="1"
+                        max="99"
+                        class="qty-input"
+                      />
+                      <button class="qty-btn" @click="currentLadderQuantity++">+</button>
+                    </div>
+                  </div>
+                  <div class="price-section">
+                    <div class="price-calc">
+                      {{ formatPrice(pricing.total * 1.23) }} brutto x {{ currentLadderQuantity }}
+                    </div>
+                    <div class="price-total">
+                      {{ formatPrice(pricing.total * currentLadderQuantity * 1.23) }}
                     </div>
                   </div>
                 </div>
               </div>
 
               <!-- Przycisk dodania kolejnej drabiny -->
-              <div class="add-ladder-section">
-                <button class="btn btn-outline-dashed btn-block" @click="addAnotherLadder">
-                  + Dodaj kolejna drabine do zamowienia
-                </button>
+              <button class="add-ladder-btn" @click="addAnotherLadderCustomer">
+                + Dodaj kolejną drabinę do zamówienia
+              </button>
+
+              <!-- Podsumowanie cenowe -->
+              <div class="price-summary-box">
+                <h3 class="price-summary-title">Podsumowanie cenowe</h3>
+
+                <div class="price-row">
+                  <span>Drabiny ({{ currentLadderQuantity }} szt.):</span>
+                  <span class="price-value">{{ formatPrice(pricing.total * currentLadderQuantity) }}</span>
+                </div>
+
+                <div class="price-row separator">
+                  <span>Suma netto:</span>
+                  <span class="price-value">{{ formatPrice(pricing.total * currentLadderQuantity) }}</span>
+                </div>
+
+                <div class="price-row">
+                  <span>VAT (23%):</span>
+                  <span class="price-value">{{ formatPrice(pricing.total * currentLadderQuantity * 0.23) }}</span>
+                </div>
+
+                <div class="price-row total">
+                  <span>RAZEM BRUTTO:</span>
+                  <span class="price-value">{{ formatPrice(pricing.total * currentLadderQuantity * 1.23) }}</span>
+                </div>
               </div>
 
-              <!-- Wyceniona lista elementów -->
-              <PricedBOM
-                v-if="cachedBOMData"
-                :bomItems="allBomItems"
-              />
-
+              <!-- Email do oferty -->
               <div class="email-input-section">
                 <label for="customer-email">Email do oferty:</label>
                 <input
                   id="customer-email"
                   type="email"
                   v-model="customerEmail"
-                  placeholder="Podaj swoj adres email"
+                  placeholder="Podaj swój adres email"
                   class="email-input"
                   :class="{ 'input-error': emailError }"
                   @input="emailError = ''"
@@ -5550,16 +6772,13 @@ function toggleCageClosing() {
                 <p v-if="emailError" class="error-message">{{ emailError }}</p>
               </div>
 
-              <div class="summary-actions">
-                <button class="btn btn-outline btn-block" @click="generateOffer" :disabled="isSaving">
-                  <span>&#128196;</span>
-                  {{ loadedOffer ? 'Zapisz jako nowa oferte' : 'Wygeneruj oferte' }}
+              <!-- Przyciski akcji -->
+              <div class="summary-action-buttons">
+                <button class="btn-generate-offer" @click="generateOffer" :disabled="isSaving">
+                  {{ loadedOffer ? 'Zapisz jako nową ofertę' : 'Wygeneruj ofertę' }}
                 </button>
-                <button class="btn btn-outline btn-block" @click="exportBOMToPdf">
-                  <span>&#128462;</span> Eksportuj liste elementow (PDF)
-                </button>
-                <button class="btn btn-success btn-block" @click="addToCart">
-                  <span>&#128722;</span> Dodaj do koszyka
+                <button class="btn-export-pdf" @click="exportBOMToPdf">
+                  Eksportuj PDF
                 </button>
               </div>
 
@@ -5568,7 +6787,7 @@ function toggleCageClosing() {
                 <div class="saved-offer-title">Oferta zapisana!</div>
                 <div class="saved-offer-details">
                   <div><strong>Numer:</strong> {{ savedReference.referenceNumber }}</div>
-                  <div><strong>Kod dostepu:</strong> {{ savedReference.accessCode }}</div>
+                  <div><strong>Kod dostępu:</strong> {{ savedReference.accessCode }}</div>
                   <div v-if="savedReference.version && savedReference.version > 1">
                     <strong>Wersja:</strong> {{ savedReference.version }}
                   </div>
@@ -5577,14 +6796,184 @@ function toggleCageClosing() {
                   </div>
                 </div>
                 <div class="saved-offer-link">
-                  <a :href="getOfferLink()" target="_blank">Otworz oferte w nowym oknie</a>
+                  <a :href="getOfferLink()" target="_blank">Otwórz ofertę w nowym oknie</a>
                 </div>
               </div>
             </div>
 
             <div class="config-panel-footer">
-              <button class="btn btn-secondary" @click="currentScreen = 'params'">Wstecz</button>
+              <button class="btn btn-secondary" @click="goBackFromSummary">Wstecz</button>
               <button class="btn btn-primary" @click="addToCart">Zamów teraz</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Wysuwany panel dla trybu seller -->
+      <div v-if="isSellerMode" class="seller-panel-wrapper" :class="{ visible: sellerPanelVisible }">
+        <button class="seller-panel-toggle" @click="sellerPanelVisible = !sellerPanelVisible">
+          <span v-if="sellerPanelVisible">&#9654;</span>
+          <span v-else>&#9664;</span>
+        </button>
+        <div class="seller-panel-content">
+          <div class="seller-panel-header">
+            <h3>Parametry drabiny</h3>
+          </div>
+
+          <div class="seller-panel-body">
+            <!-- Schemat -->
+            <div class="seller-section">
+              <label>Zakończenie drabiny</label>
+              <select v-model="state.scheme">
+                <option value="no-platform">Bez podestu</option>
+                <option value="with-platform">Z podestem</option>
+                <option value="attic-passage">Przejście przez attykę</option>
+              </select>
+            </div>
+
+            <!-- Poręcze asekuracyjne +1.1m (tylko dla no-platform) -->
+            <div v-if="state.scheme === 'no-platform'" class="seller-section">
+              <label class="seller-checkbox-label">
+                <input type="checkbox" v-model="state.hasHandrails" />
+                +1.1m (poręcze asekuracyjne)
+              </label>
+              <p class="seller-hint">Poręcze wystające 1,1m ponad wyjście z łącznikami</p>
+            </div>
+
+            <!-- Wysokość ściany -->
+            <div class="seller-section">
+              <label>Wysokość ściany (m)</label>
+              <input type="number" v-model.number="state.wallHeight" min="1" max="30" step="0.1" />
+            </div>
+
+            <!-- Ocieplenie -->
+            <div class="seller-section">
+              <label>Grubość ocieplenia (cm)</label>
+              <input type="number" v-model.number="state.insulationThickness" min="0" max="40" step="1" />
+            </div>
+
+            <!-- Okap (nie dla attic-passage) -->
+            <div v-if="state.scheme !== 'attic-passage'" class="seller-section">
+              <label>
+                <input type="checkbox" v-model="state.hasEave" />
+                Okap
+              </label>
+              <div v-if="state.hasEave" class="seller-subsection">
+                <div class="seller-input-row">
+                  <label>Wysokość (cm)</label>
+                  <input type="number" v-model.number="state.eaveHeight" min="1" max="200" />
+                </div>
+                <div class="seller-input-row">
+                  <label>Głębokość (cm)</label>
+                  <input type="number" v-model.number="state.eaveDepth" min="10" max="100" />
+                </div>
+              </div>
+            </div>
+
+            <!-- Kosz ochronny -->
+            <div class="seller-section">
+              <label>
+                <input type="checkbox" :checked="state.cage === 'with-cage'" @change="state.cage = ($event.target as HTMLInputElement).checked ? 'with-cage' : 'no-cage'" />
+                Kosz ochronny
+              </label>
+              <div v-if="state.cage === 'with-cage'" class="seller-subsection">
+                <label>
+                  <input type="checkbox" v-model="state.cageClosing" />
+                  Zamykany
+                </label>
+              </div>
+            </div>
+
+            <!-- Typ wspornika -->
+            <div class="seller-section">
+              <label>Typ wspornika</label>
+              <div class="bracket-type-selector">
+                <label :class="{ disabled: !isBracketTypeAvailable('short') }">
+                  <input
+                    type="radio"
+                    value="short"
+                    v-model="state.bracketType"
+                    :disabled="!isBracketTypeAvailable('short')"
+                  />
+                  Krótki (26cm)
+                </label>
+                <label :class="{ disabled: !isBracketTypeAvailable('medium') }">
+                  <input
+                    type="radio"
+                    value="medium"
+                    v-model="state.bracketType"
+                    :disabled="!isBracketTypeAvailable('medium')"
+                  />
+                  Średni (36cm)
+                </label>
+                <label :class="{ disabled: !isBracketTypeAvailable('long') }">
+                  <input
+                    type="radio"
+                    value="long"
+                    v-model="state.bracketType"
+                    :disabled="!isBracketTypeAvailable('long')"
+                  />
+                  Długi (50cm)
+                </label>
+              </div>
+              <p v-if="minBracketType !== 'short'" class="bracket-hint">
+                Min. wymagany: {{ minBracketType === 'medium' ? 'Średni' : 'Długi' }}
+                ({{ state.insulationThickness > 0 ? 'ocieplenie' : '' }}{{ state.hasEave ? ' okap' : '' }})
+              </p>
+            </div>
+
+            <!-- Zawieszenie -->
+            <div class="seller-section">
+              <label>
+                <input type="checkbox" v-model="state.suspended" />
+                Zawieszenie (odległość od dachu)
+              </label>
+              <div v-if="state.suspended" class="seller-subsection">
+                <div class="seller-input-row">
+                  <label>Wysokość zawieszenia (m)</label>
+                  <input type="number" v-model.number="state.suspendedHeight" min="0.3" max="5" step="0.1" />
+                </div>
+              </div>
+            </div>
+
+            <!-- Lista komponentów -->
+            <div class="seller-section">
+              <details class="seller-components-details" open>
+                <summary class="seller-components-summary">
+                  Lista komponentów ({{ allBomItems.length }})
+                </summary>
+                <div class="seller-components-list">
+                  <div v-for="item in allBomItems" :key="item.id" class="seller-component-row">
+                    <span class="seller-component-name">{{ item.namePL }}</span>
+                    <span class="seller-component-qty">{{ item.quantity }} {{ item.unit }}</span>
+                  </div>
+                  <div v-if="allBomItems.length === 0" class="seller-components-empty">
+                    Brak komponentów
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            <!-- Podsumowanie -->
+            <div class="seller-section seller-price-summary">
+              <div class="seller-summary-title">Podsumowanie</div>
+              <div class="summary-row">
+                <span>Ostatni szczebel → ziemia:</span>
+                <strong>{{ threeState.lastRungToGround }} mm</strong>
+              </div>
+              <div v-if="state.cage === 'with-cage' && threeState.lastHoopToGround > 0" class="summary-row">
+                <span>Ostatnia obręcz → ziemia:</span>
+                <strong>{{ threeState.lastHoopToGround }} mm</strong>
+              </div>
+              <div class="price-divider"></div>
+              <div class="price-row">
+                <span>Cena netto:</span>
+                <strong>{{ pricing.total?.toFixed(2) || '0.00' }} PLN</strong>
+              </div>
+              <div class="price-row">
+                <span>Cena brutto:</span>
+                <strong>{{ pricing.totalWithVat?.toFixed(2) || '0.00' }} PLN</strong>
+              </div>
             </div>
           </div>
         </div>
@@ -6075,6 +7464,11 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* Seller mode - full screen canvas */
+.app-container.seller-mode .config-panel-wrapper {
+  display: none;
 }
 
 /* ============================================
@@ -7777,6 +9171,233 @@ body {
   color: white;
 }
 
+/* DELETE CONFIRM DIALOG */
+.delete-confirm-dialog {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.delete-confirm-content {
+  background: linear-gradient(165deg, rgba(35,40,50,0.98) 0%, rgba(20,24,30,0.99) 100%);
+  border-radius: 16px;
+  padding: 28px 32px;
+  text-align: center;
+  max-width: 360px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1);
+  animation: deleteDialogIn 0.2s ease-out;
+}
+
+@keyframes deleteDialogIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.delete-confirm-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.delete-confirm-content h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: white;
+}
+
+.delete-confirm-name {
+  margin: 0 0 8px 0;
+  font-size: 15px;
+  color: #f59e0b;
+  font-weight: 500;
+}
+
+.delete-confirm-hint {
+  margin: 0 0 20px 0;
+  font-size: 13px;
+  color: rgba(255,255,255,0.6);
+  line-height: 1.4;
+}
+
+.delete-confirm-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+.delete-confirm-buttons .btn-cancel {
+  flex: 1;
+  padding: 12px 16px;
+  background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
+  color: rgba(255,255,255,0.8);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.delete-confirm-buttons .btn-cancel:hover {
+  background: linear-gradient(145deg, #363c4a 0%, #282d38 100%);
+  color: white;
+}
+
+.delete-confirm-buttons .btn-delete {
+  flex: 1;
+  padding: 12px 16px;
+  background: linear-gradient(145deg, #dc2626 0%, #b91c1c 100%);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.delete-confirm-buttons .btn-delete:hover {
+  background: linear-gradient(145deg, #ef4444 0%, #dc2626 100%);
+}
+
+/* MEASURE WARNING DIALOG */
+.measure-warning-dialog {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(4px);
+}
+
+.measure-warning-content {
+  position: relative;
+  background: linear-gradient(165deg, rgba(35,40,50,0.98) 0%, rgba(20,24,30,0.99) 100%);
+  border-radius: 16px;
+  padding: 28px 32px;
+  max-width: 400px;
+  text-align: center;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+
+.measure-warning-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(255,255,255,0.1);
+  border: none;
+  color: rgba(255,255,255,0.6);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.measure-warning-close:hover {
+  background: rgba(255,255,255,0.2);
+  color: white;
+}
+
+.measure-warning-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.measure-warning-content h3 {
+  margin: 0 0 12px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: white;
+}
+
+.measure-warning-text {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: rgba(255,255,255,0.7);
+  line-height: 1.5;
+}
+
+.measure-warning-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  color: rgba(255,255,255,0.6);
+}
+
+.measure-warning-checkbox input {
+  cursor: pointer;
+}
+
+.measure-warning-checkbox:hover {
+  color: rgba(255,255,255,0.8);
+}
+
+.measure-warning-ok {
+  padding: 12px 32px;
+  background: linear-gradient(145deg, #3b82f6 0%, #2563eb 100%);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.measure-warning-ok:hover {
+  background: linear-gradient(145deg, #60a5fa 0%, #3b82f6 100%);
+}
+
+/* Undo button style */
+.btn-undo {
+  position: relative;
+}
+
+.btn-undo::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  background: #22c55e;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.2); }
+}
+
 /* SAFETY CAGE CONTROLS - exact from original */
 #safetyCageControls {
   position: fixed;
@@ -8035,6 +9656,11 @@ body {
 
 #techDrawingPanel .tech-switch-btn:hover {
   background: linear-gradient(145deg, #4a6d96 0%, #344c66 100%);
+}
+
+#techDrawingPanel .tech-switch-btn.tech-btn-active {
+  background: linear-gradient(145deg, #2ecc71 0%, #27ae60 100%);
+  box-shadow: 0 0 8px rgba(46, 204, 113, 0.5);
 }
 
 #techDrawingPanel .tech-close-btn {
@@ -9802,7 +11428,7 @@ body {
 /* Fixed actions at bottom of step 9 */
 .customer-wizard .summary-fixed-actions {
   position: absolute;
-  bottom: 20px;
+  bottom: 0;
   left: 0;
   right: 0;
   display: flex;
@@ -9813,7 +11439,7 @@ body {
   z-index: 10;
 }
 
-.customer-wizard .summary-fixed-actions button {
+.customer-wizard .summary-fixed-actions .summary-buttons-row button {
   width: 100%;
   padding: 14px;
   border-radius: 10px;
@@ -9821,6 +11447,33 @@ body {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.customer-wizard .summary-fixed-actions .back-link-btn {
+  width: auto;
+  padding: 0;
+  font-size: 0.85rem;
+  font-weight: 400;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-secondary);
+}
+
+.customer-wizard .summary-fixed-actions .back-link-gradient {
+  padding: 0.25rem 0;
+  margin-top: 10px;
+  margin-bottom: 10px;
+  border: none;
+}
+
+.customer-wizard .summary-fixed-actions {
+  border: none;
+}
+
+.customer-wizard .summary-fixed-actions .back-link-btn:hover {
+  color: var(--accent);
+  background: none;
 }
 
 .customer-wizard .summary-fixed-actions .btn-secondary {
@@ -10006,6 +11659,111 @@ body {
   color: var(--accent);
   border-color: var(--accent);
   background: rgba(74, 158, 255, 0.15);
+}
+
+/* Embed mode view selector (positioned on left side, vertical) */
+.embed-view-selector {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: linear-gradient(165deg, rgba(30,30,40,0.92) 0%, rgba(20,20,30,0.95) 100%);
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.15);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  z-index: 100;
+}
+
+.embed-view-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 50px;
+}
+
+.embed-view-btn:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.1);
+}
+
+.embed-view-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.15);
+}
+
+/* Embed top controls (zoom + fullscreen) - right top corner */
+.embed-top-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 100;
+}
+
+.embed-control-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  background: linear-gradient(165deg, rgba(30,30,40,0.92) 0%, rgba(20,20,30,0.95) 100%);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  color: #aaa;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.embed-control-btn:hover {
+  color: #fff;
+  background: linear-gradient(165deg, rgba(50,50,60,0.95) 0%, rgba(40,40,50,0.98) 100%);
+  transform: scale(1.05);
+}
+
+.embed-control-btn:active {
+  transform: scale(0.95);
+}
+
+.embed-control-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Embed navigation hint (bottom left) */
+.embed-nav-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(0,0,0,0.6);
+  border-radius: 6px;
+  font-size: 11px;
+  color: rgba(255,255,255,0.6);
+  z-index: 100;
+  pointer-events: none;
+}
+
+.embed-nav-hint svg {
+  opacity: 0.7;
 }
 
 /* Reset confirmation popup */
@@ -10393,5 +12151,1368 @@ body {
 
 .add-obstacle-btn:hover {
   background: var(--accent-hover);
+}
+
+/* ============================================
+   SUMMARY STEP (STEP 9) STYLES
+   ============================================ */
+
+.summary-step {
+  padding: 1rem;
+}
+
+.summary-main-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem 0;
+}
+
+.summary-subtitle {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin: 0 0 1.5rem 0;
+}
+
+/* Karta drabiny */
+.ladder-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.ladder-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 1rem 1.25rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.ladder-card-title-section {
+  flex: 1;
+}
+
+.ladder-card-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem 0;
+}
+
+.ladder-card-params {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.ladder-card-actions {
+  flex-shrink: 0;
+  margin-left: 1rem;
+}
+
+.ladder-edit-btn {
+  padding: 0.4rem 0.75rem;
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.ladder-edit-btn:hover {
+  background: var(--accent);
+  color: white;
+}
+
+/* Rozwijana lista komponentów */
+.components-details {
+  border-top: 1px solid var(--border);
+}
+
+.components-summary {
+  padding: 0.75rem 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 0.2s;
+}
+
+.components-summary:hover {
+  background: var(--bg-hover);
+}
+
+.components-summary::marker {
+  color: var(--accent);
+}
+
+.components-list {
+  padding: 0 1.25rem 1rem;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.component-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 0.85rem;
+}
+
+.component-row:last-child {
+  border-bottom: none;
+}
+
+.component-name {
+  color: var(--text-primary);
+}
+
+.component-qty {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* Stopka karty - ilość i cena */
+.ladder-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+}
+
+/* Saved ladder cards */
+.ladder-card-saved {
+  margin-bottom: 0.75rem;
+  opacity: 0.9;
+}
+
+.ladder-card-saved .ladder-card-header {
+  padding: 0.75rem 1rem;
+}
+
+.ladder-card-saved .ladder-card-footer {
+  padding: 0.5rem 1rem;
+}
+
+.ladder-tag-small {
+  display: inline-block;
+  padding: 0.15rem 0.4rem;
+  background: var(--accent);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 500;
+  border-radius: 4px;
+  margin-left: 0.5rem;
+}
+
+.ladder-remove-btn-small {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.ladder-remove-btn-small:hover {
+  background: var(--error);
+  border-color: var(--error);
+  color: white;
+}
+
+.qty-value {
+  min-width: 30px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.quantity-section {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.quantity-label {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.quantity-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.qty-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 1.1rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.qty-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.qty-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.qty-input {
+  width: 50px;
+  height: 32px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.qty-input::-webkit-inner-spin-button,
+.qty-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.price-section {
+  text-align: right;
+}
+
+.price-calc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.price-total {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* Przycisk dodania drabiny */
+.add-ladder-btn {
+  width: 100%;
+  padding: 0.75rem;
+  background: transparent;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 1.5rem;
+}
+
+.add-ladder-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(52, 152, 219, 0.05);
+}
+
+/* Podsumowanie cenowe */
+.price-summary-box {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.price-summary-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 1rem 0;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.price-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.price-row.separator {
+  border-top: 1px solid var(--border);
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
+}
+
+.price-row.total {
+  border-top: 2px solid var(--accent);
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.price-row .price-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.price-row.total .price-value {
+  color: var(--accent);
+  font-size: 1.2rem;
+}
+
+/* Przyciski akcji */
+.summary-action-buttons {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.btn-generate-offer {
+  flex: 1;
+  padding: 1rem;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  color: white;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-generate-offer:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-generate-offer:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-export-pdf {
+  flex: 1;
+  padding: 1rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-export-pdf:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Summary content layout */
+.summary-content {
+  padding: 1.25rem;
+}
+
+/* Fixed actions for step 9 */
+.summary-fixed-actions {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 1rem;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Back link with gradient */
+.back-link-gradient {
+  text-align: center;
+  padding: 0.5rem 0;
+  background: linear-gradient(to bottom, transparent, rgba(45, 45, 45, 0.8));
+  margin: -1rem -1rem 0 -1rem;
+  padding: 1rem;
+}
+
+.back-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: color 0.2s;
+  padding: 0.125rem 0.25rem;
+}
+
+.back-link-btn:hover {
+  color: var(--accent);
+}
+
+/* Summary buttons row */
+.summary-buttons-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.summary-buttons-row button {
+  flex: 1;
+}
+
+/* ============================================
+   SELLER PANEL STYLES
+   ============================================ */
+.seller-panel-wrapper {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 360px;
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+  z-index: 1000;
+  display: flex;
+}
+
+.seller-panel-wrapper.visible {
+  transform: translateX(0);
+}
+
+.seller-panel-toggle {
+  position: absolute;
+  left: -40px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 80px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  color: var(--text-primary);
+  transition: background 0.2s;
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.2);
+}
+
+.seller-panel-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.seller-panel-toggle span {
+  line-height: 1;
+}
+
+.seller-panel-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  background: var(--bg-secondary);
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+}
+
+.seller-panel-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.seller-panel-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text-primary);
+}
+
+.seller-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+.seller-section {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.seller-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.seller-section > label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.seller-section select,
+.seller-section input[type="number"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.seller-section select:focus,
+.seller-section input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.seller-subsection {
+  margin-top: 10px;
+  padding-left: 24px;
+}
+
+.bracket-type-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bracket-type-selector label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.bracket-type-selector label:hover:not(.disabled) {
+  border-color: var(--accent);
+}
+
+.bracket-type-selector label.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.bracket-type-selector input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+.bracket-hint {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 152, 0, 0.1);
+  border: 1px solid rgba(255, 152, 0, 0.3);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: #ff9800;
+}
+
+.seller-price-summary {
+  background: var(--bg-primary);
+  padding: 16px !important;
+  border-radius: 8px;
+  margin-top: 16px;
+}
+
+.price-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.price-row:last-child {
+  margin-bottom: 0;
+}
+
+.price-row span {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.price-row strong {
+  color: var(--accent);
+  font-size: 1rem;
+}
+
+.seller-summary-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.summary-row span {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.summary-row strong {
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.price-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
+}
+
+.seller-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.seller-checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.seller-hint {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Seller components list */
+.seller-components-details {
+  margin: 0;
+}
+
+.seller-components-summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  padding: 8px 0;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seller-components-summary::before {
+  content: '▶';
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+}
+
+.seller-components-details[open] .seller-components-summary::before {
+  transform: rotate(90deg);
+}
+
+.seller-components-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+}
+
+.seller-component-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.seller-component-row:last-child {
+  border-bottom: none;
+}
+
+.seller-component-name {
+  color: var(--text-secondary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.seller-component-qty {
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.seller-components-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 12px;
+}
+
+.seller-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  background: var(--bg-secondary);
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+}
+
+.seller-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.seller-section:last-child {
+  border-bottom: none;
+}
+
+.seller-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  cursor: pointer;
+  transition: background 0.2s;
+  user-select: none;
+}
+
+.seller-header:hover {
+  background: var(--bg-hover);
+}
+
+.seller-section.expanded .seller-header {
+  background: rgba(74, 158, 255, 0.1);
+  border-bottom: 1px solid var(--border);
+}
+
+.seller-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.seller-label-text {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.seller-label-value {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.seller-arrow {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.seller-content {
+  padding: 16px 20px;
+  background: var(--bg-primary);
+}
+
+.seller-toggle-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.seller-toggle-group.vertical {
+  flex-direction: column;
+}
+
+.seller-toggle-btn {
+  flex: 1;
+  min-width: 80px;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: center;
+}
+
+.seller-toggle-btn:hover {
+  border-color: var(--accent);
+}
+
+.seller-toggle-btn.selected {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.15);
+  color: var(--accent);
+}
+
+.seller-toggle-btn.disabled,
+.seller-toggle-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-color: var(--border);
+  background: var(--bg-card);
+  color: var(--text-muted);
+}
+
+.seller-toggle-btn.disabled:hover,
+.seller-toggle-btn:disabled:hover {
+  border-color: var(--border);
+}
+
+.seller-bracket-hint {
+  margin: 12px 0 0 0;
+  padding: 8px 12px;
+  background: rgba(255, 152, 0, 0.1);
+  border: 1px solid rgba(255, 152, 0, 0.3);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: #ff9800;
+}
+
+.seller-input-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.seller-input-row:last-child {
+  margin-bottom: 0;
+}
+
+.seller-input-row label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.seller-input-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seller-input-unit input {
+  width: 80px;
+  padding: 8px 10px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-align: center;
+}
+
+.seller-input-unit input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.seller-input-unit span {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.seller-input-unit.small input {
+  width: 60px;
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+.seller-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  padding: 10px 0;
+  margin-top: 8px;
+}
+
+.seller-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+/* Seller options section */
+.seller-options {
+  padding: 16px 20px;
+}
+
+.seller-options h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0 0 12px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.seller-no-options {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0;
+}
+
+/* Seller obstacles */
+.seller-obstacle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.seller-obstacle-row:last-child {
+  border-bottom: none;
+}
+
+.seller-obstacle-num {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  min-width: 20px;
+}
+
+.seller-obstacle-sep {
+  color: var(--text-muted);
+}
+
+.seller-obstacle-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  margin-left: auto;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.seller-obstacle-remove:hover {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.1);
+}
+
+.seller-add-btn {
+  width: 100%;
+  padding: 10px;
+  margin-top: 12px;
+  background: transparent;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.seller-add-btn:hover {
+  background: rgba(74, 158, 255, 0.1);
+  border-style: solid;
+}
+
+/* Seller footer */
+.seller-footer {
+  padding: 16px 20px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+}
+
+.seller-price-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.seller-price {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.seller-price-row.seller-price-total {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 1rem;
+}
+
+.seller-price-row.seller-price-total .seller-price {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.seller-send-btn {
+  width: 100%;
+  margin-top: 16px;
+  padding: 14px;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  color: white;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.seller-send-btn:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+/* ============================================
+   TABLET RESPONSIVE - 768px
+   ============================================ */
+@media (max-width: 768px) {
+  .split-layout {
+    flex-direction: column;
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .visualization-panel {
+    height: 50vh;
+    min-height: 300px;
+    flex-shrink: 0;
+  }
+
+  .config-panel-wrapper {
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    max-height: none;
+    flex: 1;
+  }
+
+  .config-panel {
+    height: auto;
+    max-height: none;
+  }
+
+  .config-content {
+    padding: 16px;
+  }
+
+  .params-content {
+    padding: 16px;
+  }
+
+  /* Choice cards */
+  .choice-grid,
+  .choice-grid-fullscreen,
+  .choice-grid-fullscreen.cols-2,
+  .choice-grid-fullscreen.cols-3,
+  .scheme-selector {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .choice-card {
+    padding: 14px 16px;
+  }
+
+  /* Summary */
+  .summary-two-col {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .summary-col {
+    padding: 16px;
+  }
+
+  /* BOM table */
+  .bom-table-container {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -16px;
+    padding: 0 16px;
+  }
+
+  .bom-table {
+    font-size: 13px;
+    min-width: 500px;
+  }
+
+  .bom-table th,
+  .bom-table td {
+    padding: 10px 8px;
+    white-space: nowrap;
+  }
+
+  /* Header */
+  .panel-header {
+    padding: 12px 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .panel-header h1 {
+    font-size: 1.1rem;
+    flex: 1 1 100%;
+  }
+
+  .panel-header .btn {
+    flex: 1;
+    justify-content: center;
+    min-width: calc(50% - 4px);
+  }
+
+  /* Form inputs */
+  .input-row,
+  .form-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .input-group {
+    width: 100%;
+  }
+
+  /* Buttons */
+  .nav-buttons {
+    gap: 8px;
+  }
+
+  .nav-buttons .btn {
+    padding: 12px 16px;
+    font-size: 14px;
+    flex: 1;
+  }
+
+  /* Wizard customer */
+  .customer-wizard {
+    padding: 16px;
+  }
+
+  .wizard-step h3 {
+    font-size: 1.15rem;
+  }
+
+  /* Viewer controls */
+  .viewer3d-controls {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .viewer3d-visibility-btn {
+    padding: 6px 8px;
+    font-size: 10px;
+  }
+
+  /* Tabs */
+  .config-tabs {
+    padding: 0 12px;
+    gap: 4px;
+  }
+
+  .config-tab {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  /* Price summary */
+  .summary-price-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .summary-total {
+    font-size: 1.3rem;
+  }
+}
+
+/* ============================================
+   MOBILE RESPONSIVE - 480px
+   ============================================ */
+@media (max-width: 480px) {
+  .visualization-panel {
+    height: 40vh;
+    min-height: 250px;
+  }
+
+  .config-content {
+    padding: 12px;
+  }
+
+  .params-content {
+    padding: 12px;
+  }
+
+  .choice-card {
+    padding: 12px 14px;
+  }
+
+  .choice-card h3 {
+    font-size: 0.95rem;
+  }
+
+  .choice-card p {
+    font-size: 0.8rem;
+  }
+
+  /* Header mobile */
+  .panel-header {
+    padding: 10px 12px;
+  }
+
+  .panel-header h1 {
+    font-size: 1rem;
+  }
+
+  .panel-header .btn {
+    padding: 8px 12px;
+    font-size: 12px;
+    min-width: 100%;
+  }
+
+  /* Buttons */
+  .btn {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .btn-sm {
+    min-height: 36px;
+    font-size: 12px;
+  }
+
+  .nav-buttons {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .nav-buttons .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Summary */
+  .summary-col {
+    padding: 12px;
+  }
+
+  .summary-total {
+    font-size: 1.15rem;
+  }
+
+  /* Tabs */
+  .config-tabs {
+    padding: 0 8px;
+    overflow-x: auto;
+  }
+
+  .config-tab {
+    padding: 8px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  /* Wizard */
+  .customer-wizard {
+    padding: 12px;
+  }
+
+  .wizard-step h3 {
+    font-size: 1.05rem;
+  }
+
+  .wizard-step .step-intro {
+    font-size: 0.9rem;
+  }
+
+  .roof-type-btn {
+    padding: 14px;
+  }
+
+  .roof-type-btn h4 {
+    font-size: 0.95rem;
+  }
+
+  /* Obstacle cards */
+  .obstacle-item {
+    padding: 10px 12px;
+  }
+
+  /* Number inputs */
+  .number-input-wrapper {
+    width: 100%;
+  }
+
+  /* Reset modal */
+  .reset-modal-content {
+    width: calc(100vw - 24px);
+    padding: 16px;
+  }
 }
 </style>

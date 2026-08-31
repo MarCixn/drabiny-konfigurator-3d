@@ -1,11 +1,11 @@
 /**
  * App Mode Detection Composable
- * Detects and manages A/B/C configurator modes from URL parameters
+ * Detects and manages configurator modes from URL parameters
  */
 
 import { ref, computed, onMounted } from 'vue'
 
-export type AppMode = 'admin' | 'customer' | 'seller'
+export type AppMode = 'admin' | 'customer' | 'seller' | 'embed'
 
 const mode = ref<AppMode>('admin')
 const isInitialized = ref(false)
@@ -15,6 +15,7 @@ const isInitialized = ref(false)
  * ?mode=admin -> Version A (default)
  * ?mode=customer -> Version B (simplified wizard)
  * ?mode=seller -> Version C (embed for seller panel)
+ * ?mode=embed -> Embed mode (3D view only)
  */
 function initMode(): void {
   if (isInitialized.value) return
@@ -26,6 +27,8 @@ function initMode(): void {
     mode.value = 'customer'
   } else if (modeParam === 'seller') {
     mode.value = 'seller'
+  } else if (modeParam === 'embed') {
+    mode.value = 'embed'
   } else {
     mode.value = 'admin'
   }
@@ -48,6 +51,7 @@ export function useAppMode() {
   const isAdmin = computed(() => mode.value === 'admin')
   const isCustomer = computed(() => mode.value === 'customer')
   const isSeller = computed(() => mode.value === 'seller')
+  const isEmbed = computed(() => mode.value === 'embed')
 
   /**
    * Get URL with mode parameter
@@ -72,6 +76,7 @@ export function useAppMode() {
     isAdmin,
     isCustomer,
     isSeller,
+    isEmbed,
     getModeUrl,
     switchMode
   }
