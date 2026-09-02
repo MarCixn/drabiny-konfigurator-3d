@@ -6157,8 +6157,15 @@ function renderDescentLadderConnectors(
   const topConnectorYOffset = 100 - 113  // Korekta -113mm
   const connectorZOffset = 0  // Bez korekty - przesunięcie całej drabiny w ladderGeometryConfig
 
-  // Uchwyt lewy górny
-  const leftConnTop = createConnector('uchwyt', 'left', 2)
+  // Typ łącznika z wyboru użytkownika, a NIE 'uchwyt' na sztywno.
+  // BOM powstaje z przejścia po scenie, więc wpisany na stałe uchwyt znaczył,
+  // że wybranie łącznika na drabinie zejścia nigdzie się nie liczyło - ani
+  // w wycenie, ani na liście elementów. Wsporniki dwie linie niżej robiły to
+  // już poprawnie, przez wspornikTypes2[pairIndex].
+  const topConnType = connectorTypes2[pairIndex] || 'uchwyt'
+
+  // Łącznik lewy górny
+  const leftConnTop = createConnector(topConnType, 'left', 2)
   leftConnTop.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
   leftConnTop.position.y = (topY + topConnectorYOffset) * SCALE
   leftConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6166,8 +6173,8 @@ function renderDescentLadderConnectors(
   leftConnTop.userData.pairIndex = pairIndex
   ladderContainer.add(leftConnTop)
 
-  // Uchwyt prawy górny
-  const rightConnTop = createConnector('uchwyt', 'right', 2)
+  // Łącznik prawy górny
+  const rightConnTop = createConnector(topConnType, 'right', 2)
   rightConnTop.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
   rightConnTop.position.y = (topY + topConnectorYOffset) * SCALE
   rightConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6221,8 +6228,11 @@ function renderDescentLadderConnectors(
       const gapCenterOffset = SECTION_GAP / 2
       const connectionY = ladderStartY - currentOffset - gapCenterOffset + (DIMS.connectorHeight / 2) - 50 + 91  // Korekta +91mm
 
-      // Uchwyt lewy
-      const leftConn = createConnector('uchwyt', 'left', 2)
+      // Typ z wyboru użytkownika - patrz komentarz przy górnym łączniku
+      const loopConnType = connectorTypes2[pairIndex] || 'uchwyt'
+
+      // Łącznik lewy
+      const leftConn = createConnector(loopConnType, 'left', 2)
       leftConn.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
       leftConn.position.y = connectionY * SCALE
       leftConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6230,8 +6240,8 @@ function renderDescentLadderConnectors(
       leftConn.userData.pairIndex = pairIndex
       ladderContainer.add(leftConn)
 
-      // Uchwyt prawy
-      const rightConn = createConnector('uchwyt', 'right', 2)
+      // Łącznik prawy
+      const rightConn = createConnector(loopConnType, 'right', 2)
       rightConn.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
       rightConn.position.y = connectionY * SCALE
       rightConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
