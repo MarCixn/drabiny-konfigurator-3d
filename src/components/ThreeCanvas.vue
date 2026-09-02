@@ -9120,6 +9120,30 @@ function generateBOM(): BOMData {
   console.log('counts1:', counts1)
   console.log('counts2:', counts2)
 
+  // Łącznik drabiny zejścia.
+  //
+  // renderDescentLadderConnectors() uruchamia się TYLKO dla descentMountType
+  // === 'brackets'. Przy bigfoocie i przy braku mocowania drabina zejścia
+  // nadal wisi pod przełazem na łączniku - widać go na modelu, bo jest częścią
+  // modelu przełazu, a nie osobnym obiektem sceny. Przejście po scenie liczy
+  // obiekty, więc takiego łącznika nie widziało i nie trafiał on ani na listę
+  // elementów, ani do wyceny.
+  //
+  // Kalkulator serwerowy liczy go zawsze, gdy istnieje drabina zejścia
+  // (LadderCalculator.php: 'Uchwyt laczacy - zejscie'), więc obie ścieżki
+  // się rozjeżdżały. Dokładamy go do licznika, a NIE do sceny - dorysowanie
+  // drugiego obiektu zdublowałoby to, co model już pokazuje.
+  //
+  // Liczba 2 to jedna para (lewy + prawy) - tak samo jak liczone są łączniki
+  // strony wejścia (jeden punkt 'lacznik' daje element_laczacy x2).
+  const maDrabineZejscia = Object.keys(counts2).some((k) => k.startsWith('ladder_'))
+  if (maDrabineZejscia && props.descentMountType !== 'brackets') {
+    counts2['element_laczacy'] = {
+      count: (counts2['element_laczacy']?.count || 0) + 2,
+      details: 'zejście'
+    }
+  }
+
   // For safety/platform handrails: convert first X7 to "Początkowy moduł drabiny"
   if (handrailType === 'safety' || handrailType === 'platform') {
     if (counts1['ladder_x7'] && counts1['ladder_x7'].count > 0) {
