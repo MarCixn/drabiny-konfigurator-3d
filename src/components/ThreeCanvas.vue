@@ -6157,8 +6157,15 @@ function renderDescentLadderConnectors(
   const topConnectorYOffset = 100 - 113  // Korekta -113mm
   const connectorZOffset = 0  // Bez korekty - przesunięcie całej drabiny w ladderGeometryConfig
 
-  // Uchwyt lewy górny
-  const leftConnTop = createConnector('uchwyt', 'left', 2)
+  // Typ łącznika z wyboru użytkownika, a NIE 'uchwyt' na sztywno.
+  // BOM powstaje z przejścia po scenie, więc wpisany na stałe uchwyt znaczył,
+  // że wybranie łącznika na drabinie zejścia nigdzie się nie liczyło - ani
+  // w wycenie, ani na liście elementów. Wsporniki dwie linie niżej robiły to
+  // już poprawnie, przez wspornikTypes2[pairIndex].
+  const topConnType = connectorTypes2[pairIndex] || 'uchwyt'
+
+  // Łącznik lewy górny
+  const leftConnTop = createConnector(topConnType, 'left', 2)
   leftConnTop.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
   leftConnTop.position.y = (topY + topConnectorYOffset) * SCALE
   leftConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6166,8 +6173,8 @@ function renderDescentLadderConnectors(
   leftConnTop.userData.pairIndex = pairIndex
   ladderContainer.add(leftConnTop)
 
-  // Uchwyt prawy górny
-  const rightConnTop = createConnector('uchwyt', 'right', 2)
+  // Łącznik prawy górny
+  const rightConnTop = createConnector(topConnType, 'right', 2)
   rightConnTop.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
   rightConnTop.position.y = (topY + topConnectorYOffset) * SCALE
   rightConnTop.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6221,8 +6228,11 @@ function renderDescentLadderConnectors(
       const gapCenterOffset = SECTION_GAP / 2
       const connectionY = ladderStartY - currentOffset - gapCenterOffset + (DIMS.connectorHeight / 2) - 50 + 91  // Korekta +91mm
 
-      // Uchwyt lewy
-      const leftConn = createConnector('uchwyt', 'left', 2)
+      // Typ z wyboru użytkownika - patrz komentarz przy górnym łączniku
+      const loopConnType = connectorTypes2[pairIndex] || 'uchwyt'
+
+      // Łącznik lewy
+      const leftConn = createConnector(loopConnType, 'left', 2)
       leftConn.position.x = (-RAIL_OFFSET + 15 - 15) * SCALE
       leftConn.position.y = connectionY * SCALE
       leftConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -6230,8 +6240,8 @@ function renderDescentLadderConnectors(
       leftConn.userData.pairIndex = pairIndex
       ladderContainer.add(leftConn)
 
-      // Uchwyt prawy
-      const rightConn = createConnector('uchwyt', 'right', 2)
+      // Łącznik prawy
+      const rightConn = createConnector(loopConnType, 'right', 2)
       rightConn.position.x = (RAIL_OFFSET - 15 + 15) * SCALE
       rightConn.position.y = connectionY * SCALE
       rightConn.position.z = (-62.5 + descentLadderZ + geoConfig.connector.uchwytZOffset + connectorZOffset) * SCALE
@@ -9109,6 +9119,30 @@ function generateBOM(): BOMData {
 
   console.log('counts1:', counts1)
   console.log('counts2:', counts2)
+
+  // Łącznik drabiny zejścia.
+  //
+  // renderDescentLadderConnectors() uruchamia się TYLKO dla descentMountType
+  // === 'brackets'. Przy bigfoocie i przy braku mocowania drabina zejścia
+  // nadal wisi pod przełazem na łączniku - widać go na modelu, bo jest częścią
+  // modelu przełazu, a nie osobnym obiektem sceny. Przejście po scenie liczy
+  // obiekty, więc takiego łącznika nie widziało i nie trafiał on ani na listę
+  // elementów, ani do wyceny.
+  //
+  // Kalkulator serwerowy liczy go zawsze, gdy istnieje drabina zejścia
+  // (LadderCalculator.php: 'Uchwyt laczacy - zejscie'), więc obie ścieżki
+  // się rozjeżdżały. Dokładamy go do licznika, a NIE do sceny - dorysowanie
+  // drugiego obiektu zdublowałoby to, co model już pokazuje.
+  //
+  // Liczba 2 to jedna para (lewy + prawy) - tak samo jak liczone są łączniki
+  // strony wejścia (jeden punkt 'lacznik' daje element_laczacy x2).
+  const maDrabineZejscia = Object.keys(counts2).some((k) => k.startsWith('ladder_'))
+  if (maDrabineZejscia && props.descentMountType !== 'brackets') {
+    counts2['element_laczacy'] = {
+      count: (counts2['element_laczacy']?.count || 0) + 2,
+      details: 'zejście'
+    }
+  }
 
   // For safety/platform handrails: convert first X7 to "Początkowy moduł drabiny"
   if (handrailType === 'safety' || handrailType === 'platform') {
