@@ -41,6 +41,11 @@ const state = ref({
   cage: '' as '' | 'no-cage' | 'with-cage',
   wallHeight: 5,
   bracketType: 'short' as 'short' | 'medium' | 'long' | 'none' | 'custom',
+  // Wspornik typu C wybrany w zakladce "Niestandardowe" formularza embed.php
+  // (radia uchwyt_typ_c). Pusty napis = nic nie wybrano i zakladka dziala jak
+  // dotad, czyli jako wycena indywidualna bez modeli na scenie.
+  // Wartosci: '16-26' | '26-36' | '36-46' | '50-60' | '60-70' | '70-80'
+  bracketTypC: '',
   bracketSpacing: 215,
   surfaceType: 'smooth' as 'smooth' | 'rough',
   // Opcje montażu
@@ -96,6 +101,55 @@ const wallHeightWarning = ref('')
 // Flaga: użytkownik ręcznie wybrał 'none' lub 'custom' - okap nie nadpisuje
 const bracketTypeManualOverride = ref(false)
 const showBracketInfo = ref(false)
+
+// ============================================
+// WSPORNIKI TYPU C
+// ============================================
+// Wybierane w zakladce "Niestandardowe" formularza embed.php. W odroznieniu od
+// krotkiego/sredniego/dlugiego to JEDEN element na pozycje, a nie para - cala
+// obsluga tej roznicy siedzi w ThreeCanvas.createWspornik(). Tutaj tlumaczymy
+// tylko zakres z formularza ('16-26') na odleglosc drabiny od sciany w mm,
+// bo to ona wskazuje konkretny model.
+const TYP_C_ODLEGLOSCI: Record<string, number> = {
+  '16-26': 210,
+  '26-36': 310,
+  '36-46': 410,
+  '50-60': 550,
+  '60-70': 650,
+  '70-80': 750
+}
+
+const czyTypC = computed(() =>
+  state.value.bracketType === 'custom' && !!TYP_C_ODLEGLOSCI[state.value.bracketTypC]
+)
+
+const odlegloscTypC = computed(() => TYP_C_ODLEGLOSCI[state.value.bracketTypC] || 215)
+
+// Lista do panelu "Typ wspornika" - kolejnosc jak w cenniku i w nazwach modeli.
+// min/max to granice TRASOWANIA po odleglosci, nie zawsze rowne nazwie: miedzy
+// 46 a 50 cm nie ma zadnego wariantu, wiec wszystko powyzej 460 mm idzie na
+// 50-60. Musi sie to zgadzac z TYP_C_WARIANTY w ThreeCanvas.vue.
+const TYP_C_LISTA: { zakres: string; odleglosc: number; min: number; max: number }[] = [
+  { zakres: '16-26', odleglosc: 210, min: 160, max: 260 },
+  { zakres: '26-36', odleglosc: 310, min: 260, max: 360 },
+  { zakres: '36-46', odleglosc: 410, min: 360, max: 460 },
+  { zakres: '50-60', odleglosc: 550, min: 460, max: 600 },
+  { zakres: '60-70', odleglosc: 650, min: 600, max: 700 },
+  { zakres: '70-80', odleglosc: 750, min: 700, max: 800 }
+]
+
+function wybierzTypC(zakres: string) {
+  state.value.bracketType = 'custom'
+  state.value.bracketTypC = zakres
+  state.value.bracketSpacing = TYP_C_ODLEGLOSCI[zakres]
+  bracketTypeManualOverride.value = true
+}
+
+// Powrot na krotki/sredni/dlugi ma porzucic typ C - inaczej zostalby zapisany
+// w konfiguracji mimo, ze na scenie stoi juz zwykla para wspornikow.
+watch(() => state.value.bracketType, (typ) => {
+  if (typ !== 'custom') state.value.bracketTypC = ''
+})
 
 // Minimalny typ wspornika - bazowany na ociepleniu i okapie
 const minBracketType = computed(() => {
@@ -443,7 +497,12 @@ const threeCanvasProps = computed(() => {
     safetyCageCount: state.value.cage === 'with-cage' ? Math.max(0, ladderConfig.cageHoops + cageCorrection.value) : 0,
     wallHeight: state.value.wallHeight,
     scheme: effectiveScheme,
-    wspornikDistance: state.value.bracketSpacing || 215,
+    // Przy typie C odleglosc wynika z wybranego zakresu, a nie z suwaka -
+    // to ona decyduje w ThreeCanvas, ktory z szesciu modeli wchodzi na scene.
+    wspornikDistance: czyTypC.value
+      ? odlegloscTypC.value
+      : (state.value.bracketSpacing || 215),
+    wspornikRodzina: (czyTypC.value ? 'typ_c' : 'standard') as 'standard' | 'typ_c',
     showWall: show3DWall.value,
     showGround: show3DGround.value,
     showInsulation: show3DInsulation.value,
@@ -461,7 +520,10 @@ const threeCanvasProps = computed(() => {
     // Dodatkowe propsy
     cageClosing: state.value.accessLock || state.value.cageClosing,
     restingPlatform: state.value.restingPlatform,
-    showWsporniki: state.value.bracketType !== 'none' && state.value.bracketType !== 'custom',
+    // "Niestandardowe" bez wybranego typu C to nadal wycena indywidualna
+    // (nic nie renderujemy). Z wybranym typem C - pokazujemy wsporniki.
+    showWsporniki: state.value.bracketType !== 'none'
+      && (state.value.bracketType !== 'custom' || czyTypC.value),
     distanceFromGround: ladderConfig.distanceFromGround || 160,
     // Okap
     eave: state.value.hasEave ? {
@@ -1780,6 +1842,7 @@ interface LadderInOffer {
     wallHeight: number
     bracketType: string
     bracketSpacing: number
+    bracketTypC: string  // zakres wspornika typu C, np. '50-60' (pusty = brak)
     surfaceType: string
     // Opcje montażu
     accessLock: boolean
@@ -1869,6 +1932,7 @@ async function checkUrlAndLoadOffer() {
             wallHeight: lConfig.wallHeight || lConfig.height || 5,
             bracketType: lConfig.bracketType || 'short',
             bracketSpacing: lConfig.bracketSpacing || 1000,
+            bracketTypC: (lConfig as any).bracketTypC || '',
             surfaceType: lConfig.surfaceType || 'smooth',
             accessLock: lConfig.accessLock || false,
             restingPlatform: lConfig.restingPlatform || false,
@@ -1933,6 +1997,8 @@ async function checkUrlAndLoadOffer() {
       if (ladder.bracketType) {
         state.value.bracketType = ladder.bracketType as 'short' | 'medium' | 'long'
       }
+      // Zakres wspornika typu C z zakladki "Niestandardowe"
+      state.value.bracketTypC = (ladder as any).bracketTypC || ''
 
       // Izolacja
       if (ladder.insulationThickness) {
@@ -2002,6 +2068,7 @@ function addLadderToOffer() {
       wallHeight: state.value.wallHeight,
       bracketType: state.value.bracketType,
       bracketSpacing: state.value.bracketSpacing,
+      bracketTypC: state.value.bracketTypC,
       surfaceType: state.value.surfaceType,
       // Opcje montażu
       accessLock: state.value.accessLock,
@@ -2070,6 +2137,7 @@ function editLadderFromOffer(id: number) {
   state.value.wallHeight = cfg.wallHeight
   state.value.bracketType = cfg.bracketType as any
   state.value.bracketSpacing = cfg.bracketSpacing
+  state.value.bracketTypC = (cfg as any).bracketTypC || ''
   state.value.surfaceType = cfg.surfaceType as any
   state.value.accessLock = cfg.accessLock
   state.value.restingPlatform = cfg.restingPlatform
@@ -2506,7 +2574,16 @@ const sciskaneEditData = ref<{
 const wspornikDistanceRanges: Record<string, { min: number; max: number }> = {
   krotki: { min: 160, max: 260 },
   sredni: { min: 260, max: 360 },
-  dlugi: { min: 360, max: 460 }
+  dlugi: { min: 360, max: 460 },
+  // Typ C - zakresy takie, jak w nazwach modeli. Bez tych wpisow wybor typu C
+  // w edycji uchwytu wpadal na fallback 'krotki' i odleglosc byla wciskana
+  // z powrotem w 160-260 mm.
+  typ_c_16_26: { min: 160, max: 260 },
+  typ_c_26_36: { min: 260, max: 360 },
+  typ_c_36_46: { min: 360, max: 460 },
+  typ_c_50_60: { min: 460, max: 600 },   // patrz TYP_C_LISTA - powyzej 460 mm
+  typ_c_60_70: { min: 600, max: 700 },
+  typ_c_70_80: { min: 700, max: 800 }
 }
 
 // Computed property dla aktualnego zakresu suwaka
@@ -2522,10 +2599,48 @@ const globalWspornikDistance = ref(215)
 // Computed type based on distance
 const globalWspornikType = computed(() => {
   const d = globalWspornikDistance.value
+  if (czyTypC.value) return 'typ C ' + zakresTypCDlaOdleglosci(d)
   if (d <= 260) return 'krótki'
   if (d <= 360) return 'średni'
   return 'długi'
 })
+
+/**
+ * Zakres typu C ('50-60') pasujacy do odleglosci w mm.
+ * Granice bierzemy z TYP_C_LISTA, bo nie zawsze wynikaja z samej nazwy
+ * (powyzej 460 mm wchodzi juz 50-60). Kolejnosc na liscie ma znaczenie:
+ * wygrywa pierwszy pasujacy, wiec 460 nalezy jeszcze do 36-46.
+ */
+function zakresTypCDlaOdleglosci(mm: number): string {
+  for (const w of TYP_C_LISTA) {
+    if (mm >= w.min && mm <= w.max) return w.zakres
+  }
+  return mm < TYP_C_LISTA[0].min
+    ? TYP_C_LISTA[0].zakres
+    : TYP_C_LISTA[TYP_C_LISTA.length - 1].zakres
+}
+
+/** Przelacznik przy suwaku: rodzina standardowa <-> typ C. */
+function przelaczTypC() {
+  const d = state.value.bracketSpacing || 215
+
+  if (czyTypC.value) {
+    // Powrot na krotki/sredni/dlugi. Suwak ma tam tylko 160-460, wiec
+    // odleglosc powyzej trzeba sciagnac do zakresu, inaczej zostalaby
+    // wartosc nie do ustawienia z powrotem.
+    state.value.bracketTypC = ''
+    state.value.bracketSpacing = Math.min(d, 460)
+    state.value.bracketType = state.value.bracketSpacing <= 260 ? 'short'
+      : (state.value.bracketSpacing <= 360 ? 'medium' : 'long')
+  } else {
+    state.value.bracketType = 'custom'
+    state.value.bracketTypC = zakresTypCDlaOdleglosci(d)
+  }
+
+  globalWspornikDistance.value = state.value.bracketSpacing
+  threeCanvasRef.value?.setGlobalWspornikDistance(state.value.bracketSpacing, 1)
+  bracketTypeManualOverride.value = true
+}
 
 function setGlobalWspornikDistanceValue(distance: number) {
   globalWspornikDistance.value = distance
@@ -2533,7 +2648,11 @@ function setGlobalWspornikDistanceValue(distance: number) {
   threeCanvasRef.value?.setGlobalWspornikDistance(distance, 1)
 
   // Auto-update bracket type in dropdown
-  if (distance <= 260) {
+  // W trybie typu C suwak wybiera wariant TEJ rodziny - inaczej pierwsze
+  // ruszenie suwakiem zrzucaloby uzytkownika z powrotem na krotki/sredni/dlugi.
+  if (czyTypC.value) {
+    state.value.bracketTypC = zakresTypCDlaOdleglosci(distance)
+  } else if (distance <= 260) {
     state.value.bracketType = 'short'
   } else if (distance <= 360) {
     state.value.bracketType = 'medium'
@@ -3254,10 +3373,23 @@ function applyConfigFromPostMessage(config: LadderConfig) {
 
   // Ustaw bracketSpacing na podstawie bracketType (domyślna wartość dla typu)
   if (config.bracketType === 'custom') {
-    // Niestandardowy wspornik - użyj wartości w cm * 10 = mm
-    // Jeśli brak wartości, użyj 300mm (30cm) jako domyślną
-    state.value.bracketSpacing = config.bracketCustom ? config.bracketCustom * 10 : 300
+    // Zakladka "Niestandardowe" przysyla w bracketCustom zakres wspornika
+    // typu C jako napis ('16-26', '50-60', ...), bo tak nazywaja sie radia
+    // uchwyt_typ_c w embed.php. Wczesniej szlo to prosto w "* 10", co dla
+    // napisu z myslnikiem dawalo NaN - niewidoczne tylko dlatego, ze przy
+    // 'custom' wsporniki i tak nie byly renderowane.
+    const zakres = String(config.bracketCustom ?? '')
+    if (TYP_C_ODLEGLOSCI[zakres]) {
+      state.value.bracketTypC = zakres
+      state.value.bracketSpacing = TYP_C_ODLEGLOSCI[zakres]
+    } else {
+      // Stary wariant: liczba w cm. Zostaje wycena indywidualna bez modeli.
+      state.value.bracketTypC = ''
+      const cm = Number(config.bracketCustom)
+      state.value.bracketSpacing = Number.isFinite(cm) && cm > 0 ? cm * 10 : 300
+    }
   } else if (config.bracketType && !config.bracketSpacing) {
+    state.value.bracketTypC = ''
     const bracketDefaults: Record<string, number> = {
       'short': 215,   // 16-26cm -> środek to 21cm = 210mm
       'medium': 310,  // 26-36cm -> środek to 31cm = 310mm
@@ -3289,6 +3421,14 @@ function sendPostMessageResult() {
     'wspornik_krotki': 'wspornik_16_26',
     'wspornik_sredni': 'wspornik_26_36',
     'wspornik_dlugi': 'wspornik_36_46',
+    // Typ C - klucz z ThreeCanvas jest juz rowny kodowi z cennika, ale
+    // wpisujemy go jawnie, zeby nie zalezec od zachowania mapy dla nieznanych.
+    'wspornik_typ_c_16_26': 'wspornik_typ_c_16_26',
+    'wspornik_typ_c_26_36': 'wspornik_typ_c_26_36',
+    'wspornik_typ_c_36_46': 'wspornik_typ_c_36_46',
+    'wspornik_typ_c_50_60': 'wspornik_typ_c_50_60',
+    'wspornik_typ_c_60_70': 'wspornik_typ_c_60_70',
+    'wspornik_typ_c_70_80': 'wspornik_typ_c_70_80',
     // Poręcze
     'handrail': 'porece_asekuracyjne',
     'handrail_connector': 'lacznik_poreczy',
@@ -3917,7 +4057,14 @@ function setSciskaneConnType(type: string) {
 const wspornikDefaultDistances: Record<string, number> = {
   krotki: 215,
   sredni: 315,
-  dlugi: 415
+  dlugi: 415,
+  // Typ C - srodek zakresu z nazwy modelu
+  typ_c_16_26: 210,
+  typ_c_26_36: 310,
+  typ_c_36_46: 410,
+  typ_c_50_60: 550,
+  typ_c_60_70: 650,
+  typ_c_70_80: 750
 }
 
 function setSciskaneWspornikType(type: string) {
@@ -4683,6 +4830,16 @@ function toggleCageClosing() {
                       @click="setSciskaneWspornikType('dlugi')"
                     >Długi</button>
                   </div>
+                  <!-- Typ C - jeden element na pozycje zamiast pary L+P -->
+                  <div class="wspornik-types wspornik-types-c">
+                    <button
+                      v-for="w in TYP_C_LISTA"
+                      :key="w.zakres"
+                      class="wspornik-type-btn"
+                      :class="{ active: sciskaneEditData.wspornikType === 'typ_c_' + w.zakres.replace('-', '_') }"
+                      @click="setSciskaneWspornikType('typ_c_' + w.zakres.replace('-', '_'))"
+                    >C {{ w.zakres }}</button>
+                  </div>
                 </div>
 
                 <!-- Slider tylko w trybie debug -->
@@ -4726,13 +4883,19 @@ function toggleCageClosing() {
                   type="range"
                   class="global-slider"
                   min="160"
-                  max="460"
+                  :max="czyTypC ? 800 : 460"
                   step="5"
                   :value="globalWspornikDistance"
                   @input="setGlobalWspornikDistanceValue(Number(($event.target as HTMLInputElement).value))"
                 >
                 <span class="global-value">{{ globalWspornikDistance }} mm</span>
                 <span class="global-type">{{ globalWspornikType }}</span>
+                <button
+                  class="global-typc-btn"
+                  :class="{ active: czyTypC }"
+                  @click="przelaczTypC"
+                  :title="czyTypC ? 'Wroc na wsporniki krotki/sredni/dlugi (160-460 mm)' : 'Przelacz na wsporniki typu C (160-800 mm)'"
+                >Typ C</button>
               </div>
 
               <!-- Panel rysunku technicznego (góra środek) - ukryty w customer/embed mode -->
@@ -6916,6 +7079,24 @@ function toggleCageClosing() {
                   Długi (50cm)
                 </label>
               </div>
+
+              <!-- Wsporniki typu C - jeden element na pozycje zamiast pary.
+                   Rozmiar wynika z zakresu, wiec wybor od razu ustawia
+                   odleglosc drabiny od sciany. -->
+              <label class="bracket-group-label">Typ C (pojedynczy)</label>
+              <div class="bracket-type-selector bracket-type-selector-c">
+                <label v-for="w in TYP_C_LISTA" :key="w.zakres">
+                  <input
+                    type="radio"
+                    name="wspornikTypC"
+                    :value="w.zakres"
+                    :checked="czyTypC && state.bracketTypC === w.zakres"
+                    @change="wybierzTypC(w.zakres)"
+                  />
+                  {{ w.zakres }} cm
+                </label>
+              </div>
+
               <p v-if="minBracketType !== 'short'" class="bracket-hint">
                 Min. wymagany: {{ minBracketType === 'medium' ? 'Średni' : 'Długi' }}
                 ({{ state.insulationThickness > 0 ? 'ocieplenie' : '' }}{{ state.hasEave ? ' okap' : '' }})
@@ -9084,6 +9265,11 @@ body {
   justify-content: center;
 }
 
+/* Szesc zakresow typu C - osobny rzad pod krotki/sredni/dlugi */
+.wspornik-types-c {
+  margin-top: 6px;
+}
+
 .wspornik-type-btn {
   padding: 10px 16px;
   background: linear-gradient(145deg, #2a2f3a 0%, #1e222a 100%);
@@ -9535,6 +9721,25 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Przelacznik rodziny wspornikow przy suwaku odleglosci */
+.global-typc-btn {
+  margin-left: 10px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  color: #cfd6e4;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.global-typc-btn:hover { background: rgba(255,255,255,0.12); }
+.global-typc-btn.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
 }
 
 #globalSettingsPanel.with-cage {
@@ -12713,6 +12918,25 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Typ C ma szesc zakresow - w kolumnie zajmowalyby pol panelu,
+   wiec ukladamy je w dwie kolumny. */
+.bracket-type-selector-c {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.bracket-type-selector-c label {
+  flex: 1 1 calc(50% - 4px);
+}
+
+.bracket-group-label {
+  display: block;
+  margin: 12px 0 6px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
 }
 
 .bracket-type-selector label {

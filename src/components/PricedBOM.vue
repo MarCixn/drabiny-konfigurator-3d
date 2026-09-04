@@ -211,6 +211,15 @@ const codeMapping: Record<string, string> = {
   'wspornik_krotki': 'wspornik_16_26',
   'wspornik_sredni': 'wspornik_26_36',
   'wspornik_dlugi': 'wspornik_36_46',
+  // Typ C - klucz z ThreeCanvas powstaje jako 'wspornik_' + typ, wiec jest juz
+  // identyczny z kodem w cenniku. Wpisujemy go jawnie, zeby nie polegac na tym,
+  // czy mapa przepuszcza nieznane klucze bez zmiany.
+  'wspornik_typ_c_16_26': 'wspornik_typ_c_16_26',
+  'wspornik_typ_c_26_36': 'wspornik_typ_c_26_36',
+  'wspornik_typ_c_36_46': 'wspornik_typ_c_36_46',
+  'wspornik_typ_c_50_60': 'wspornik_typ_c_50_60',
+  'wspornik_typ_c_60_70': 'wspornik_typ_c_60_70',
+  'wspornik_typ_c_70_80': 'wspornik_typ_c_70_80',
 
   // Poręcze
   'handrail': 'porece_asekuracyjne',

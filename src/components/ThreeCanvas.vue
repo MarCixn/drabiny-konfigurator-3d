@@ -26,6 +26,10 @@ const props = defineProps<{
   hasHandrails?: boolean  // Czy renderować poręcze (+1.1m)
   distanceFromGround?: number  // in mm, default 160
   showWsporniki?: boolean  // Show/hide wspornik models (default true)
+  // Rodzina wspornikow: 'standard' = krotki/sredni/dlugi (para na kazdej
+  // pozycji), 'typ_c' = wsporniki typu C (jeden element na pozycje). Wariant
+  // rozmiarowy w obu przypadkach wynika z wspornikDistance.
+  wspornikRodzina?: 'standard' | 'typ_c'
   eave?: { height: number; depth: number } | null  // Eave/overhang at top of wall
   atticPlatformDistance?: number  // Dystans podest-attyka w mm (dla attyki)
   atticWallHeight?: number  // Wysokość ściany strona zejścia w mm (dla attyki)
@@ -176,8 +180,105 @@ const RAIL_OFFSET = 265  // Distance from center to rail inner edge
 const wspornikDefaultDistances: Record<string, number> = {
   'krotki': 215,
   'sredni': 315,
-  'dlugi': 415
+  'dlugi': 415,
+  // Typ C - jeden model na pozycje, srodek zakresu z nazwy
+  'typ_c_16_26': 210,
+  'typ_c_26_36': 310,
+  'typ_c_36_46': 410,
+  'typ_c_50_60': 550,
+  'typ_c_60_70': 650,
+  'typ_c_70_80': 750
 }
+
+// ============================================
+// WSPORNIKI TYPU C
+// ============================================
+// Rodzina rownolegla do krotki/sredni/dlugi. Dwie roznice, ktore trzeba miec
+// z tylu glowy przy czytaniu reszty kodu:
+//
+//  1. To JEDEN model na pozycje, a nie para lewy+prawy. Realizujemy to tak,
+//     ze createWspornik() dla strony 'right' zwraca null - wszystkie 14 miejsc
+//     wywolania jest osloniete warunkiem "if (rightWspornik)", wiec same
+//     przestaja cokolwiek dodawac. Jedyny model idzie na srodek drabiny
+//     (extraXOffset = RAIL_OFFSET znosi -RAIL_OFFSET z miejsca wywolania).
+//
+//  2. Rozmiar wynika z odleglosci drabiny od sciany ("Odl. wspornikow"),
+//     a zakresy sa dokladnie takie, jak w nazwach modeli.
+//
+// Modele przyszly z CAD-u jako OBJ w milimetrach, odsuniete od srodka ukladu
+// (bbox zaczyna sie w okolicach x=1495 mm), dlatego przy ladowaniu centrujemy
+// je na wlasnym bounding boksie - patrz loadWspornikiTypC().
+// Pole "przesuniecie" to dosuniecie modelu w mm wzdluz osi patrzenia na sciane:
+// wartosc DODATNIA idzie w przod (od sciany), UJEMNA w tyl (do sciany).
+// Kazdy wariant ma swoja, bo modele roznia sie dlugoscia zasiegu i centrowanie
+// na bounding boksie zostawia inna nadwyzke. Dla drabiny 2 znak jest odwracany
+// w createWspornik(), tak samo jak przy pozostalych wspornikach.
+const TYP_C_WARIANTY: { typ: string; plik: string; min: number; max: number; przesuniecie: number; etykieta: string }[] = [
+  { typ: 'typ_c_16_26', plik: 'wspornik_typ_c_16-26.glb', min: 160, max: 260, przesuniecie:    4, etykieta: 'Typ C 16-26 cm' },
+  { typ: 'typ_c_26_36', plik: 'wspornik_typ_c_26-36.glb', min: 260, max: 360, przesuniecie:  -45, etykieta: 'Typ C 26-36 cm' },
+  { typ: 'typ_c_36_46', plik: 'wspornik_typ_c_36-46.glb', min: 360, max: 460, przesuniecie:  -95, etykieta: 'Typ C 36-46 cm' },
+  // Dolna granica 460, a nie 500: miedzy 46 a 50 cm nie ma zadnego wariantu,
+  // wiec wszystko powyzej 460 mm idzie juz na 50-60. Sama nazwa handlowa
+  // ("50-60") zostaje bez zmian - przesuwa sie tylko granica trasowania.
+  { typ: 'typ_c_50_60', plik: 'wspornik_typ_c_50-60.glb', min: 460, max: 600, przesuniecie: -166, etykieta: 'Typ C 50-60 cm' },
+  { typ: 'typ_c_60_70', plik: 'wspornik_typ_c_60-70.glb', min: 600, max: 700, przesuniecie: -216, etykieta: 'Typ C 60-70 cm' },
+  { typ: 'typ_c_70_80', plik: 'wspornik_typ_c_70-80.glb', min: 700, max: 800, przesuniecie: -266, etykieta: 'Typ C 70-80 cm' }
+]
+
+/** Dosuniecie w mm dla danego wariantu typu C (dodatnie = w przod). */
+function typCPrzesuniecie(typ: string): number {
+  const w = TYP_C_WARIANTY.find((x) => x.typ === typ)
+  return w ? w.przesuniecie : 0
+}
+
+function isTypC(typ: string): boolean {
+  return typeof typ === 'string' && typ.indexOf('typ_c_') === 0
+}
+
+/**
+ * Wariant typu C pasujacy do zadanej odleglosci od sciany (mm).
+ *
+ * Zakresy nie pokrywaja calej skali: miedzy 460 a 500 mm jest dziura, bo po
+ * wariancie 36-46 nastepny jest dopiero 50-60. Suwak chodzi od 160 do 800,
+ * wiec trzeba tam trafic i cos wybrac - bierzemy wariant NAJBLIZSZY, czyli
+ * ten, do ktorego zakresu jest najmniej brakujacych milimetrow.
+ */
+function typCDlaOdleglosci(distanceMm: number): string {
+  let najlepszy = TYP_C_WARIANTY[0]
+  let najmniejszaOdleglosc = Infinity
+
+  for (const w of TYP_C_WARIANTY) {
+    if (distanceMm >= w.min && distanceMm <= w.max) return w.typ
+    const odchylka = distanceMm < w.min ? w.min - distanceMm : distanceMm - w.max
+    if (odchylka < najmniejszaOdleglosc) {
+      najmniejszaOdleglosc = odchylka
+      najlepszy = w
+    }
+  }
+  return najlepszy.typ
+}
+
+// Korekta polozenia wspornikow typu C w poprzek i w pionie (mm), wspolna dla
+// wszystkich wariantow. Dosuniecie do sciany jest osobne dla kazdego rozmiaru
+// i siedzi w TYP_C_WARIANTY.przesuniecie.
+const TYP_C_KOREKTA = { x: 0, y: 0 }
+
+// Dodatkowe obroty typu C wzgledem ustawienia wspornika krotkiego. Modele
+// przyszly z CAD-u ulozone inaczej niz reszta, wiec dokladamy im cwierc obrotu
+// w bok (os Y) i cwierc w osi X. Obie liczby dzialaja niezaleznie - zmiana
+// znaku obraca w druga strone, wyzerowanie znosi dany obrot.
+// Ustawienie modelu typu C sklada sie z dwoch krokow i tak tez jest zapisane,
+// bo w tej postaci daje sie je poprawiac patrzac na scene:
+//
+//  1. rotacja bazowa (extraRot* w createWspornik) - jak przy wsporniku krotkim,
+//     tyle ze z cwiercia obrotu w bok, bo modele przyszly z CAD-u inaczej ulozone,
+//  2. korekta ponizej, wokol osi SWIATA, nazwana tak, jak sie ja oglada na
+//     modelu traktowanym jak szescian: "gorna sciana do tylu", a potem
+//     "przednia sciana w lewo".
+//
+// Zmiana znaku obraca dany krok w druga strone, wyzerowanie go znosi.
+const TYP_C_GORA_DO_TYLU = -Math.PI * 0.5
+const TYP_C_PRZOD_W_LEWO = -Math.PI * 0.5
 
 // Geometry configuration for each ladder (1 = front, 2 = back for attic)
 const ladderGeometryConfig: Record<number, {
@@ -413,6 +514,9 @@ let sciskaneHandles1: Array<{
   connType: string
   wspornikType: string
   wspornikDistance: number
+  // true = typ ustawiony recznie w oknie "Edytuj uchwyty". Taki uchwyt nie jest
+  // juz sprowadzany do rodziny wspornikow drabiny - patrz typWspornikaUchwytu().
+  wspornikTypeManual?: boolean
   autoAdded?: boolean
   isReplacement?: boolean
   replacesType?: 'joint' | 'midRungBracket' | 'sciskane'
@@ -438,6 +542,9 @@ let sciskaneHandles2: Array<{
   connType: string
   wspornikType: string
   wspornikDistance: number
+  // true = typ ustawiony recznie w oknie "Edytuj uchwyty". Taki uchwyt nie jest
+  // juz sprowadzany do rodziny wspornikow drabiny - patrz typWspornikaUchwytu().
+  wspornikTypeManual?: boolean
   autoAdded?: boolean
   isReplacement?: boolean
   replacesType?: 'joint' | 'midRungBracket' | 'sciskane'
@@ -560,6 +667,7 @@ const loadedModels: {
   wspornikSredniPrawy: THREE.Group | null
   wspornikDlugiLewy: THREE.Group | null
   wspornikDlugiPrawy: THREE.Group | null
+  wspornikTypC: Record<string, THREE.Group | null>
   podestKrotki: THREE.Group | null
   podestSpoczynkowy: THREE.Group | null
   bigfoot: THREE.Group | null
@@ -584,6 +692,7 @@ const loadedModels: {
   wspornikSredniPrawy: null,
   wspornikDlugiLewy: null,
   wspornikDlugiPrawy: null,
+  wspornikTypC: {},
   podestKrotki: null,
   podestSpoczynkowy: null,
   bigfoot: null,
@@ -637,6 +746,10 @@ watch(() => [
   props.wallHeight,
   props.scheme,
   props.wspornikDistance,
+  // Bez tego przejscie na typ C nie przerysowywalo sceny, gdy odleglosc
+  // wychodzila taka sama jak dotad: typ C 26-36 to 310 mm, czyli dokladnie
+  // tyle, co wspornik sredni, a 36-46 to 410 mm, czyli tyle co dlugi.
+  props.wspornikRodzina,
   props.showWall,
   props.showGround,
   props.showInsulation,
@@ -714,6 +827,49 @@ function mapSchemeToHandrailType(scheme: string): string {
   return mapping[scheme] || 'safety'
 }
 
+/**
+ * Typ wspornika wynikajacy z samych propsow: rodzine wskazuje uzytkownik,
+ * rozmiar bierze sie z odleglosci od sciany.
+ *
+ * Osobna funkcja, bo syncPropsToState() potrzebuje tej wartosci JUZ przy
+ * wczytywaniu uchwytow sciskanych - czyli zanim ustawi defaultWspornik1.
+ */
+function typWspornikaZProps(): string {
+  const odleglosc = props.wspornikDistance
+  if (!(odleglosc > 0)) return defaultWspornik1
+  return props.wspornikRodzina === 'typ_c'
+    ? typCDlaOdleglosci(odleglosc)
+    : getWspornikTypeFromDistance(odleglosc)
+}
+
+/**
+ * Typ wspornika dla uchwytu sciskanego.
+ *
+ * Uchwyty powstaja w kilkunastu miejscach - auto-dodawane przy kolizjach,
+ * dodawane recznie, przywracane z ukrytych, odtwarzane z zapisanej
+ * konfiguracji - i nie kazde z nich wie, jaka rodzine wspornikow wybral
+ * uzytkownik. Zamiast poprawiac to w kazdym z osobna, rozstrzygamy w jednym
+ * miejscu: gdy drabina stoi na wspornikach typu C, uchwyt tez dostaje typ C
+ * w rozmiarze pasujacym do swojej odleglosci od sciany.
+ */
+function typWspornikaUchwytu(
+  handle: { wspornikType: string; wspornikDistance?: number; wspornikTypeManual?: boolean },
+  ladderNum: number
+): string {
+  const typ = handle.wspornikType
+  if (!typ || typ === 'none') return typ
+
+  // Typ ustawiony recznie w oknie "Edytuj uchwyty" zostaje taki, jaki jest.
+  if (handle.wspornikTypeManual) return typ
+
+  const rodzinaTypC = isTypC(ladderNum === 1 ? defaultWspornik1 : defaultWspornik2)
+  if (!rodzinaTypC || isTypC(typ)) return typ
+
+  const odleglosc = handle.wspornikDistance
+    || (ladderNum === 1 ? globalWspornikDistance1 : globalWspornikDistance2)
+  return typCDlaOdleglosci(odleglosc)
+}
+
 function syncPropsToState() {
   // Initialize sciskaneHandles from props if provided (for view mode)
   if (props.initialSciskaneHandles && props.initialSciskaneHandles.length > 0 && sciskaneHandles1.length === 0) {
@@ -721,8 +877,11 @@ function syncPropsToState() {
       sciskaneHandles1.push({
         offsetFromBottom: handle.offsetFromBottom,
         connType: handle.connType,
-        wspornikType: 'krotki',
-        wspornikDistance: 215,
+        // Bylo tu zahardkodowane 'krotki' / 215, przez co uchwyty ściskane
+        // wczytane z zapisanej konfiguracji nie znaly ani typu C, ani zadnego
+        // innego ustawienia niz krotki.
+        wspornikType: typWspornikaZProps(),
+        wspornikDistance: props.wspornikDistance > 0 ? props.wspornikDistance : 215,
         autoAdded: false  // Mark as manually added
       })
     }
@@ -762,7 +921,8 @@ function syncPropsToState() {
   console.log('[ThreeCanvas] syncPropsToState wspornikDistance:', props.wspornikDistance, 'current globalWspornikDistance1:', globalWspornikDistance1)
   if (props.wspornikDistance > 0) {
     globalWspornikDistance1 = props.wspornikDistance
-    defaultWspornik1 = getWspornikTypeFromDistance(props.wspornikDistance)
+    // Rodzine wybiera uzytkownik, rozmiar wynika z odleglosci od sciany.
+    defaultWspornik1 = typWspornikaZProps()
     updateGlobalWspornikDistance(1, props.wspornikDistance)
     console.log('[ThreeCanvas] Updated globalWspornikDistance1 to:', globalWspornikDistance1)
   }
@@ -1714,7 +1874,10 @@ function setupControls() {
 // MODEL LOADING
 // ============================================
 function loadModels() {
-  const modelsToLoad = 27
+  // Licznik musi zgadzac sie z liczba faktycznie ladowanych plikow: warunek
+  // nizej jest ">=", wiec zanizona wartosc powoduje, ze createLadder() odpala
+  // sie ponownie przy KAZDYM kolejnym zaladowanym modelu.
+  const modelsToLoad = 27 + TYP_C_WARIANTY.length
   let modelsLoadedCount = 0
 
   function onModelLoaded() {
@@ -1799,10 +1962,36 @@ function loadModels() {
   loadModel('wspornik_sredni_prawy.glb', (m) => { loadedModels.wspornikSredniPrawy = m })
   loadModel('wspornik_dlugi_lewy.glb', (m) => { loadedModels.wspornikDlugiLewy = m })
   loadModel('wspornik_dlugi_prawy.glb', (m) => { loadedModels.wspornikDlugiPrawy = m })
+  loadWspornikiTypC(loadModel)
   loadModel('podest_krotki.glb', (m) => { loadedModels.podestKrotki = m })
   loadModel('podest_spoczynkowy.glb', (m) => { loadedModels.podestSpoczynkowy = m })
   loadModel('bigfoot.glb', (m) => { loadedModels.bigfoot = m })
   loadModel('prowadnica_bigfoot.glb', (m) => { loadedModels.prowadnicaBigfoot = m })
+}
+
+/**
+ * Wsporniki typu C - szesc wariantow rozmiarowych.
+ *
+ * Modele pochodza prosto z CAD-u (OBJ -> GLB) i maja geometrie odsunieta od
+ * srodka ukladu wspolrzednych: bounding box zaczyna sie w okolicach x = 1495 mm.
+ * Gdyby wstawic je tak jak sa, wspornik wyladowalby poltora metra obok drabiny,
+ * dlatego kazdy model centrujemy na wlasnym bounding boksie zaraz po zaladowaniu.
+ * Dzieki temu punktem odniesienia jest srodek elementu i dalsze dosuwanie
+ * sprowadza sie do trzech liczb w TYP_C_KOREKTA.
+ */
+function loadWspornikiTypC(loadModel: (filename: string, onSuccess: (model: THREE.Group) => void) => void) {
+  for (const wariant of TYP_C_WARIANTY) {
+    loadModel(wariant.plik, (m: THREE.Group) => {
+      const srodek = new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3())
+      m.position.sub(srodek)
+
+      // Owijamy w grupe, zeby przesuniecie centrujace nie gubilo sie przy
+      // clone() i przy pozniejszym ustawianiu position/rotation na kopii.
+      const grupa = new THREE.Group()
+      grupa.add(m)
+      loadedModels.wspornikTypC[wariant.typ] = grupa
+    })
+  }
 }
 
 // ============================================
@@ -2060,7 +2249,12 @@ function getWspornikTypeFromDistance(distanceMm: number): string {
 }
 
 function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
-  const type = getWspornikTypeFromDistance(distanceMm)
+  // Gdy drabina stoi na wspornikach typu C, zmiana odleglosci ma wybrac inny
+  // wariant TEJ rodziny, a nie zrzucic uzytkownika z powrotem na "krotki".
+  const biezacy = (ladderNum === 1) ? defaultWspornik1 : defaultWspornik2
+  const type = isTypC(biezacy)
+    ? typCDlaOdleglosci(distanceMm)
+    : getWspornikTypeFromDistance(distanceMm)
 
   if (ladderNum === 1) {
     globalWspornikDistance1 = distanceMm
@@ -2208,7 +2402,12 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   // For ladder 2, swap sides for model selection
   const effectiveSide = (ladderNum === 2) ? (side === 'left' ? 'right' : 'left') : side
 
-  if (type === 'krotki' && loadedModels.wspornikKrotki) {
+  // Typ C: jeden model na pozycje, nie para. Strona 'right' nie tworzy nic -
+  // wszystkie miejsca wywolania sprawdzaja wynik, wiec wystarczy tu zwrocic null.
+  if (isTypC(type)) {
+    if (side === 'right') return null
+    sourceModel = loadedModels.wspornikTypC[type] || null
+  } else if (type === 'krotki' && loadedModels.wspornikKrotki) {
     sourceModel = loadedModels.wspornikKrotki
   } else if (type === 'sredni') {
     // Swap model for sredni based on effectiveSide
@@ -2239,7 +2438,14 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   let extraRotY = 0
   let extraRotZ = 0
 
-  if (type === 'dlugi' || type === 'sredni') {
+  if (isTypC(type)) {
+    // Obroty jak przy wsporniku krotkim - typ C jest montowany tak samo,
+    // tyle ze jednym elementem na srodku zamiast pary przy szczeblinach -
+    // plus cwierc obrotu w bok, bo modele przyszly inaczej ulozone.
+    extraRotX = Math.PI * -0.5
+    extraRotY = Math.PI * 0.5
+    extraRotZ = 0
+  } else if (type === 'dlugi' || type === 'sredni') {
     extraRotX = Math.PI * 0.5  // 90° forward
     if (type === 'dlugi' && effectiveSide === 'right') {
       extraRotY = Math.PI  // 180° flip for right long
@@ -2264,10 +2470,26 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
 
   model.rotation.set(rot.x + extraRotX, rot.y + extraRotY, rot.z + extraRotZ)
 
+  if (isTypC(type)) {
+    // Korekta ulozenia modelu, opisana tak, jak sie ja oglada na scenie:
+    // najpierw gorna sciana idzie do tylu, potem przednia w lewo.
+    // Obracamy wokol osi SWIATA i po ustawieniu rotacji bazowej, wiec obie
+    // liczby czyta sie niezaleznie od tego, co siedzi wyzej w extraRot*.
+    // Zmiana znaku obraca w druga strone, wyzerowanie znosi dany krok.
+    model.rotateOnWorldAxis(new THREE.Vector3(1, 0, 0), TYP_C_GORA_DO_TYLU)
+    model.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), TYP_C_PRZOD_W_LEWO)
+  }
+
   // Z offset - średni bliżej ściany o 50mm, długi o 100mm
   // Dla drabiny 2: odwrócona logika (dodatnie wartości)
   let baseZOffset = 0
-  if (ladderNum === 1) {
+  if (isTypC(type)) {
+    // Zasieg typu C siedzi w samym modelu (kazdy wariant jest innej dlugosci),
+    // wiec zamiast stalych -101 / -51 jak przy dlugim i srednim kazdy wariant
+    // ma wlasne dosuniecie - patrz TYP_C_WARIANTY.przesuniecie.
+    const przes = typCPrzesuniecie(type)
+    baseZOffset = (ladderNum === 1) ? przes : -przes
+  } else if (ladderNum === 1) {
     baseZOffset = (type === 'dlugi') ? -101 : ((type === 'sredni') ? -51 : 0)
   } else {
     // Drabina 2 - odwrócone
@@ -2275,12 +2497,18 @@ function createWspornik(type: string, side: string, ladderNum: number, isMidRung
   }
 
   // Calculate X and Y offsets
-  const extraXOffset = (type === 'dlugi') ? -3 : ((type === 'sredni') ? -4 : ((type === 'krotki') ? -1.5 : 0))
-  const extraYOffset = (type === 'dlugi')
-    ? (effectiveSide === 'right' ? -19.5 : -19)
-    : ((type === 'sredni')
-      ? (effectiveSide === 'right' ? -20 : -20)
-      : 0)
+  // Typ C: miejsca wywolania ustawiaja x = -RAIL_OFFSET (lewa szczeblina),
+  // wiec dodanie +RAIL_OFFSET sprowadza pojedynczy wspornik na srodek drabiny.
+  const extraXOffset = isTypC(type)
+    ? RAIL_OFFSET + TYP_C_KOREKTA.x
+    : ((type === 'dlugi') ? -3 : ((type === 'sredni') ? -4 : ((type === 'krotki') ? -1.5 : 0)))
+  const extraYOffset = isTypC(type)
+    ? TYP_C_KOREKTA.y
+    : ((type === 'dlugi')
+      ? (effectiveSide === 'right' ? -19.5 : -19)
+      : ((type === 'sredni')
+        ? (effectiveSide === 'right' ? -20 : -20)
+        : 0))
 
   model.userData.isWspornik = true
   model.userData.wspornikType = type
@@ -5238,12 +5466,14 @@ function renderSciskaneHandles() {
 
     // Wsporniki for sciskane
     if (handle.wspornikType && handle.wspornikType !== 'none') {
-      const customDistance = handle.wspornikDistance || wspornikDefaultDistances[handle.wspornikType]
-      const defaultDist = wspornikDefaultDistances[handle.wspornikType]
+      // Rodzine rozstrzygamy w jednym miejscu - patrz typWspornikaUchwytu()
+      const typUchwytu = typWspornikaUchwytu(handle, 1)
+      const customDistance = handle.wspornikDistance || wspornikDefaultDistances[typUchwytu]
+      const defaultDist = wspornikDefaultDistances[typUchwytu]
       const distanceOffset = customDistance - defaultDist
       const distanceZOffset = -distanceOffset
 
-      const leftWsp = createWspornik(handle.wspornikType, 'left', 1, false)
+      const leftWsp = createWspornik(typUchwytu, 'left', 1, false)
       if (leftWsp) {
         leftWsp.position.x = (-RAIL_OFFSET + leftWsp.userData.extraXOffset) * SCALE
         leftWsp.position.y = (yPos + leftWsp.userData.extraYOffset) * SCALE
@@ -5256,7 +5486,7 @@ function renderSciskaneHandles() {
         sciskanePlacedObjects.push(leftWsp)
       }
 
-      const rightWsp = createWspornik(handle.wspornikType, 'right', 1, false)
+      const rightWsp = createWspornik(typUchwytu, 'right', 1, false)
       if (rightWsp) {
         rightWsp.position.x = (RAIL_OFFSET - rightWsp.userData.extraXOffset) * SCALE
         rightWsp.position.y = (yPos + rightWsp.userData.extraYOffset) * SCALE
@@ -5307,12 +5537,14 @@ function renderSciskaneHandles() {
 
       // Wsporniki for sciskane handles on ladder 2
       if (handle.wspornikType && handle.wspornikType !== 'none') {
-        const customDistance = handle.wspornikDistance || wspornikDefaultDistances[handle.wspornikType]
-        const defaultDist = wspornikDefaultDistances[handle.wspornikType]
+        // Rodzine rozstrzygamy w jednym miejscu - patrz typWspornikaUchwytu()
+        const typUchwytu = typWspornikaUchwytu(handle, 2)
+        const customDistance = handle.wspornikDistance || wspornikDefaultDistances[typUchwytu]
+        const defaultDist = wspornikDefaultDistances[typUchwytu]
         const distanceOffset = customDistance - defaultDist
         const distanceZOffset = distanceOffset  // Positive for ladder 2 (opposite direction)
 
-        const leftWsp = createWspornik(handle.wspornikType, 'left', 2, false)
+        const leftWsp = createWspornik(typUchwytu, 'left', 2, false)
         if (leftWsp) {
           leftWsp.position.x = (-RAIL_OFFSET + leftWsp.userData.extraXOffset) * SCALE
           leftWsp.position.y = (yPos + leftWsp.userData.extraYOffset) * SCALE
@@ -5325,7 +5557,7 @@ function renderSciskaneHandles() {
           sciskanePlacedObjects.push(leftWsp)
         }
 
-        const rightWsp = createWspornik(handle.wspornikType, 'right', 2, false)
+        const rightWsp = createWspornik(typUchwytu, 'right', 2, false)
         if (rightWsp) {
           rightWsp.position.x = (RAIL_OFFSET - rightWsp.userData.extraXOffset) * SCALE
           rightWsp.position.y = (yPos + rightWsp.userData.extraYOffset) * SCALE
@@ -8227,7 +8459,11 @@ function getWspornikTypeForDistance(distanceMm: number): string {
 }
 
 function setGlobalWspornikDistance(distanceMm: number, ladderNum: number = 1) {
-  const newType = getWspornikTypeForDistance(distanceMm)
+  // Jak wyzej - typ C zostaje typem C, zmienia sie tylko wariant rozmiarowy.
+  const biezacyTyp = (ladderNum === 1) ? defaultWspornik1 : defaultWspornik2
+  const newType = isTypC(biezacyTyp)
+    ? typCDlaOdleglosci(distanceMm)
+    : getWspornikTypeForDistance(distanceMm)
 
   if (ladderNum === 1) {
     globalWspornikDistance1 = distanceMm
@@ -8545,7 +8781,14 @@ function updateSciskaneHandle(offsetFromBottom: number, ladderNum: number, updat
 
   if (handle) {
     if (updates.connType !== undefined) handle.connType = updates.connType
-    if (updates.wspornikType !== undefined) handle.wspornikType = updates.wspornikType
+    if (updates.wspornikType !== undefined) {
+      handle.wspornikType = updates.wspornikType
+      // Wybor z okna "Edytuj uchwyty" jest decyzja czlowieka i ma sie utrzymac.
+      // Bez tego znacznika typWspornikaUchwytu() sprowadzalaby uchwyt z powrotem
+      // do rodziny drabiny - czyli krotki/sredni/dlugi zamienialyby sie
+      // z powrotem na typ C zaraz po kliknieciu.
+      handle.wspornikTypeManual = true
+    }
     if (updates.wspornikDistance !== undefined) handle.wspornikDistance = updates.wspornikDistance
 
     createLadder()
