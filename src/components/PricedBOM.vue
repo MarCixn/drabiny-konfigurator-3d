@@ -134,6 +134,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { useApi } from '@/composables'
+import { KODY_PRODUKTOW as codeMapping } from '@/services/wsporniki'
 
 // ============================================================================
 // Props & Emits
@@ -190,58 +191,7 @@ const items = ref<PricedBOMItem[]>([])
 // Price Mapping (BOM id -> product code)
 // ============================================================================
 
-// Mapping BOM item.name (from ThreeCanvas) to database product codes
-const codeMapping: Record<string, string> = {
-  // Drabiny (moduły)
-  'ladder_x7': 'drabina_powielana_7',
-  'ladder_x8': 'drabina_powielana_7', // X8 uses same price as X7
-  'ladder_x1': 'drabina_koncowa_1',
-  'ladder_x2': 'drabina_koncowa_2',
-  'ladder_x3': 'drabina_koncowa_3',
-  'ladder_x4': 'drabina_koncowa_4',
-  'ladder_x5': 'drabina_koncowa_5',
-  'ladder_x6': 'drabina_koncowa_6',
-
-  // Łączniki i uchwyty
-  'connector_uchwyt': 'uchwyt_montazowo_laczacy',
-  'connector_sciskany': 'uchwyt_montazowo_sciskany',
-  'module_connector': 'element_laczacy',
-
-  // Wsporniki
-  'wspornik_krotki': 'wspornik_16_26',
-  'wspornik_sredni': 'wspornik_26_36',
-  'wspornik_dlugi': 'wspornik_36_46',
-  // Typ C - klucz z ThreeCanvas powstaje jako 'wspornik_' + typ, wiec jest juz
-  // identyczny z kodem w cenniku. Wpisujemy go jawnie, zeby nie polegac na tym,
-  // czy mapa przepuszcza nieznane klucze bez zmiany.
-  'wspornik_typ_c_16_26': 'wspornik_typ_c_16_26',
-  'wspornik_typ_c_26_36': 'wspornik_typ_c_26_36',
-  'wspornik_typ_c_36_46': 'wspornik_typ_c_36_46',
-  'wspornik_typ_c_50_60': 'wspornik_typ_c_50_60',
-  'wspornik_typ_c_60_70': 'wspornik_typ_c_60_70',
-  'wspornik_typ_c_70_80': 'wspornik_typ_c_70_80',
-
-  // Poręcze
-  'handrail': 'porece_asekuracyjne',
-  'handrail_connector': 'lacznik_poreczy',
-
-  // Kosz bezpieczeństwa
-  'cage_hoop': 'obrecz_kosza',
-  'cage_closing': 'blokada_dostepu',
-  'angle_bracket_x2': 'katownik_2_otworowy',
-  'angle_bracket_x3': 'katownik_3_otworowy',
-  'angle_bracket_x4': 'katownik_4_otworowy',
-
-  // Podest
-  'platform': 'podest_z_poreczami',
-  'resting_platform': 'podest_spoczynkowy',
-
-  // Attyka i montaż
-  'attic_passage': 'przejscie_attyka',
-  'bigfoot': 'bigfoot',
-  'bigfoot_guide': 'prowadnica_bigfoot'
-}
-
+// Mapa kodow: services/wsporniki.ts (wspolna z AdminLayout)
 
 function getProductCode(bomId: string): string {
   // Direct mapping

@@ -5,6 +5,10 @@ import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByR
 import { generateBOMPdf, type BOMData } from '../services/pdf-generator'
 import { postMessageService, type LadderConfig, type ConfigResult } from '../services/postMessage'
 import type { AppMode } from '../composables/useAppMode'
+import {
+  KODY_PRODUKTOW as codeMapping,
+  WSPORNIK_ODLEGLOSCI_DOMYSLNE as wspornikDefaultDistances
+} from '../services/wsporniki'
 
 // ============================================
 // PROPS - tryb aplikacji
@@ -3400,53 +3404,7 @@ function applyConfigFromPostMessage(config: LadderConfig) {
 }
 
 function sendPostMessageResult() {
-  // Mapowanie kodów wewnętrznych na kody produktów w bazie danych
-  const codeMapping: Record<string, string> = {
-    // Drabiny (moduły)
-    'ladder_x7': 'drabina_powielana_7',
-    'ladder_x8': 'drabina_powielana_7', // X8 uses same price as X7
-    'drabina_poczatkowa_7': 'drabina_poczatkowa_7',
-    'ladder_x1': 'drabina_koncowa_1',
-    'ladder_x2': 'drabina_koncowa_2',
-    'ladder_x3': 'drabina_koncowa_3',
-    'ladder_x4': 'drabina_koncowa_4',
-    'ladder_x5': 'drabina_koncowa_5',
-    'ladder_x6': 'drabina_koncowa_6',
-    // Łączniki i uchwyty
-    'connector_uchwyt': 'uchwyt_montazowo_laczacy',
-    'connector_sciskany': 'uchwyt_montazowo_sciskany',
-    'module_connector': 'element_laczacy',
-    'element_laczacy': 'element_laczacy',
-    // Wsporniki - kluczowe mapowanie
-    'wspornik_krotki': 'wspornik_16_26',
-    'wspornik_sredni': 'wspornik_26_36',
-    'wspornik_dlugi': 'wspornik_36_46',
-    // Typ C - klucz z ThreeCanvas jest juz rowny kodowi z cennika, ale
-    // wpisujemy go jawnie, zeby nie zalezec od zachowania mapy dla nieznanych.
-    'wspornik_typ_c_16_26': 'wspornik_typ_c_16_26',
-    'wspornik_typ_c_26_36': 'wspornik_typ_c_26_36',
-    'wspornik_typ_c_36_46': 'wspornik_typ_c_36_46',
-    'wspornik_typ_c_50_60': 'wspornik_typ_c_50_60',
-    'wspornik_typ_c_60_70': 'wspornik_typ_c_60_70',
-    'wspornik_typ_c_70_80': 'wspornik_typ_c_70_80',
-    // Poręcze
-    'handrail': 'porece_asekuracyjne',
-    'handrail_connector': 'lacznik_poreczy',
-    // Kosz bezpieczeństwa
-    'cage_hoop': 'obrecz_kosza',
-    'cage_closing': 'blokada_dostepu',
-    'angle_bracket_x2': 'katownik_2_otworowy',
-    'angle_bracket_x3': 'katownik_3_otworowy',
-    'angle_bracket_x4': 'katownik_4_otworowy',
-    // Podest
-    'platform': 'podest_z_poreczami',
-    'resting_platform': 'podest_spoczynkowy',
-    // Attyka i montaż
-    'attic_passage': 'przejscie_attyka',
-    'bigfoot': 'bigfoot',
-    'bigfoot_guide': 'prowadnica_bigfoot'
-  }
-
+  // Mapa kodow: services/wsporniki.ts (wspolna z PricedBOM)
   function getProductCode(bomId: string): string {
     if (codeMapping[bomId]) {
       return codeMapping[bomId]
@@ -3622,6 +3580,35 @@ onMounted(() => {
     if (urlParams.get('portableLadder') === 'true') {
       state.value.portableLadder = true
     }
+
+    // Sposob mocowania strony zejscia (przelaz attykowy). Steruje tym sklep:
+    // zaznaczenie opcji BIGFOOT na stronie produktu ma go pokazac na modelu.
+    const mocowanieZejscia = urlParams.get('descentMountType')
+    if (mocowanieZejscia === 'bigfoot' || mocowanieZejscia === 'custom-base'
+        || mocowanieZejscia === 'brackets' || mocowanieZejscia === 'self') {
+      state.value.descentMountType = mocowanieZejscia
+    }
+
+    // Grubosc murka attyki. Sklep pyta o nia w polu "szerokosc murka" i wchodzi
+    // ona do ograniczen wspornikow, wiec model musi widziec te sama wartosc.
+    const murek = parseFloat(urlParams.get('atticWallThickness') || '')
+    if (!isNaN(murek) && murek > 0) {
+      state.value.atticWallThickness = murek
+    }
+
+    // Ocieplenie przy attyce jest osobne dla strony wejscia i zejscia -
+    // ogolny insulationThickness dotyczy drabiny klasycznej i tu nie wystarcza.
+    const ocieplWejscia = parseFloat(urlParams.get('atticInsulationThickness') || '')
+    if (!isNaN(ocieplWejscia)) {
+      state.value.atticHasInsulation = ocieplWejscia > 0
+      state.value.atticInsulationThickness = ocieplWejscia
+    }
+
+    const ocieplZejscia = parseFloat(urlParams.get('atticBackInsulationThickness') || '')
+    if (!isNaN(ocieplZejscia)) {
+      state.value.atticBackHasInsulation = ocieplZejscia > 0
+      state.value.atticBackInsulationThickness = ocieplZejscia
+    }
   }
 
   // Dla trybu seller - ustaw domyślne wartości i uruchom PostMessage
@@ -3662,9 +3649,31 @@ onMounted(() => {
       sendPostMessageResult()
     })
 
+
     // Notify parent that we're ready
     nextTick(() => {
       postMessageService.notifyReady()
+    })
+  }
+
+  // ============================================
+  // RZUT TECHNICZNY JAKO OBRAZEK
+  // ============================================
+  // Dotyczy TAKZE trybu embed - to z niego korzysta strona produktu w sklepie,
+  // zeby pokazac widok z boku bez drugiej instancji konfiguratora.
+  //
+  // Uwaga: caly nasluch postMessage byl wczesniej zamkniety w bloku
+  // "if (isSellerMode)", wiec w trybie embed konfigurator nie odbieral zadnych
+  // wiadomosci i prosba o rysunek szla w prozne. startListening() sam pilnuje,
+  // zeby nie wystartowac dwa razy.
+  if (isSellerMode.value || isEmbedMode.value) {
+    postMessageService.startListening()
+
+    postMessageService.on('GET_TECH_DRAWING', (data) => {
+      const zadany = (data && (data.payload as any)?.view) || 'side'
+      const wynik = threeCanvasRef.value?.eksportujRysunek(zadany)
+        ?? { view: zadany, image: null }
+      postMessageService.sendToParent('TECH_DRAWING', wynik as any)
     })
   }
 })
@@ -4051,20 +4060,6 @@ function setSciskaneConnType(type: string) {
       { connType: type }
     )
   }
-}
-
-// Domyślne odległości dla typów wsporników
-const wspornikDefaultDistances: Record<string, number> = {
-  krotki: 215,
-  sredni: 315,
-  dlugi: 415,
-  // Typ C - srodek zakresu z nazwy modelu
-  typ_c_16_26: 210,
-  typ_c_26_36: 310,
-  typ_c_36_46: 410,
-  typ_c_50_60: 550,
-  typ_c_60_70: 650,
-  typ_c_70_80: 750
 }
 
 function setSciskaneWspornikType(type: string) {

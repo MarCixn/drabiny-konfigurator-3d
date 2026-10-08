@@ -1,0 +1,82 @@
+# ==========================================================================
+# Konfigurator 3D - kompresja i cache
+#
+# Modele .glb szly do tej pory BEZ kompresji i BEZ Cache-Control: 37 plikow,
+# 11,3 MB surowego transferu przy kazdym otwarciu podgladu. GLB to w duzej
+# czesci bufory liczb, wiec deflate scina je mniej wiecej o polowe.
+#
+# Konwencja przepisana z public_html/drabiny/.htaccess (mod_deflate +
+# mod_expires), zeby caly serwis konfigurowalo sie tak samo.
+#
+# Uwaga: plik lezy w public/ repozytorium konfiguratora, wiec vite kopiuje go
+# do dist/ przy kazdym budowaniu - nie trzeba go wgrywac osobno.
+# ==========================================================================
+
+# Serwer nie zna rozszerzenia .glb i oddaje je jako application/octet-stream.
+# Bez wlasciwego typu nie da sie ich wpiac w kompresje po typie MIME.
+<IfModule mod_mime.c>
+    AddType model/gltf-binary .glb
+    AddType model/gltf+json .gltf
+</IfModule>
+
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css
+    AddOutputFilterByType DEFLATE application/javascript application/x-javascript
+    AddOutputFilterByType DEFLATE application/json application/xml
+    AddOutputFilterByType DEFLATE image/svg+xml
+</IfModule>
+
+# --------------------------------------------------------------------------
+# Modele podajemy SPAKOWANE Z GORY.
+#
+# LiteSpeed nie kompresuje w locie typow spoza swojej listy - probowalem
+# przez AddOutputFilterByType i pliki nadal szly surowe (927 KB). Zamiast
+# walczyc z konfiguracja serwera, obok kazdego .glb lezy gotowy .glb.gz,
+# a przegladarka dostaje go z naglowkiem Content-Encoding.
+#
+# Zysk zmierzony na komplecie modeli: 8376 KB -> 2070 KB (76% mniej).
+#
+# Pliki .gz robi skrypt "npm run spakuj-modele" - po podmianie ktoregokolwiek
+# modelu trzeba go przepuscic ponownie, inaczej klient dostanie stara wersje.
+# --------------------------------------------------------------------------
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Accept-Encoding} gzip
+    RewriteCond %{REQUEST_FILENAME}.gz -f
+    RewriteRule ^(.+)\.glb$ $1.glb.gz [QSA,L]
+</IfModule>
+
+<FilesMatch "\.glb\.gz$">
+    <IfModule mod_headers.c>
+        Header set Content-Encoding gzip
+        Header append Vary Accept-Encoding
+        Header set Cache-Control "public, max-age=2592000"
+    </IfModule>
+    ForceType model/gltf-binary
+</FilesMatch>
+
+<IfModule mod_expires.c>
+    ExpiresActive On
+
+    # Modele sa niezmienne - zmiana ksztaltu to nowy plik wgrywany recznie.
+    # Miesiac oszczedza 37 zapytan warunkowych przy kazdym powrocie na strone.
+    ExpiresByType model/gltf-binary "access plus 1 month"
+    ExpiresByType model/gltf+json "access plus 1 month"
+
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/webp "access plus 1 month"
+    ExpiresByType text/css "access plus 1 week"
+    ExpiresByType application/javascript "access plus 1 week"
+</IfModule>
+
+# Paczki JS/CSS maja skrot tresci w nazwie, wiec moga lezec w cache dlugo -
+# nowa wersja to nowa nazwa pliku.
+<IfModule mod_headers.c>
+    <FilesMatch "\.(glb|gltf)$">
+        Header set Cache-Control "public, max-age=2592000"
+    </FilesMatch>
+    <FilesMatch "index-[A-Za-z0-9_-]+\.(js|css)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>

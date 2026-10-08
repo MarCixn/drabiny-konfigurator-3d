@@ -93,10 +93,30 @@ export type MessageType =
   | 'CONFIG_RESULT'    // Iframe -> Parent: Send config/pricing result
   | 'CONFIG_CHANGED'   // Iframe -> Parent: Notify config changed
   | 'READY'            // Iframe -> Parent: Configurator is ready
+  // Rysunek techniczny jako obrazek. Dzięki temu strona produktu pokazuje rzut
+  // z boku bez drugiej instancji konfiguratora — drugi kontekst WebGL
+  // kosztowałby na słabszym sprzęcie tyle samo, co pierwszy.
+  | 'GET_TECH_DRAWING' // Parent -> Iframe: poproś o rzut jako PNG
+  | 'TECH_DRAWING'     // Iframe -> Parent: gotowy obrazek (data URL)
+
+/** Prośba o rzut techniczny. */
+export interface TechDrawingRequest {
+  view?: 'front' | 'side' | 'back' | 'top'
+}
+
+/** Odpowiedź z rzutem. image = null, gdy nie udało się wyrenderować. */
+export interface TechDrawingResult {
+  view: string
+  image: string | null
+  width?: number
+  height?: number
+  /** Wysokość ostatniego szczebla nad ziemią (mm) — do metryczki przy rysunku */
+  szczebelOdZiemi?: number
+}
 
 export interface PostMessageData {
   type: MessageType
-  payload?: LadderConfig | ConfigResult | null
+  payload?: LadderConfig | ConfigResult | TechDrawingRequest | TechDrawingResult | null
 }
 
 type MessageHandler = (data: PostMessageData) => void

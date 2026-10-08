@@ -1,0 +1,33 @@
+# ==========================================================================
+# Konce linii
+#
+# core.autocrlf=true + brak tego pliku psul zbudowane paczki: git trzymal je
+# z LF, a przy checkoucie zamienial na CRLF. Paczka z klona rozjezdzala sie
+# wtedy z ta wgrana na serwer o dokladnie tyle bajtow, ile ma linii
+# (index-BkawKo3z.js: 1 371 709 B w klonie, 1 367 693 B na serwerze).
+# Wdrozenie z klona wgrywalo wiec INNY plik niz zbudowany, a md5 nigdy sie
+# nie zgadzalo - czyli znikala jedyna kontrola poprawnosci wgrania.
+#
+# Dlatego wszystko, co powstaje z budowania albo jest binarne, trzymamy
+# bajt w bajt.
+# ==========================================================================
+
+# Zbudowane paczki (dist/ i docs/ to wdrozenia, nie kod zrodlowy)
+dist/**      -text
+docs/**      -text
+
+# Modele i tekstury
+*.glb        binary
+*.gltf       binary
+*.gz         binary
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.webp       binary
+
+# Zrodla zostawiamy normalizowane - w nich CRLF nic nie psuje
+*.ts         text
+*.vue        text
+*.css        text
+*.json       text
+*.md         text

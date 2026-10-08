@@ -3,6 +3,10 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
+import {
+  WSPORNIK_ODLEGLOSCI_DOMYSLNE as wspornikDefaultDistances,
+  typWspornikaZOdleglosci
+} from '../services/wsporniki'
 
 // ============================================
 // PROPS - Configuration from parent component
@@ -177,18 +181,33 @@ const DIMS = {
 
 const RAIL_OFFSET = 265  // Distance from center to rail inner edge
 
-const wspornikDefaultDistances: Record<string, number> = {
-  'krotki': 215,
-  'sredni': 315,
-  'dlugi': 415,
-  // Typ C - jeden model na pozycje, srodek zakresu z nazwy
-  'typ_c_16_26': 210,
-  'typ_c_26_36': 310,
-  'typ_c_36_46': 410,
-  'typ_c_50_60': 550,
-  'typ_c_60_70': 650,
-  'typ_c_70_80': 750
+/**
+ * Czy uruchamiamy sie na sprzecie, ktory lepiej oszczedzac.
+ *
+ * Nie da sie zapytac przegladarki wprost "czy masz slaba grafike", wiec
+ * bierzemy trzy przeslanki, ktore sa dostepne i tanie:
+ *  - ekran dotykowy bez myszy - w praktyce telefon albo tablet,
+ *  - malo rdzeni procesora,
+ *  - malo pamieci (Chrome/Edge; Safari i Firefox tego nie podaja).
+ *
+ * Wynik decyduje o wygladzaniu krawedzi, rozmiarze mapy cieni i granicy
+ * pixelRatio. Zaden z tych wyborow nie zmienia GEOMETRII - model jest ten sam,
+ * rozni sie tylko kosztem rysowania.
+ */
+function czySlabszySprzet(): boolean {
+  if (typeof window === 'undefined') { return false }
+
+  const dotyk = window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches
+  const rdzenie = (navigator as any).hardwareConcurrency
+  const pamiec = (navigator as any).deviceMemory
+
+  if (dotyk) { return true }
+  if (typeof rdzenie === 'number' && rdzenie > 0 && rdzenie <= 4) { return true }
+  if (typeof pamiec === 'number' && pamiec > 0 && pamiec <= 4) { return true }
+
+  return false
 }
+
 
 // ============================================
 // WSPORNIKI TYPU C
@@ -839,7 +858,7 @@ function typWspornikaZProps(): string {
   if (!(odleglosc > 0)) return defaultWspornik1
   return props.wspornikRodzina === 'typ_c'
     ? typCDlaOdleglosci(odleglosc)
-    : getWspornikTypeFromDistance(odleglosc)
+    : typWspornikaZOdleglosci(odleglosc)
 }
 
 /**
@@ -940,7 +959,7 @@ function syncPropsToState() {
   if (props.descentWspornikDistance && props.descentWspornikDistance > 0 && props.descentMountType === 'brackets') {
     console.log('[ThreeCanvas] syncPropsToState descentWspornikDistance:', props.descentWspornikDistance, 'current globalWspornikDistance2:', globalWspornikDistance2)
     globalWspornikDistance2 = props.descentWspornikDistance
-    defaultWspornik2 = getWspornikTypeFromDistance(props.descentWspornikDistance)
+    defaultWspornik2 = typWspornikaZOdleglosci(props.descentWspornikDistance)
     updateGlobalWspornikDistance(2, props.descentWspornikDistance)
     console.log('[ThreeCanvas] Updated globalWspornikDistance2 to:', globalWspornikDistance2)
   }
@@ -998,11 +1017,32 @@ function initScene() {
   camera = perspectiveCamera
 
   // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true })
+  //
+  // Ustawienia zalezne od sprzetu. Na telefonie i na zintegrowanej grafice
+  // wygladzanie krawedzi i miekkie cienie kosztuja wiecej klatek, niz daja
+  // urody - na gestym ekranie wygladzanie i tak jest prawie niewidoczne.
+  const slabszySprzet = czySlabszySprzet()
+
+  // Odczyt plotna do PNG (eksport rysunku technicznego) wymaga, zeby bufor
+  // obrazu przetrwal do konca zadania. Kosztuje to pamiec przy KAZDEJ klatce,
+  // wiec wlaczamy go tylko tam, gdzie rysunek jest faktycznie potrzebny -
+  // strona produktu dopisuje do adresu ramki "techDrawing=1". Zwykle ogladanie
+  // modelu nic na tym nie traci.
+  const potrzebnyEksport = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).get('techDrawing') === '1'
+
+  renderer = new THREE.WebGLRenderer({
+    // Na ekranie o gestosci >= 2 piksele sa tak male, ze wygladzanie nie robi
+    // roznicy widocznej golym okiem, a kosztuje.
+    antialias: !slabszySprzet && window.devicePixelRatio < 2,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: potrzebnyEksport,
+  })
   renderer.setSize(container.clientWidth, container.clientHeight)
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, slabszySprzet ? 1.5 : 2))
   renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  // PCFSoft liczy kilka probek na piksel - na slabszym sprzecie wystarczy PCF
+  renderer.shadowMap.type = slabszySprzet ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap
 
   // Critical for mobile touch support - prevent browser default touch handling
   renderer.domElement.style.touchAction = 'none'
@@ -1026,8 +1066,12 @@ function initScene() {
   const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.6)
   directionalLight1.position.set(5, 15, 10)
   directionalLight1.castShadow = true
-  directionalLight1.shadow.mapSize.width = 2048
-  directionalLight1.shadow.mapSize.height = 2048
+  // Mapa cienia to najdrozszy pojedynczy element sceny: 2048x2048 to cztery
+  // razy wiecej pikseli do policzenia niz 1024x1024, a roznicy w cieniu
+  // drabiny praktycznie nie widac.
+  const rozmiarCienia = slabszySprzet ? 1024 : 2048
+  directionalLight1.shadow.mapSize.width = rozmiarCienia
+  directionalLight1.shadow.mapSize.height = rozmiarCienia
   directionalLight1.shadow.camera.near = 0.5
   directionalLight1.shadow.camera.far = 50
   directionalLight1.shadow.camera.left = -15
@@ -2145,7 +2189,7 @@ function autoAddSciskaneForKoncowa(rungs: number | string, ladderNum: number): v
 
   // Get global wspornik settings for this ladder
   const globalDistance = (ladderNum === 1) ? globalWspornikDistance1 : globalWspornikDistance2
-  const globalType = getWspornikTypeFromDistance(globalDistance)
+  const globalType = typWspornikaZOdleglosci(globalDistance)
   const isDisabled = (ladderNum === 1) ? wspornikDisabled1 : wspornikDisabled2
 
   // Add auto-added handle with current global settings
@@ -2242,11 +2286,6 @@ function getDefaultWspornikForLadder(ladderNum: number): string {
   return (ladderNum === 1) ? defaultWspornik1 : defaultWspornik2
 }
 
-function getWspornikTypeFromDistance(distanceMm: number): string {
-  if (distanceMm < 260) return 'krotki'
-  if (distanceMm < 360) return 'sredni'
-  return 'dlugi'
-}
 
 function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
   // Gdy drabina stoi na wspornikach typu C, zmiana odleglosci ma wybrac inny
@@ -2254,7 +2293,7 @@ function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
   const biezacy = (ladderNum === 1) ? defaultWspornik1 : defaultWspornik2
   const type = isTypC(biezacy)
     ? typCDlaOdleglosci(distanceMm)
-    : getWspornikTypeFromDistance(distanceMm)
+    : typWspornikaZOdleglosci(distanceMm)
 
   if (ladderNum === 1) {
     globalWspornikDistance1 = distanceMm
@@ -8272,6 +8311,210 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
   requestRender() // Render after view change
 }
 
+/**
+ * Rysunek techniczny jako obrazek PNG (data URL).
+ *
+ * Po co: strona produktu ma pokazywać rzut z boku pod konfiguratorem. Druga
+ * instancja konfiguratora oznaczałaby drugi kontekst WebGL i drugi komplet
+ * modeli w pamięci — na telefonie to podwojenie kosztu za obrazek, który się
+ * nie zmienia. Zamiast tego renderujemy rzut raz i oddajemy gotowy piksel.
+ *
+ * WAŻNE: toDataURL() musi wypaść w tej samej klatce co render. Renderer nie ma
+ * preserveDrawingBuffer (kosztuje pamięć na każdej klatce, a potrzebne jest
+ * raz), więc bufor jest ważny tylko do końca bieżącego zadania — stąd render
+ * i odczyt stoją bezpośrednio obok siebie, bez await pomiędzy nimi.
+ *
+ * Tryb rysunku włączamy i wyłączamy wokół zrzutu, żeby użytkownik nie zobaczył
+ * przeskoku widoku w oknie konfiguratora.
+ */
+/**
+ * O ile powiekszyc etykiety na zrzucie.
+ *
+ * Scena ma WLASNE skalowanie etykiet w trybie rysunku (patrz animate():
+ * scaleFactor = viewHeight * 0.05), z osobno dobranymi mnoznikami dla kazdej
+ * z nich - dzieki temu wymiar drabiny, kosza i attyki maja wzgledem siebie
+ * wlasciwe proporcje, a napisy rozsuwaja sie na boki przy oddaleniu.
+ *
+ * Dlatego NIE narzucamy tu wlasnych rozmiarow (pierwsza wersja tak robila
+ * i psula te proporcje - jeden wymiar przy przelazie attykowym robil sie
+ * wyrazne wiekszy od reszty). Zamiast tego uruchamiamy zwykla klatke
+ * animacji, a potem mnozymy WSZYSTKIE etykiety przez ten sam wspolczynnik.
+ * Proporcje i odsuniecia zostaja, zmienia sie sama wielkosc.
+ *
+ * 1 = tak jak w konfiguratorze. Wyzej = wieksze napisy na zrzucie.
+ */
+const ETYKIETA_POWIEKSZENIE: number = 1.5
+
+/** Zapamietane skale etykiet na czas zrzutu. */
+let zapisaneSkaleEtykiet: Array<{ sprite: THREE.Sprite; x: number; y: number; z: number }> = []
+
+/** Zapamietana widocznosc tabelki informacyjnej na czas zrzutu. */
+let zapisanaWidocznoscTabeli: Array<{ sprite: THREE.Sprite; widoczny: boolean }> = []
+
+/**
+ * Tabelka z podsumowaniem konfiguracji, rysowana w scenie jako sprite.
+ *
+ * Na zrzucie jej NIE pokazujemy - te same dane strona produktu wypisuje
+ * tekstem w rogu rysunku. Tekst w HTML jest ostry przy kazdym powiekszeniu
+ * i nie konkuruje o miejsce z wymiarami drabiny.
+ */
+function tabelkiInformacyjne(): THREE.Sprite[] {
+  return [infoLabel, atticInfoLabel].filter((s): s is THREE.Sprite => !!s)
+}
+
+function ukryjTabeleNaZrzut(): void {
+  zapisanaWidocznoscTabeli = []
+  for (const sprite of tabelkiInformacyjne()) {
+    zapisanaWidocznoscTabeli.push({ sprite, widoczny: sprite.visible })
+    sprite.visible = false
+  }
+}
+
+function przywrocTabelePoZrzucie(): void {
+  for (const z of zapisanaWidocznoscTabeli) {
+    z.sprite.visible = z.widoczny
+  }
+  zapisanaWidocznoscTabeli = []
+}
+
+/** Wszystkie etykiety wymiarowe sceny. */
+function wszystkieEtykiety(): THREE.Sprite[] {
+  return [
+    measurementLabel, ladderLengthLabel, cageHeightLabel, handrailHeightLabel,
+    infoLabel, atticInfoLabel, suspensionHeightLabel, greenRedLabel,
+    descentLadderLengthLabel,
+  ].filter((s): s is THREE.Sprite => !!s)
+}
+
+/**
+ * Powieksza wszystkie etykiety o ten sam wspolczynnik.
+ *
+ * Wolane PO klatce animacji, ktora ustawila juz wlasciwe rozmiary i pozycje
+ * dla trybu rysunku. Mnozac wszystkie tak samo, nie ruszamy proporcji miedzy
+ * nimi ani odsuniecia na boki.
+ */
+function ustawEtykietyNaZrzut(): void {
+  zapisaneSkaleEtykiet = []
+
+  if (ETYKIETA_POWIEKSZENIE === 1) { return }
+
+  for (const sprite of wszystkieEtykiety()) {
+    if (!sprite.visible || !(sprite.scale.y > 0)) { continue }
+
+    zapisaneSkaleEtykiet.push({
+      sprite,
+      x: sprite.scale.x, y: sprite.scale.y, z: sprite.scale.z,
+    })
+
+    sprite.scale.set(
+      sprite.scale.x * ETYKIETA_POWIEKSZENIE,
+      sprite.scale.y * ETYKIETA_POWIEKSZENIE,
+      sprite.scale.z
+    )
+  }
+}
+
+/** Przywraca skale sprzed zrzutu - w oknie etykiety maja dzialac jak dotad. */
+function przywrocEtykietyPoZrzucie(): void {
+  for (const z of zapisaneSkaleEtykiet) {
+    z.sprite.scale.set(z.x, z.y, z.z)
+  }
+  zapisaneSkaleEtykiet = []
+}
+
+function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
+  view: string; image: string | null; width?: number; height?: number; szczebelOdZiemi?: number
+} {
+  if (!renderer || !scene || isDisposed) {
+    return { view, image: null }
+  }
+
+  // Zanim scena bedzie gotowa, render dalby PUSTY (bialy) obrazek - i to jest
+  // najgorszy przypadek, bo taki zrzut wyglada na poprawny: jest data URL,
+  // jest rozmiar, tylko nic na nim nie ma. Strona przestalaby ponawiac prosbe
+  // i zostawalaby z bialym prostokatem. Dlatego dopoki modele sie nie zaladuja
+  // albo drabina nie ma jeszcze zadnego elementu, mowimy wprost "nie mam" -
+  // wolajacy ponowi za chwile.
+  if (!modelsLoaded || !ladderContainer || ladderContainer.children.length === 0) {
+    return { view, image: null }
+  }
+
+  const bylWTrybie = isTechDrawingMode
+  const poprzedniWidok = techDrawingView
+
+  // Ramka na stronie produktu ma ~440 px wysokosci. Przy drabinie na 6 metrow
+  // opisy wymiarow wychodza w kilku pikselach i sa nieczytelne. Renderujemy
+  // wiec zrzut w wiekszym buforze - kadr zostaje ten sam, bo kamera liczy
+  // proporcje z KONTENERA (clientWidth/clientHeight), a nie z bufora, wiec
+  // mnozac obie strony przez to samo nic nie znieksztalcamy.
+  const kontener = containerRef.value
+  const szerKontenera = kontener ? kontener.clientWidth : 800
+  const wysKontenera = kontener ? kontener.clientHeight : 440
+  const poprzedniPixelRatio = renderer.getPixelRatio()
+
+  // Celujemy w ~1800 px szerokosci, ale nie wiecej niz 3x - wiekszy bufor to
+  // wiecej pamieci, a na slabszym sprzecie nie ma po co ryzykowac.
+  const powiekszenie = Math.min(3, Math.max(1, 1800 / Math.max(1, szerKontenera)))
+
+  try {
+    renderer.setPixelRatio(1)
+    // false = nie ruszaj rozmiaru w CSS; plotno w oknie ma wygladac tak samo
+    renderer.setSize(
+      Math.round(szerKontenera * powiekszenie),
+      Math.round(wysKontenera * powiekszenie),
+      false
+    )
+
+    enterTechDrawingMode(view)
+
+    // Jedna klatka animacji. To ona przelicza rozmiary i pozycje etykiet dla
+    // trybu rysunku - bez niej zostawaly ustawienia z widoku perspektywicznego,
+    // wiec napisy byly male i nie rozsuwaly sie na boki. Renderuje tez scene.
+    animate()
+
+    // Dopiero teraz powiekszamy - proporcje z klatki zostaja nietkniete
+    ustawEtykietyNaZrzut()
+    ukryjTabeleNaZrzut()
+
+    // Render i odczyt w jednym ciagu - bez tego bufor bywa juz wyczyszczony
+    renderer.render(scene, camera)
+    const image = renderer.domElement.toDataURL('image/png')
+
+    return {
+      view,
+      image,
+      width: renderer.domElement.width,
+      height: renderer.domElement.height,
+      // Wysokosc ostatniego szczebla nad ziemia (mm). Oddajemy ja razem
+      // z rysunkiem, zeby strona produktu nie liczyla jej po swojemu -
+      // ta sama scena, ta sama liczba. Wzor jak w emitUpdate():
+      // przy attyce sam dystans od ziemi, inaczej plus zawieszenie.
+      szczebelOdZiemi: Math.round(
+        (props.distanceFromGround || 160) + (handrailType === 'attic' ? 0 : suspendedHeight1)
+      ),
+    }
+  } catch (e) {
+    console.warn('[ThreeCanvas] nie udalo sie wyeksportowac rysunku', e)
+    return { view, image: null }
+  } finally {
+    przywrocEtykietyPoZrzucie()
+    przywrocTabelePoZrzucie()
+
+    // Najpierw rozmiar - kamera przelicza sie przy powrocie do trybu
+    renderer.setPixelRatio(poprzedniPixelRatio)
+    renderer.setSize(szerKontenera, wysKontenera)
+
+    // Wracamy dokladnie tam, gdzie byl uzytkownik
+    if (!bylWTrybie) {
+      exitTechDrawingMode()
+    } else if (poprzedniWidok !== view) {
+      enterTechDrawingMode(poprzedniWidok)
+    }
+    handleResize()
+    requestRender()
+  }
+}
+
 function exitTechDrawingMode() {
   if (!isTechDrawingMode) return
   isTechDrawingMode = false
@@ -8452,18 +8695,13 @@ function emitDebugInfo() {
 // ============================================
 
 // Determine wspornik type based on distance
-function getWspornikTypeForDistance(distanceMm: number): string {
-  if (distanceMm <= 260) return 'krotki'
-  if (distanceMm <= 360) return 'sredni'
-  return 'dlugi'
-}
 
 function setGlobalWspornikDistance(distanceMm: number, ladderNum: number = 1) {
   // Jak wyzej - typ C zostaje typem C, zmienia sie tylko wariant rozmiarowy.
   const biezacyTyp = (ladderNum === 1) ? defaultWspornik1 : defaultWspornik2
   const newType = isTypC(biezacyTyp)
     ? typCDlaOdleglosci(distanceMm)
-    : getWspornikTypeForDistance(distanceMm)
+    : typWspornikaZOdleglosci(distanceMm)
 
   if (ladderNum === 1) {
     globalWspornikDistance1 = distanceMm
@@ -8750,7 +8988,7 @@ function addSciskaneHandle(yPos: number, ladderNum: number = 1) {
 
   // Get global wspornik settings for this ladder (same as auto-added handles)
   const globalDistance = (ladderNum === 1) ? globalWspornikDistance1 : globalWspornikDistance2
-  const globalType = getWspornikTypeFromDistance(globalDistance)
+  const globalType = typWspornikaZOdleglosci(globalDistance)
   const isDisabled = (ladderNum === 1) ? wspornikDisabled1 : wspornikDisabled2
 
   // Add new handle with current global settings
@@ -10762,6 +11000,7 @@ defineExpose({
   enterTechDrawingMode,
   exitTechDrawingMode,
   toggleTechDrawingView,
+  eksportujRysunek,
   isTechDrawingMode: () => isTechDrawingMode,
   toggleSciskaneMode,
   isSciskaneMode: () => sciskaneMode,
@@ -10792,7 +11031,7 @@ defineExpose({
   getShowDimensions,
   setGlobalWspornikDistance,
   getGlobalWspornikDistance,
-  getWspornikTypeForDistance,
+  getWspornikTypeForDistance: typWspornikaZOdleglosci,
   setWallWidth,
   getWallWidth,
   // Debug editor
