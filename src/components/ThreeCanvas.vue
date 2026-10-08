@@ -64,6 +64,9 @@ const props = defineProps<{
   initialSciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
   // Początkowe typy łączników (dla trybu podglądu)
   initialConnectorTypes?: string[]
+  // Początkowe typy wsporników (dla trybu podglądu). Bez tego wczytana
+  // konfiguracja odtwarzała łączniki, ale wsporniki wracały domyślne.
+  initialWspornikTypes?: string[]
   // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
   descentWspornikDistance?: number  // w mm
 }>()
@@ -911,6 +914,15 @@ function syncPropsToState() {
     connectorTypes1.length = 0
     for (const type of props.initialConnectorTypes) {
       connectorTypes1.push(type)
+    }
+  }
+
+  // To samo dla wsporników - inaczej wczytana oferta pokazywała łączniki
+  // zgodnie z zapisem, a wsporniki domyślne.
+  if (props.initialWspornikTypes && props.initialWspornikTypes.length > 0 && wspornikTypes1.length === 0) {
+    wspornikTypes1.length = 0
+    for (const type of props.initialWspornikTypes) {
+      wspornikTypes1.push(type)
     }
   }
 

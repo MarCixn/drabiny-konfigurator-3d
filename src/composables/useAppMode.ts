@@ -5,7 +5,7 @@
 
 import { ref, computed, onMounted } from 'vue'
 
-export type AppMode = 'admin' | 'customer' | 'seller' | 'embed'
+export type AppMode = 'admin' | 'customer' | 'seller' | 'embed' | 'view'
 
 const mode = ref<AppMode>('admin')
 const isInitialized = ref(false)
@@ -16,6 +16,8 @@ const isInitialized = ref(false)
  * ?mode=customer -> Version B (simplified wizard)
  * ?mode=seller -> Version C (embed for seller panel)
  * ?mode=embed -> Embed mode (3D view only)
+ * ?mode=view -> Podglad dla klienta: model + rzut boczny + miarka, bez cen
+ *               i bez edycji. Konfiguracja wczytywana z ?ref=&code=.
  */
 function initMode(): void {
   if (isInitialized.value) return
@@ -29,6 +31,8 @@ function initMode(): void {
     mode.value = 'seller'
   } else if (modeParam === 'embed') {
     mode.value = 'embed'
+  } else if (modeParam === 'view') {
+    mode.value = 'view'
   } else {
     mode.value = 'admin'
   }
@@ -52,6 +56,7 @@ export function useAppMode() {
   const isCustomer = computed(() => mode.value === 'customer')
   const isSeller = computed(() => mode.value === 'seller')
   const isEmbed = computed(() => mode.value === 'embed')
+  const isView = computed(() => mode.value === 'view')
 
   /**
    * Get URL with mode parameter
@@ -77,6 +82,7 @@ export function useAppMode() {
     isCustomer,
     isSeller,
     isEmbed,
+    isView,
     getModeUrl,
     switchMode
   }

@@ -67,6 +67,49 @@ export interface LadderConfig {
   // Connector types from 3D model (uchwyt, sciskany, lacznik)
   connectorTypes?: string[]
   wspornikTypes?: string[]
+
+  /* ----------------------------------------------------------------------
+   * Pola potrzebne do ODTWORZENIA konfiguracji z zapisanej oferty.
+   *
+   * Odczyt (checkUrlAndLoadOffer w AdminLayout) czytal je od dawna, ale
+   * zapis ich nie wysylal - wiec wczytana oferta nie wygladala tak, jak
+   * w chwili zapisu. Bez nich podglad dla klienta (?mode=view) pokazuje
+   * inna drabine, niz ta wyceniona.
+   * -------------------------------------------------------------------- */
+
+  /** Zakres wspornika typu C jako napis, np. '16-26' albo '50-60'. */
+  bracketTypC?: string
+
+  // Opcje i dodatki
+  cageClosing?: boolean
+  accessLock?: boolean
+  restingPlatform?: boolean
+  portableLadder?: boolean
+  hasHandrails?: boolean
+
+  // Okap
+  hasEave?: boolean
+  eaveDepth?: number           // cm
+  eaveHeight?: number          // cm
+
+  // Przejscie przez attyke i strona zejscia
+  atticWallHeight?: number     // m
+  atticWallThickness?: number  // cm
+  atticInsulationThickness?: number       // cm
+  atticBackInsulationThickness?: number   // cm
+  atticMinDistance?: number    // m
+  descentMountType?: string
+  descentBracketType?: string
+  descentBracketSpacing?: number  // mm
+  customBaseHeight?: number    // cm
+
+  // Malowanie RAL (ralPainting/ralColor wyzej to starsze nazwy z API wyceny)
+  painting?: boolean
+  ralCode?: string
+  ralPriceModifier?: number
+
+  /** Pozycje dodatkowych uchwytow sciskanych, offset od dolu w mm. */
+  sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
 }
 
 export interface CalculateRequest {

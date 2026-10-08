@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import ThreeCanvas from '../components/ThreeCanvas.vue'
-import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByRef, type ComponentItem, type LoadedConfiguration } from '../services/api'
+/* Uwaga: w projekcie sa DWA typy o nazwie LadderConfig - ten z api.ts
+   (ksztalt wysylany do PHP, pola wymagane) i ten z postMessage.ts (ksztalt
+   wymieniany z embed.php, wszystko opcjonalne). Do zapisu oferty idzie
+   wersja z api.ts, dlatego importujemy ja pod wlasna nazwa. */
+import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByRef, type ComponentItem, type LoadedConfiguration, type LadderConfig as LadderConfigZapis } from '../services/api'
 import { generateBOMPdf, type BOMData } from '../services/pdf-generator'
 import { postMessageService, type LadderConfig, type ConfigResult } from '../services/postMessage'
 import type { AppMode } from '../composables/useAppMode'
@@ -23,6 +27,19 @@ const props = withDefaults(defineProps<{
 const isCustomerMode = computed(() => props.mode === 'customer')
 const isSellerMode = computed(() => props.mode === 'seller')
 const isEmbedMode = computed(() => props.mode === 'embed')
+
+/**
+ * Tryb podgladu dla klienta (?mode=view&ref=...&code=...).
+ *
+ * Klient dostaje model 3D, przelacznik na uproszczony rysunek techniczny
+ * (rzut boczny) i miarke. Nie widzi cen, zestawienia elementow ani zadnych
+ * kontrolek, ktore zmieniaja konfiguracje - ma ogladac to, co wyslal mu
+ * handlowiec, a nie przekonfigurowac.
+ */
+const isViewMode = computed(() => props.mode === 'view')
+
+/** Tryby bez panelu konfiguracji i naglowka - sama scena 3D. */
+const bezPaneli = computed(() => isEmbedMode.value || isViewMode.value)
 
 // Seller mode - panel visibility
 const sellerPanelVisible = ref(false)
@@ -470,6 +487,19 @@ const threeState = ref({
 
 const threeReady = ref(false)
 
+/**
+ * Uchwyty wczytane z zapisanej oferty (?ref=&code=).
+ *
+ * Trzymane osobno od threeState, bo threeState jest WYNIKIEM pracy sceny,
+ * a to jest WEJSCIE do niej. Gdyby to bylo jedno pole, scena nadpisywalaby
+ * sobie wlasne dane wejsciowe przy pierwszym przeliczeniu.
+ */
+const wczytaneUchwyty = ref({
+  connectorTypes: [] as string[],
+  wspornikTypes: [] as string[],
+  sciskaneHandles: [] as Array<{ offsetFromBottom: number; connType: string }>
+})
+
 // Stan API i komponentów
 const apiLoading = ref(false)
 const apiError = ref('')
@@ -585,7 +615,16 @@ const threeCanvasProps = computed(() => {
     // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
     descentWspornikDistance: state.value.scheme === 'attic-passage' && state.value.descentMountType === 'brackets'
       ? state.value.descentBracketSpacing
-      : 0
+      : 0,
+
+    /* Uchwyty z zapisanej oferty. ThreeCanvas ma te wejscia od dawna
+       ("dla trybu podglądu"), ale nikt ich nie podawal, wiec wczytana oferta
+       rysowala uchwyty domyslne zamiast tych ustawionych recznie pod
+       "Edytuj uchwyty". Puste tablice znacza "licz po swojemu" - przy
+       normalnej pracy w panelu nic sie nie zmienia. */
+    initialSciskaneHandles: wczytaneUchwyty.value.sciskaneHandles,
+    initialConnectorTypes: wczytaneUchwyty.value.connectorTypes,
+    initialWspornikTypes: wczytaneUchwyty.value.wspornikTypes
   }
 })
 
@@ -1974,12 +2013,22 @@ async function checkUrlAndLoadOffer() {
         })
       }
 
-      // Ostatnia drabina jest "aktualna" w formularzu
-      const ladder = config.ladders[config.ladders.length - 1]
+      /* Ostatnia drabina jest "aktualna" w formularzu.
+       *
+       * Rozpakowujemy `.config` tak samo, jak petla wyzej. Wczesniej czytalo
+       * sie tu wprost `ladder.wallHeight`, a zapisany JSON ma ksztalt
+       * { config: {...}, quantity } - czyli kazde pole wychodzilo undefined
+       * i wpadalo w wartosc domyslna. Wczytanie oferty cicho ustawialo
+       * wysokosc 5 m i wspornik "short", niezaleznie od tego, co zapisano.
+       * Sprawdzone na prawdziwym wierszu z bazy: klucze pierwszej drabiny to
+       * dokladnie "config, quantity".
+       */
+      const wpis = config.ladders[config.ladders.length - 1] as any
+      const ladder = (wpis && wpis.config) ? wpis.config : wpis
 
       // Ustaw parametry z zapisanej konfiguracji
       state.value.wallHeight = ladder.wallHeight || ladder.height || 5
-      state.value.purpose = 'external'
+      state.value.purpose = ladder.purpose === 'internal' ? 'internal' : 'external'
 
       // Schemat
       if (ladder.scheme === 'with-platform') {
@@ -2001,12 +2050,88 @@ async function checkUrlAndLoadOffer() {
       if (ladder.bracketType) {
         state.value.bracketType = ladder.bracketType as 'short' | 'medium' | 'long'
       }
+      if (ladder.bracketSpacing) {
+        state.value.bracketSpacing = ladder.bracketSpacing
+      }
       // Zakres wspornika typu C z zakladki "Niestandardowe"
-      state.value.bracketTypC = (ladder as any).bracketTypC || ''
+      state.value.bracketTypC = ladder.bracketTypC || ''
 
       // Izolacja
       if (ladder.insulationThickness) {
         state.value.insulationThickness = ladder.insulationThickness
+      }
+
+      // Zawieszenie
+      state.value.suspended = !!ladder.suspended
+      if (ladder.suspendedHeight) {
+        state.value.suspendedHeight = ladder.suspendedHeight
+      }
+
+      // Opcje i dodatki
+      state.value.cageClosing = !!ladder.cageClosing
+      state.value.accessLock = !!ladder.accessLock
+      state.value.restingPlatform = !!ladder.restingPlatform
+      state.value.portableLadder = !!ladder.portableLadder
+      if (ladder.hasHandrails !== undefined) {
+        state.value.hasHandrails = !!ladder.hasHandrails
+      }
+
+      // Okap
+      state.value.hasEave = !!ladder.hasEave
+      if (ladder.eaveDepth) { state.value.eaveDepth = ladder.eaveDepth }
+      if (ladder.eaveHeight) { state.value.eaveHeight = ladder.eaveHeight }
+
+      // Przejscie przez attyke i strona zejscia
+      if (ladder.atticWallHeight) { state.value.atticWallHeight = ladder.atticWallHeight }
+      if (ladder.atticWallThickness) { state.value.atticWallThickness = ladder.atticWallThickness }
+      if (ladder.atticMinDistance) { state.value.atticMinDistance = ladder.atticMinDistance }
+      if (ladder.atticInsulationThickness !== undefined) {
+        state.value.atticInsulationThickness = ladder.atticInsulationThickness
+        state.value.atticHasInsulation = ladder.atticInsulationThickness > 0
+      }
+      if (ladder.atticBackInsulationThickness !== undefined) {
+        state.value.atticBackInsulationThickness = ladder.atticBackInsulationThickness
+        state.value.atticBackHasInsulation = ladder.atticBackInsulationThickness > 0
+      }
+      if (ladder.descentMountType) { state.value.descentMountType = ladder.descentMountType }
+      if (ladder.descentBracketType) { state.value.descentBracketType = ladder.descentBracketType }
+      if (ladder.descentBracketSpacing) { state.value.descentBracketSpacing = ladder.descentBracketSpacing }
+      if (ladder.customBaseHeight !== undefined) { state.value.customBaseHeight = ladder.customBaseHeight }
+
+      // Malowanie RAL
+      state.value.painting = !!ladder.painting
+      state.value.ralCode = ladder.ralCode || ''
+      state.value.ralColor = ladder.ralColor || ''
+      state.value.ralPriceModifier = ladder.ralPriceModifier || 0
+
+      // Przeszkody
+      state.value.hasObstacles = !!ladder.hasObstacles
+      if (Array.isArray(ladder.obstacles)) {
+        state.value.obstacles = ladder.obstacles.map((obs: any) => ({
+          id: obs.id,
+          type: obs.type || 'window',
+          description: obs.type || '',
+          // Zapis trzyma milimetry, formularz pracuje w metrach
+          heightFrom: obs.heightFrom !== undefined
+            ? obs.heightFrom
+            : (obs.bottomHeightMm || 0) / 1000,
+          height: obs.height !== undefined
+            ? obs.height
+            : (obs.heightMm || 0) / 1000
+        }))
+      }
+
+      /* Uchwyty ustawione recznie pod "Edytuj uchwyty". To jedyne WEJSCIE dla
+         sceny - ThreeCanvas zasiewa z nich swoje tablice, gdy sa niepuste. */
+      wczytaneUchwyty.value = {
+        connectorTypes: Array.isArray(ladder.connectorTypes) ? [...ladder.connectorTypes] : [],
+        wspornikTypes: Array.isArray(ladder.wspornikTypes) ? [...ladder.wspornikTypes] : [],
+        sciskaneHandles: Array.isArray(ladder.sciskaneHandles)
+          ? ladder.sciskaneHandles.map((h: any) => ({
+              offsetFromBottom: Number(h.offsetFromBottom) || 0,
+              connType: String(h.connType || 'uchwyt')
+            }))
+          : []
       }
 
       console.log('[App] Załadowano ofertę:', result.data.reference_number, 'z', config.ladders.length, 'drabinami')
@@ -2249,20 +2374,12 @@ async function generateOffer() {
     else if (state.value.bracketType === 'long') bracketType = 'long'
 
     // Zbierz wszystkie drabiny do zapisu w formacie API
+    /* Typ bierzemy z LadderConfig, nie przepisujemy go tu recznie. Ten
+       lokalny duplikat byl powodem, dla ktorego zapis zostal w tyle za
+       odczytem: zeby dolozyc pole do zapisu, trzeba bylo pamietac o dwoch
+       miejscach, wiec w praktyce nikt nie dokladal. */
     const allLadders: Array<{
-      config: {
-        wallHeight: number
-        scheme: 'no-platform' | 'with-platform' | 'attic-passage'
-        purpose: 'external' | 'internal'
-        cage: 'no-cage' | 'with-cage' | 'full-cage'
-        bracketType: 'short' | 'medium' | 'long'
-        bracketSpacing: number
-        insulationThickness: number
-        suspended: boolean
-        suspendedHeight: number
-        hasObstacles: boolean
-        obstacles: Array<{ id: number; type: string; bottomHeightMm: number; heightMm: number }>
-      }
+      config: LadderConfigZapis
       quantity: number
     }> = []
 
@@ -2300,7 +2417,20 @@ async function generateOffer() {
       })
     }
 
-    // Dodaj aktualną drabinę
+    /* Dodaj aktualną drabinę.
+     *
+     * Zapisujemy PELNY stan, nie dziesieciu wybranych pol. Wczesniej szlo tu
+     * tylko wallHeight, scheme, purpose, cage, bracket*, insulation, suspended
+     * i przeszkody - a odczyt (checkUrlAndLoadOffer) czytal juz wtedy
+     * bracketTypC, okap, attyke, zejscie i RAL. Odczyt wyprzedzil zapis, wiec
+     * polowa pol byla martwa: wczytana oferta nie odtwarzala tego, co handlowiec
+     * widzial przy zapisie.
+     *
+     * Trzy ostatnie pola (wspornikTypes, connectorTypes, sciskaneHandles) to
+     * stan ustawiany recznie pod "Edytuj uchwyty". Bez nich podglad dla klienta
+     * pokazalby drabine z domyslnymi uchwytami w domyslnych miejscach - czyli
+     * nie te, ktora mu wyceniono.
+     */
     allLadders.push({
       config: {
         wallHeight: state.value.wallHeight,
@@ -2309,15 +2439,48 @@ async function generateOffer() {
         cage: (state.value.cage || 'no-cage') as 'no-cage' | 'with-cage' | 'full-cage',
         bracketType,
         bracketSpacing: state.value.bracketSpacing || 1000,
+        bracketTypC: state.value.bracketTypC || '',
         insulationThickness: state.value.insulationThickness || 0,
         suspended: state.value.suspended,
         suspendedHeight: state.value.suspendedHeight || 0,
+        // Opcje i dodatki
+        cageClosing: state.value.cageClosing,
+        accessLock: state.value.accessLock,
+        restingPlatform: state.value.restingPlatform,
+        portableLadder: state.value.portableLadder,
+        hasHandrails: state.value.hasHandrails,
+        // Okap
+        hasEave: state.value.hasEave,
+        eaveDepth: state.value.eaveDepth || 0,
+        eaveHeight: state.value.eaveHeight || 0,
+        // Przejscie przez attyke i strona zejscia
+        atticWallHeight: state.value.atticWallHeight || 0,
+        atticWallThickness: state.value.atticWallThickness || 0,
+        atticInsulationThickness: state.value.atticInsulationThickness || 0,
+        atticBackInsulationThickness: state.value.atticBackInsulationThickness || 0,
+        atticMinDistance: state.value.atticMinDistance || 0,
+        descentMountType: state.value.descentMountType,
+        descentBracketType: state.value.descentBracketType,
+        descentBracketSpacing: state.value.descentBracketSpacing || 0,
+        customBaseHeight: state.value.customBaseHeight || 0,
+        // Malowanie
+        painting: state.value.painting,
+        ralCode: state.value.ralCode || '',
+        ralColor: state.value.ralColor || '',
+        ralPriceModifier: state.value.ralPriceModifier || 0,
         hasObstacles: state.value.hasObstacles,
         obstacles: state.value.obstacles.map(obs => ({
           id: obs.id,
           type: obs.type,
           bottomHeightMm: obs.heightFrom * 1000,
           heightMm: obs.height * 1000
+        })),
+        // Stan sceny 3D - uchwyty tak, jak je ustawil handlowiec
+        wspornikTypes: [...threeState.value.wspornikTypes],
+        connectorTypes: [...threeState.value.connectorTypes],
+        sciskaneHandles: threeState.value.sciskaneHandles.map(h => ({
+          offsetFromBottom: h.offsetFromBottom,
+          connType: h.connType
         }))
       },
       quantity: 1
@@ -3375,6 +3538,23 @@ function applyConfigFromPostMessage(config: LadderConfig) {
   if (config.ralColor !== undefined) state.value.ralColor = config.ralColor || ''
   if (config.ralPriceModifier !== undefined) state.value.ralPriceModifier = config.ralPriceModifier || 0
 
+  /* Uchwyty ze stanu sceny. LadderConfig niosl te pola od dawna i embed.php
+     je przysyla, ale ta funkcja ich nie czytala - edycja uchwytow po stronie
+     sprzedawcy nie dochodzila wiec do Vue i model rysowal domyslne. */
+  if (Array.isArray(config.connectorTypes) || Array.isArray(config.wspornikTypes)
+      || Array.isArray(config.sciskaneHandles)) {
+    wczytaneUchwyty.value = {
+      connectorTypes: Array.isArray(config.connectorTypes) ? [...config.connectorTypes] : [],
+      wspornikTypes: Array.isArray(config.wspornikTypes) ? [...config.wspornikTypes] : [],
+      sciskaneHandles: Array.isArray(config.sciskaneHandles)
+        ? config.sciskaneHandles.map(h => ({
+            offsetFromBottom: Number(h.offsetFromBottom) || 0,
+            connType: String(h.connType || 'uchwyt')
+          }))
+        : []
+    }
+  }
+
   // Ustaw bracketSpacing na podstawie bracketType (domyślna wartość dla typu)
   if (config.bracketType === 'custom') {
     // Zakladka "Niestandardowe" przysyla w bracketCustom zakres wspornika
@@ -3834,6 +4014,33 @@ function setTechDrawingView(view: 'front' | 'side' | 'back') {
   if (threeCanvasRef.value) {
     threeCanvasRef.value.enterTechDrawingMode(view)
   }
+}
+
+// ============================================
+// PODGLAD DLA KLIENTA (tryb view)
+// ============================================
+// Dwa stany sceny zamiast pelnego zestawu narzedzi admina. Kazde przejscie
+// gasi poprzednie narzedzie samo, zeby klient nie zostal z wlaczona miarka
+// na rysunku technicznym i nie musial sie domyslac, czemu nic nie klika.
+
+/** Wroc do modelu 3D: wyjdz z rzutu i zgas miarke. */
+function podgladModel() {
+  if (measureModeActive.value) {
+    toggleMeasureMode()
+  }
+  if (techDrawingActive.value) {
+    techDrawingActive.value = false
+    exitTechDrawingMode()
+  }
+}
+
+/** Pokaz uproszczony rysunek techniczny - zawsze rzut boczny. */
+function podgladRysunek() {
+  if (measureModeActive.value) {
+    toggleMeasureMode()
+  }
+  techDrawingActive.value = true
+  setTechDrawingView('side')
 }
 
 function exitTechDrawingMode() {
@@ -4361,7 +4568,7 @@ function toggleCageClosing() {
     <!-- ============================================
          NAGŁÓWEK GLOBALNY (ukryty w seller mode i embed mode)
          ============================================ -->
-    <header v-if="!isSellerMode && !isEmbedMode" class="app-header">
+    <header v-if="!isSellerMode && !bezPaneli" class="app-header">
       <!-- Przycisk wstecz dla admin / refresh dla customer -->
       <button
         v-if="!isCustomerMode"
@@ -4542,8 +4749,45 @@ function toggleCageClosing() {
                 </button>
               </div>
 
+              <!-- ============================================
+                   PASEK KLIENTA (tryb view)
+                   Trzy narzedzia i nic wiecej: model, rzut boczny, miarka.
+                   Rzut jest TYLKO boczny - klient nie wybiera widoku, bo
+                   podpis pod nim jest czescia tego, co mu wysylamy.
+                   ============================================ -->
+              <div v-if="isViewMode" class="podglad-pasek">
+                <button
+                  class="podglad-btn"
+                  :class="{ active: !techDrawingActive && !measureModeActive }"
+                  @click="podgladModel"
+                >
+                  Model 3D
+                </button>
+                <button
+                  class="podglad-btn"
+                  :class="{ active: techDrawingActive }"
+                  @click="podgladRysunek"
+                >
+                  Uproszczony rysunek techniczny / rzut boczny
+                </button>
+                <button
+                  class="podglad-btn podglad-btn-miarka"
+                  :class="{ active: measureModeActive }"
+                  @click="toggleMeasureMode"
+                  title="Zmierz odległość między dwoma punktami"
+                >
+                  📏 Miarka
+                </button>
+              </div>
+
+              <!-- Podpis pod rzutem - to on jest trescia, ktora ma zostac
+                   klientowi w glowie, wiec stoi na scenie, nie w pasku. -->
+              <div v-if="isViewMode && techDrawingActive" class="podglad-podpis">
+                Uproszczony rysunek techniczny &middot; rzut boczny
+              </div>
+
               <!-- Kontrolki w prawym górnym rogu (zoom + fullscreen) -->
-              <div v-if="isEmbedMode" class="embed-top-controls">
+              <div v-if="isEmbedMode || isViewMode" class="embed-top-controls">
                 <button
                   class="embed-control-btn"
                   @click="zoomIn"
@@ -4576,7 +4820,7 @@ function toggleCageClosing() {
               </div>
 
               <!-- Podpowiedź nawigacji (lewy dolny róg) -->
-              <div v-if="isEmbedMode" class="embed-nav-hint">
+              <div v-if="isEmbedMode || isViewMode" class="embed-nav-hint">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
                   <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/>
                 </svg>
@@ -4609,7 +4853,7 @@ function toggleCageClosing() {
               </div>
 
               <!-- Kontrolki widoczności 3D (prawy górny róg) - ukryte w customer/embed mode -->
-              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" class="viewer3d-visibility">
+              <div v-if="(!isCustomerMode && !bezPaneli) || debugMode" class="viewer3d-visibility">
                 <button
                   class="viewer3d-visibility-btn"
                   :class="{ active: show3DWall }"
@@ -4656,7 +4900,7 @@ function toggleCageClosing() {
               </div>
 
               <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer/embed mode -->
-              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" id="controls">
+              <div v-if="(!isCustomerMode && !bezPaneli) || debugMode" id="controls">
                 <button
                   class="btn btn-tech btn-with-tooltip"
                   :class="{ 'btn-active': techDrawingActive }"
@@ -4698,7 +4942,7 @@ function toggleCageClosing() {
               </div>
 
               <!-- TOOLBAR MIARKI (środek góry) - ukryty w customer/embed mode -->
-              <div v-if="(!isCustomerMode && !isEmbedMode) || debugMode" id="measureToolbar" :class="{ active: measureModeActive }">
+              <div v-if="(!isCustomerMode && !isEmbedMode) || isViewMode || debugMode" id="measureToolbar" :class="{ active: measureModeActive }">
                 <span class="measure-toolbar-label">Tryb:</span>
                 <button
                   class="measure-mode-btn"
@@ -4894,7 +5138,7 @@ function toggleCageClosing() {
               </div>
 
               <!-- Panel rysunku technicznego (góra środek) - ukryty w customer/embed mode -->
-              <div v-if="techDrawingActive && !isCustomerMode && !isEmbedMode" id="techDrawingPanel">
+              <div v-if="techDrawingActive && !isCustomerMode && !bezPaneli" id="techDrawingPanel">
                 <span class="tech-label">Rysunek techniczny</span>
                 <span class="tech-view">Widok: {{ techDrawingView }}</span>
                 <span class="tech-hint">Przeciągnij = przesuń | Scroll = zoom</span>
@@ -4913,7 +5157,7 @@ function toggleCageClosing() {
 
 
               <!-- WATCHDOG PANEL (prawy dolny róg) - ukryty w seller/embed mode -->
-              <div v-if="!isSellerMode && !isEmbedMode" class="watchdog-panel">
+              <div v-if="!isSellerMode && !bezPaneli" class="watchdog-panel">
                 <div class="watchdog-item">
                   <span class="watchdog-label">Ostatni szczebel → ziemia:</span>
                   <span class="watchdog-value">{{ threeState.lastRungToGround }} mm</span>
@@ -4931,7 +5175,7 @@ function toggleCageClosing() {
           </div>
 
           <!-- Prawa strona - panel konfiguracji (ukryty w embed mode) -->
-          <div v-if="!isEmbedMode" class="config-panel-wrapper">
+          <div v-if="!bezPaneli" class="config-panel-wrapper">
             <div class="config-panel">
               <div class="config-panel-header">
                 <h2 v-if="!isCustomerMode">Parametry drabiny</h2>
@@ -11964,6 +12208,81 @@ body {
 
 .embed-nav-hint svg {
   opacity: 0.7;
+}
+
+/* ==========================================================================
+   PODGLAD DLA KLIENTA (?mode=view)
+   Pasek u gory na srodku, poziomo - w przeciwienstwie do paska embed nie ma
+   tu wyboru rzutu, wiec etykiety sa dlugie i nie zmiescilyby sie pionowo
+   przy krawedzi. Na telefonie zawija sie do dwoch wierszy.
+   ========================================================================== */
+.podglad-pasek {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  padding: 8px;
+  background: linear-gradient(165deg, rgba(30,30,40,0.92) 0%, rgba(20,20,30,0.95) 100%);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  z-index: 100;
+}
+
+.podglad-btn {
+  padding: 10px 16px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.podglad-btn:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.1);
+}
+
+.podglad-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.15);
+}
+
+/* Podpis pod rzutem - u dolu na srodku, zeby zostal na zrzucie ekranu,
+   ktory klient i tak zrobi i wysle dalej. */
+.podglad-podpis {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 16px;
+  background: rgba(0,0,0,0.65);
+  border-radius: 6px;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: rgba(255,255,255,0.9);
+  z-index: 100;
+  pointer-events: none;
+  text-align: center;
+}
+
+@media (max-width: 560px) {
+  .podglad-btn {
+    padding: 8px 10px;
+    font-size: 11px;
+    white-space: normal;
+  }
 }
 
 /* Reset confirmation popup */
