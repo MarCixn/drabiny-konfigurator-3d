@@ -84,16 +84,19 @@ const props = defineProps<{
    * Gdy jest ustawiona, createLadder() NIE buduje drabiny z parametrów,
    * tylko odtwarza zapisane elementy. Patrz sekcja MIGAWKA SCENY niżej.
    */
-  migawka?: Array<{
-    id: string
-    rodzaj: string
-    model?: string
-    poz: [number, number, number]
-    obrot: [number, number, number, number]
-    skala: [number, number, number]
-    ladderNum?: number
-    side?: string
-  }>
+  migawka?: {
+    elementy: Array<{
+      id: string
+      rodzaj: string
+      model?: string
+      poz: [number, number, number]
+      obrot: [number, number, number, number]
+      skala: [number, number, number]
+      ladderNum?: number
+      side?: string
+    }>
+    kotwice?: KotwiceMigawki
+  }
   // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
   descentWspornikDistance?: number  // w mm
 }>()
@@ -2772,6 +2775,9 @@ let measurementDiskTop: THREE.Mesh | null = null
 let measurementDiskBottom: THREE.Mesh | null = null
 let firstHoopBoxY: number | null = null  // Dół boxa magenta (góra ściany)
 let lastHoopBoxY: number | null = null   // Góra boxa cyan (dół drabiny końcowej)
+/* Kopia ostatnio policzonej odleglosci szczebla od ziemi. Oryginal jest
+   zmienna LOKALNA w createLadder(), a migawka potrzebuje jej po fakcie. */
+let ostatnieSzczebelDoZiemi = 0
 let lastFinalLadderBottomY: number | null = null  // Dół ostatniej drabiny końcowej
 
 // Drugi wymiar: Dł. Drabiny (zielony → żółty)
@@ -5809,8 +5815,9 @@ function createLadder() {
      przebudowuje sie z wielu miejsc (watchery propsow, zaladowanie modelu,
      zmiana widoku). Gdyby migawke stawiac obok, pierwsza taka przebudowa
      by ja zetarla i podglad wrocilby do drabiny liczonej z parametrow. */
-  if (props.migawka && props.migawka.length) {
-    const postawione = odtworzZMigawki(props.migawka)
+  if (props.migawka && props.migawka.elementy && props.migawka.elementy.length) {
+    przywrocKotwice(props.migawka.kotwice)
+    const postawione = odtworzZMigawki(props.migawka.elementy)
     if (postawione > 0) {
       /* Migawka niesie SAME ELEMENTY DRABINY. Sciana, podloze i obrysy nie sa
          jej czescia - powstaja z parametrow i tu je dokladamy, inaczej podglad
@@ -5823,6 +5830,31 @@ function createLadder() {
       if (h1 > 0 && wallHeightConfig > 0) {
         renderWallAndGround(h1, Math.max(h1, h2))
       }
+      /* Opisy rzutu technicznego. Rysuja sie wzgledem boxow pomiarowych
+         przywroconych wyzej - bez nich rzut pokazywal sama geometrie, bez
+         linii wymiarowych i tabelki. */
+      const k = props.migawka.kotwice
+      if (k) {
+        if (roofTopBoxY !== null && finalLadderBottomBoxY !== null) {
+          drawLadderLengthDimension(k.zPos, false)
+        }
+        if (roofTopBoxY !== null && handrailTopBoxY !== null) {
+          drawHandrailHeightDimension(k.zPos, false)
+        }
+        if (safetyCageCount1 > 0 && lastHoopBoxY !== null && groundTopBoxY !== null) {
+          drawCageHeightDimension(k.zPos)
+        }
+        drawInfoLabel(
+          k.lastRungToGround,
+          k.wallHeightMm,
+          k.wspornikType,
+          k.safetyCageCount > 0,
+          k.isPlatform,
+          k.insulationThickness,
+          k.zPos
+        )
+      }
+
       outlineEnabled = true
       reapplyOutlines()
       requestRender()
@@ -7404,6 +7436,8 @@ function emitUpdate() {
     // Distance from last hoop bottom to ground (absolute - groundLevel already accounts for suspension)
     lastHoopToGround = Math.round(lastHoopY - groundLevel)
   }
+
+  ostatnieSzczebelDoZiemi = Math.round(lastRungToGround)
 
   // Assign element IDs to all objects (for delete/hide functionality)
   assignElementIds()
@@ -11273,6 +11307,22 @@ const RODZAJE_MIGAWKI: Array<{ flaga: string; rodzaj: string }> = [
   { flaga: 'isAtticPassage', rodzaj: 'attyka' }
 ]
 
+/** Wszystko, czego potrzebuja opisy rzutu, a czego nie widac po samych modelach. */
+export interface KotwiceMigawki {
+  roofTopBoxY: number | null
+  finalLadderBottomBoxY: number | null
+  handrailTopBoxY: number | null
+  lastHoopBoxY: number | null
+  groundTopBoxY: number | null
+  lastRungToGround: number
+  safetyCageCount: number
+  zPos: number
+  wspornikType: string
+  wallHeightMm: number
+  isPlatform: boolean
+  insulationThickness: number
+}
+
 export interface ElementMigawki {
   id: string
   rodzaj: string
@@ -11291,6 +11341,24 @@ export interface ElementMigawki {
  * Bierzemy pozycje LOKALNE wzgledem ladderContainer, nie swiatowe - kontener
  * bywa obracany przy zmianie widoku, a migawka ma byc niezalezna od kamery.
  */
+function eksportujKotwice(): KotwiceMigawki {
+  const geo = ladderGeometryConfig[1]
+  return {
+    roofTopBoxY,
+    finalLadderBottomBoxY,
+    handrailTopBoxY,
+    lastHoopBoxY,
+    groundTopBoxY,
+    lastRungToGround: ostatnieSzczebelDoZiemi,
+    safetyCageCount: safetyCageCount1,
+    zPos: geo ? (geo.zOffset + 241) * SCALE : 0,
+    wspornikType: wspornikTypes1.find((t) => t !== 'none') || 'none',
+    wallHeightMm: Math.round(wallHeightConfig),
+    isPlatform: props.scheme === 'with-platform',
+    insulationThickness: props.hasInsulation ? (props.insulationThickness || 0) : 0
+  }
+}
+
 function eksportujScene(): ElementMigawki[] {
   if (!ladderContainer) { return [] }
 
@@ -11404,6 +11472,17 @@ function modelDlaMigawki(e: ElementMigawki): THREE.Group | null {
  * Zwraca liczbe postawionych elementow (0 = migawka nieuzyteczna, wolajacy
  * powinien wtedy wrocic do zwyklego budowania drabiny).
  */
+function przywrocKotwice(k: KotwiceMigawki | null | undefined) {
+  if (!k) { return }
+  roofTopBoxY = k.roofTopBoxY ?? null
+  finalLadderBottomBoxY = k.finalLadderBottomBoxY ?? null
+  handrailTopBoxY = k.handrailTopBoxY ?? null
+  lastHoopBoxY = k.lastHoopBoxY ?? null
+  groundTopBoxY = k.groundTopBoxY ?? null
+  ostatnieSzczebelDoZiemi = k.lastRungToGround ?? 0
+  safetyCageCount1 = k.safetyCageCount ?? 0
+}
+
 function odtworzZMigawki(migawka: ElementMigawki[]): number {
   if (!ladderContainer || !migawka || !migawka.length) { return 0 }
 
@@ -11432,6 +11511,7 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
 defineExpose({
   createLadder,
   eksportujScene,
+  eksportujKotwice,
   odtworzZMigawki,
   resetCamera: () => {
     targetRotation = { x: 0.35, y: -0.785 }

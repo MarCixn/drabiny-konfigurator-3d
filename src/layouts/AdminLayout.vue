@@ -509,7 +509,7 @@ const threeReady = ref(false)
  * W trybie podgladu ma pierwszenstwo nad cala logika budowania drabiny:
  * zamiast liczyc, co powinno stac na scenie, stawiamy to, co stalo.
  */
-const migawkaSceny = ref<any[] | null>(null)
+const migawkaSceny = ref<any | null>(null)
 
 /**
  * Migawka sceny spisywana NA BIEZACO, przy kazdej przebudowie drabiny.
@@ -518,7 +518,7 @@ const migawkaSceny = ref<any[] | null>(null)
  * ekranie podsumowania, a tam ThreeCanvas jest odmontowany i threeCanvasRef
  * wskazuje null. Dlatego spisujemy scene wtedy, kiedy istnieje.
  */
-const migawkaBiezaca = ref<any[] | null>(null)
+const migawkaBiezaca = ref<any | null>(null)
 
 const wczytaneUchwyty = ref({
   connectorTypes: [] as string[],
@@ -667,7 +667,7 @@ const threeCanvasProps = computed(() => {
     /* Migawka TYLKO w trybie podgladu. W panelu drabina ma sie dalej liczyc
        z parametrow - inaczej handlowiec wczytalby oferte i nie moglby jej
        zmienic, bo scena ignorowalaby kazde ustawienie. */
-    migawka: (isViewMode.value && migawkaSceny.value && migawkaSceny.value.length)
+    migawka: (isViewMode.value && migawkaSceny.value && migawkaSceny.value.elementy?.length)
       ? migawkaSceny.value
       : undefined
   }
@@ -731,8 +731,13 @@ function onThreeUpdate(data: {
   }
 
   // Scena wlasnie sie przebudowala - to jedyny pewny moment na jej spisanie
-  const m = threeCanvasRef.value?.eksportujScene?.()
-  if (m && m.length) { migawkaBiezaca.value = m }
+  const elementy = threeCanvasRef.value?.eksportujScene?.()
+  if (elementy && elementy.length) {
+    migawkaBiezaca.value = {
+      elementy,
+      kotwice: threeCanvasRef.value?.eksportujKotwice?.()
+    }
+  }
 
   // W trybie seller - użyj BOM z eventu (już wygenerowany z aktualnej sceny 3D)
   if (isSellerMode.value) {
@@ -2195,7 +2200,12 @@ async function checkUrlAndLoadOffer() {
       cageCorrection.value = Number(ladder.cageCorrection) || 0
 
       // Migawka sceny - uzywana tylko w trybie podgladu
-      migawkaSceny.value = Array.isArray(ladder.sceneSnapshot) ? ladder.sceneSnapshot : null
+      /* Starsze zapisy trzymaly sama tablice elementow, bez kotwic wymiarowych.
+         Takie tez przyjmujemy - pokaza model, tylko rzut bedzie bez opisow. */
+      const zapis = ladder.sceneSnapshot
+      migawkaSceny.value = Array.isArray(zapis)
+        ? { elementy: zapis }
+        : (zapis && Array.isArray(zapis.elementy) ? zapis : null)
 
       wczytaneUchwyty.value = {
         connectorTypes: Array.isArray(ladder.connectorTypes) ? [...ladder.connectorTypes] : [],
