@@ -503,6 +503,23 @@ const threeReady = ref(false)
  * a to jest WEJSCIE do niej. Gdyby to bylo jedno pole, scena nadpisywalaby
  * sobie wlasne dane wejsciowe przy pierwszym przeliczeniu.
  */
+/**
+ * Migawka sceny z wczytanej oferty.
+ *
+ * W trybie podgladu ma pierwszenstwo nad cala logika budowania drabiny:
+ * zamiast liczyc, co powinno stac na scenie, stawiamy to, co stalo.
+ */
+const migawkaSceny = ref<any[] | null>(null)
+
+/**
+ * Migawka sceny spisywana NA BIEZACO, przy kazdej przebudowie drabiny.
+ *
+ * Nie da sie jej pobrac w chwili zapisu oferty: formularz jest wtedy na
+ * ekranie podsumowania, a tam ThreeCanvas jest odmontowany i threeCanvasRef
+ * wskazuje null. Dlatego spisujemy scene wtedy, kiedy istnieje.
+ */
+const migawkaBiezaca = ref<any[] | null>(null)
+
 const wczytaneUchwyty = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
@@ -645,7 +662,14 @@ const threeCanvasProps = computed(() => {
     initialWspornikTypes: wczytaneUchwyty.value.wspornikTypes,
     initialWspornikDistances: wczytaneUchwyty.value.wspornikDistances,
     initialWspornikManual: wczytaneUchwyty.value.wspornikManual,
-    initialMidRungBracket: wczytaneUchwyty.value.midRungBracket ?? undefined
+    initialMidRungBracket: wczytaneUchwyty.value.midRungBracket ?? undefined,
+
+    /* Migawka TYLKO w trybie podgladu. W panelu drabina ma sie dalej liczyc
+       z parametrow - inaczej handlowiec wczytalby oferte i nie moglby jej
+       zmienic, bo scena ignorowalaby kazde ustawienie. */
+    migawka: (isViewMode.value && migawkaSceny.value && migawkaSceny.value.length)
+      ? migawkaSceny.value
+      : undefined
   }
 })
 
@@ -705,6 +729,10 @@ function onThreeUpdate(data: {
   if (data.sciskaneHandles) {
     threeState.value.sciskaneHandles = data.sciskaneHandles
   }
+
+  // Scena wlasnie sie przebudowala - to jedyny pewny moment na jej spisanie
+  const m = threeCanvasRef.value?.eksportujScene?.()
+  if (m && m.length) { migawkaBiezaca.value = m }
 
   // W trybie seller - użyj BOM z eventu (już wygenerowany z aktualnej sceny 3D)
   if (isSellerMode.value) {
@@ -2166,6 +2194,9 @@ async function checkUrlAndLoadOffer() {
       // safetyCageCount.
       cageCorrection.value = Number(ladder.cageCorrection) || 0
 
+      // Migawka sceny - uzywana tylko w trybie podgladu
+      migawkaSceny.value = Array.isArray(ladder.sceneSnapshot) ? ladder.sceneSnapshot : null
+
       wczytaneUchwyty.value = {
         connectorTypes: Array.isArray(ladder.connectorTypes) ? [...ladder.connectorTypes] : [],
         wspornikTypes: Array.isArray(ladder.wspornikTypes) ? [...ladder.wspornikTypes] : [],
@@ -2533,6 +2564,10 @@ async function generateOffer() {
            bez zapisu wczytana oferta wracala do wartosci wyliczonej i korekta
            przepadala. */
         cageCorrection: cageCorrection.value,
+        /* Migawka sceny - to ona decyduje o tym, co zobaczy klient.
+           Konfiguracja nizej zostaje, bo rysunek techniczny bierze z niej
+           wymiary i tabelke, ale nie buduje juz modelu. */
+        sceneSnapshot: migawkaBiezaca.value ?? undefined,
         // Stan sceny 3D - uchwyty tak, jak je ustawil handlowiec
         wspornikTypes: [...threeState.value.wspornikTypes],
         connectorTypes: [...threeState.value.connectorTypes],

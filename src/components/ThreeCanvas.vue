@@ -79,6 +79,21 @@ const props = defineProps<{
   initialWspornikManual?: boolean[]
   // Wspornik śródszczeblowy - typ łącznika, wspornik i odległość
   initialMidRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number; manual?: boolean }
+  /**
+   * Migawka sceny z zapisanej oferty (tryb podglądu).
+   * Gdy jest ustawiona, createLadder() NIE buduje drabiny z parametrów,
+   * tylko odtwarza zapisane elementy. Patrz sekcja MIGAWKA SCENY niżej.
+   */
+  migawka?: Array<{
+    id: string
+    rodzaj: string
+    model?: string
+    poz: [number, number, number]
+    obrot: [number, number, number, number]
+    skala: [number, number, number]
+    ladderNum?: number
+    side?: string
+  }>
   // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
   descentWspornikDistance?: number  // w mm
 }>()
@@ -5789,6 +5804,34 @@ function renderSciskaneHandles() {
 // MAIN CREATE LADDER FUNCTION
 // ============================================
 function createLadder() {
+  /* MIGAWKA MA PIERWSZENSTWO.
+     Wpinamy sie na samym poczatku, a nie w miejscu wywolania, bo scena
+     przebudowuje sie z wielu miejsc (watchery propsow, zaladowanie modelu,
+     zmiana widoku). Gdyby migawke stawiac obok, pierwsza taka przebudowa
+     by ja zetarla i podglad wrocilby do drabiny liczonej z parametrow. */
+  if (props.migawka && props.migawka.length) {
+    const postawione = odtworzZMigawki(props.migawka)
+    if (postawione > 0) {
+      /* Migawka niesie SAME ELEMENTY DRABINY. Sciana, podloze i obrysy nie sa
+         jej czescia - powstaja z parametrow i tu je dokladamy, inaczej podglad
+         pokazywalby drabine wiszaca w czarnej pustce. wallHeightConfig
+         ustawia syncPropsToState(), wysokosci licza sie z konfiguracji, ktora
+         zapisujemy obok migawki. */
+      syncPropsToState()
+      const h1 = getTotalHeightForLadder(1)
+      const h2 = getTotalHeightForLadder(2)
+      if (h1 > 0 && wallHeightConfig > 0) {
+        renderWallAndGround(h1, Math.max(h1, h2))
+      }
+      outlineEnabled = true
+      reapplyOutlines()
+      requestRender()
+      return
+    }
+    // Migawka nieuzyteczna (np. brak modeli) - budujemy normalnie
+    console.warn('[ThreeCanvas] Migawka pusta po odtworzeniu, buduje drabine z parametrow')
+  }
+
   // Clear hidden elements on full rebuild (configuration change)
   // This resets the "deleted" elements when user changes configuration
   clearHiddenElements()
@@ -11197,8 +11240,199 @@ function handleExtrudeMouseUp(): void {
 // ============================================
 // PUBLIC METHODS (exposed to parent)
 // ============================================
+
+// ============================================
+// MIGAWKA SCENY (tryb podgladu)
+// ============================================
+//
+// DLACZEGO TO ISTNIEJE.
+// Podglad dla klienta odtwarzal wczesniej konfiguracje i pozwalal scenie
+// zbudowac sie od nowa. Kazda roznica w logice budowania zjadala reczne
+// ustawienia - typ wspornika przy pojedynczym laczniku, wariant typu C
+// wybrany suwakiem - i wygladalo to na "nie zapisuje sie".
+//
+// Migawka omija cala te klase bledow: nie rekonstruujemy drabiny z parametrow,
+// tylko odtwarzamy to, co bylo na scenie. Element, pozycja, obrot, skala.
+
+/** Rodzaje elementow, ktore zapisujemy. Kolejnosc ma znaczenie - pierwszy
+    pasujacy wygrywa, bo niektore obiekty maja kilka znacznikow naraz. */
+const RODZAJE_MIGAWKI: Array<{ flaga: string; rodzaj: string }> = [
+  { flaga: 'isWspornik', rodzaj: 'wspornik' },
+  { flaga: 'isSciskaneWspornik', rodzaj: 'wspornik' },
+  { flaga: 'isConnector', rodzaj: 'lacznik' },
+  { flaga: 'isSciskaneHandle', rodzaj: 'lacznik' },
+  { flaga: 'isSciskanePlaced', rodzaj: 'lacznik' },
+  { flaga: 'isLadderModule', rodzaj: 'modul' },
+  { flaga: 'isSafetyCage', rodzaj: 'obrecz' },
+  { flaga: 'isCageClosing', rodzaj: 'zamykanie' },
+  { flaga: 'isAngleBracket', rodzaj: 'katownik' },
+  { flaga: 'isHandrail', rodzaj: 'porecz' },
+  { flaga: 'isPlatform', rodzaj: 'podest' },
+  { flaga: 'isRestingPlatform', rodzaj: 'podest_spoczynkowy' },
+  { flaga: 'isBigfoot', rodzaj: 'bigfoot' },
+  { flaga: 'isAtticPassage', rodzaj: 'attyka' }
+]
+
+export interface ElementMigawki {
+  id: string
+  rodzaj: string
+  /** Typ modelu w obrebie rodzaju, np. 'typ_c_50_60' albo 'sciskany'. */
+  model?: string
+  poz: [number, number, number]
+  obrot: [number, number, number, number]
+  skala: [number, number, number]
+  ladderNum?: number
+  side?: string
+}
+
+/**
+ * Spisz aktualna scene.
+ *
+ * Bierzemy pozycje LOKALNE wzgledem ladderContainer, nie swiatowe - kontener
+ * bywa obracany przy zmianie widoku, a migawka ma byc niezalezna od kamery.
+ */
+function eksportujScene(): ElementMigawki[] {
+  if (!ladderContainer) { return [] }
+
+  const wynik: ElementMigawki[] = []
+  /* Znaczniki siedza i na modelu, i na jego dzieciach - ten sam elementId
+     wypadlby wtedy kilka razy. Traverse idzie od rodzica, wiec pierwszy
+     trafiony jest tym wlasciwym. */
+  const widziane = new Set<string>()
+
+  ladderContainer.traverse((obj) => {
+    const u = obj.userData || {}
+    if (!u.elementId) { return }
+    // Elementy ukryte przez sprzedawce nie maja byc w podgladzie klienta
+    if (obj.visible === false) { return }
+    if (widziane.has(String(u.elementId))) { return }
+
+    const trafiony = RODZAJE_MIGAWKI.find((r) => u[r.flaga] === true)
+    if (!trafiony) { return }
+    widziane.add(String(u.elementId))
+
+    /* Klucz modelu zalezy od rodzaju - kazdy tagowany jest czym innym:
+       wsporniki maja wspornikType, laczniki connectorType, moduly
+       moduleType+rungs, katowniki segments. */
+    let model: string | undefined
+    if (trafiony.rodzaj === 'wspornik') {
+      model = u.wspornikType
+    } else if (trafiony.rodzaj === 'lacznik') {
+      model = u.connectorType || u.connType
+    } else if (trafiony.rodzaj === 'modul') {
+      model = (u.moduleType === 'final') ? ('koncowa_' + (u.rungs || 1)) : 'powielana'
+    } else if (trafiony.rodzaj === 'katownik') {
+      model = 'x' + (u.segments || 2)
+    }
+
+    wynik.push({
+      id: String(u.elementId),
+      rodzaj: trafiony.rodzaj,
+      model: model,
+      poz: [
+        Number(obj.position.x.toFixed(3)),
+        Number(obj.position.y.toFixed(3)),
+        Number(obj.position.z.toFixed(3))
+      ],
+      obrot: [
+        Number(obj.quaternion.x.toFixed(5)),
+        Number(obj.quaternion.y.toFixed(5)),
+        Number(obj.quaternion.z.toFixed(5)),
+        Number(obj.quaternion.w.toFixed(5))
+      ],
+      skala: [
+        Number(obj.scale.x.toFixed(5)),
+        Number(obj.scale.y.toFixed(5)),
+        Number(obj.scale.z.toFixed(5))
+      ],
+      ladderNum: u.ladderNum || 1,
+      side: u.side || undefined
+    })
+  })
+  return wynik
+}
+
+/** Model zrodlowy dla elementu migawki. null = nie umiemy go odtworzyc. */
+function modelDlaMigawki(e: ElementMigawki): THREE.Group | null {
+  switch (e.rodzaj) {
+    case 'wspornik': {
+      const t = e.model || 'krotki'
+      if (isTypC(t)) { return loadedModels.wspornikTypC[t] || null }
+      if (t === 'sredni') {
+        return (e.side === 'right' ? loadedModels.wspornikSredniLewy : loadedModels.wspornikSredniPrawy) || null
+      }
+      if (t === 'dlugi') {
+        return (e.side === 'right' ? loadedModels.wspornikDlugiPrawy : loadedModels.wspornikDlugiLewy) || null
+      }
+      return loadedModels.wspornikKrotki || null
+    }
+    case 'lacznik': {
+      const t = e.model || 'uchwyt'
+      if (t === 'sciskany') { return loadedModels.sciskany || null }
+      if (t === 'lacznik') { return loadedModels.lacznik || null }
+      return loadedModels.uchwyt || null
+    }
+    case 'obrecz':     return loadedModels.obrecz || null
+    case 'zamykanie':  return loadedModels.zamykanie || null
+    case 'porecz':     return loadedModels.porecz || null
+    case 'podest':     return loadedModels.podestKrotki || null
+    case 'podest_spoczynkowy': return loadedModels.podestSpoczynkowy || null
+    case 'bigfoot':    return loadedModels.bigfoot || null
+    case 'attyka':     return loadedModels.attyka || null
+    case 'katownik': {
+      const t = e.model || 'x2'
+      if (t === 'x3') { return loadedModels.katownikX3 || null }
+      if (t === 'x4') { return loadedModels.katownikX4 || null }
+      return loadedModels.katownikX2 || null
+    }
+    case 'modul': {
+      // Modul koncowy ma wlasny model na kazda liczbe szczebli (1-7),
+      // reszta drabiny to powtarzany modul siedmioszczeblowy.
+      const t = String(e.model || 'powielana')
+      if (t.indexOf('koncowa_') === 0) {
+        const szczebli = Number(t.slice('koncowa_'.length))
+        return loadedModels.koncowa[szczebli] || loadedModels.powielana || null
+      }
+      return loadedModels.powielana || null
+    }
+    default: return null
+  }
+}
+
+/**
+ * Odtworz scene z migawki. Nie liczy niczego - stawia modele tam, gdzie byly.
+ * Zwraca liczbe postawionych elementow (0 = migawka nieuzyteczna, wolajacy
+ * powinien wtedy wrocic do zwyklego budowania drabiny).
+ */
+function odtworzZMigawki(migawka: ElementMigawki[]): number {
+  if (!ladderContainer || !migawka || !migawka.length) { return 0 }
+
+  while (ladderContainer.children.length > 0) {
+    ladderContainer.remove(ladderContainer.children[0])
+  }
+
+  let postawione = 0
+  for (const e of migawka) {
+    const zrodlo = modelDlaMigawki(e)
+    if (!zrodlo) { continue }
+
+    const model = zrodlo.clone(true)
+    model.position.set(e.poz[0], e.poz[1], e.poz[2])
+    model.quaternion.set(e.obrot[0], e.obrot[1], e.obrot[2], e.obrot[3])
+    model.scale.set(e.skala[0], e.skala[1], e.skala[2])
+    model.userData.elementId = e.id
+    model.userData.zMigawki = true
+    model.userData.ladderNum = e.ladderNum || 1
+    ladderContainer.add(model)
+    postawione++
+  }
+  return postawione
+}
+
 defineExpose({
   createLadder,
+  eksportujScene,
+  odtworzZMigawki,
   resetCamera: () => {
     targetRotation = { x: 0.35, y: -0.785 }
     currentRotation = { x: 0.35, y: -0.785 }

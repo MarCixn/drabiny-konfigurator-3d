@@ -90,6 +90,24 @@ export interface LadderConfig {
   /** Reczna korekta liczby obreczy kosza (-5..+5). */
   cageCorrection?: number
 
+  /**
+   * MIGAWKA SCENY - gotowa lista elementow 3D zamiast parametrow do
+   * przeliczenia. Tryb podgladu stawia z niej modele 1:1, bez uruchamiania
+   * logiki budowania drabiny. Dzieki temu reczne ustawienia (typ wspornika
+   * przy pojedynczym laczniku, wariant typu C z suwaka) nie moga sie
+   * "nie odtworzyc" - nie sa odtwarzane, tylko pokazane.
+   */
+  sceneSnapshot?: Array<{
+    id: string
+    rodzaj: string
+    model?: string
+    poz: [number, number, number]
+    obrot: [number, number, number, number]
+    skala: [number, number, number]
+    ladderNum?: number
+    side?: string
+  }>
+
   // Opcje i dodatki
   cageClosing?: boolean
   accessLock?: boolean
