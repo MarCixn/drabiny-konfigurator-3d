@@ -66,7 +66,9 @@ export interface LadderConfig {
   connectorTypes?: string[]
   wspornikTypes?: string[]
   wspornikDistances?: number[]
-  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
+  /** Ktore laczniki maja wspornik ustawiony recznie. */
+  wspornikManual?: boolean[]
+  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number; manual?: boolean }
   /** Reczna korekta liczby obreczy kosza (-5..+5). */
   cageCorrection?: number
   sciskaneHandles?: Array<{

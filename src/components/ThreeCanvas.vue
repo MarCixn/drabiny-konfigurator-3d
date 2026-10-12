@@ -75,8 +75,10 @@ const props = defineProps<{
   initialWspornikTypes?: string[]
   // Odległości wsporników osobno dla każdego łącznika
   initialWspornikDistances?: number[]
+  // Które łączniki mają wspornik ustawiony ręcznie
+  initialWspornikManual?: boolean[]
   // Wspornik śródszczeblowy - typ łącznika, wspornik i odległość
-  initialMidRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
+  initialMidRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number; manual?: boolean }
   // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
   descentWspornikDistance?: number  // w mm
 }>()
@@ -93,7 +95,8 @@ const emit = defineEmits<{
     connectorTypes: string[]
     wspornikTypes: string[]
     wspornikDistances?: number[]
-    midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number }
+    wspornikManual?: boolean[]
+    midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number; manual?: boolean }
     sciskaneHandles?: Array<{
       offsetFromBottom: number
       connType: string
@@ -549,6 +552,10 @@ let finalLadderRungs1: number | string = 0
 let connectorTypes1: string[] = []
 let wspornikTypes1: string[] = []
 let wspornikDistances1: number[] = []
+/* Ktore laczniki maja wspornik ustawiony RECZNIE w oknie "Edytuj uchwyty".
+   Rownolegle do wspornikTypes1 - bez tego zmiana odleglosci globalnej
+   kasowala kazda reczna decyzje bez sladu. */
+let wspornikManual1: boolean[] = []
 let sciskaneHandles1: Array<{
   offsetFromBottom: number
   connType: string
@@ -577,6 +584,7 @@ let finalLadderRungs2: number | string = 0
 let connectorTypes2: string[] = []
 let wspornikTypes2: string[] = []
 let wspornikDistances2: number[] = []
+let wspornikManual2: boolean[] = []
 let sciskaneHandles2: Array<{
   offsetFromBottom: number
   connType: string
@@ -615,7 +623,9 @@ let midRungBracketConnType2 = 'uchwyt'
 let midRungBracketWspornikType1 = 'krotki'
 let midRungBracketWspornikType2 = 'krotki'
 let midRungBracketDistance1 = 215
+let midRungBracketManual1 = false
 let midRungBracketDistance2 = 215
+let midRungBracketManual2 = false
 
 // Other state
 let handrailType = 'none'
@@ -957,12 +967,23 @@ function syncPropsToState() {
     }
   }
 
+  // Znaczniki "ustawione ręcznie" - bez nich odtworzone wartości zostałyby
+  // spłaszczone przez pierwszą zmianę odległości globalnej.
+  if (props.initialWspornikManual && props.initialWspornikManual.length > 0
+      && wspornikManual1.length === 0) {
+    wspornikManual1.length = 0
+    for (const f of props.initialWspornikManual) {
+      wspornikManual1.push(f === true)
+    }
+  }
+
   // Wspornik śródszczeblowy
   if (props.initialMidRungBracket) {
     const m = props.initialMidRungBracket
     if (m.connType) { midRungBracketConnType1 = m.connType }
     if (m.wspornikType) { midRungBracketWspornikType1 = m.wspornikType }
     if (m.wspornikDistance) { midRungBracketDistance1 = m.wspornikDistance }
+    if (m.manual) { midRungBracketManual1 = true }
   }
 
   numX7Ladders1 = props.numX7Ladders
@@ -1965,6 +1986,102 @@ function setupControls() {
   })
 }
 
+/**
+ * Zastosuj ustawienia wczytane z zapisanej oferty.
+ *
+ * DLACZEGO OSOBNY OBSERWATOR, a nie syncPropsToState().
+ * Konfiguracja z linku (?ref=&code=) przychodzi po HTTP, czyli JUZ PO
+ * zamontowaniu sceny. syncPropsToState() zdazyl sie wtedy wykonac z pustymi
+ * tablicami, a jego warunki "length === 0" blokuja pozniejsze zasianie, bo
+ * tablice wypelnilo w miedzyczasie tworzenie drabiny. Efekt: zapisane
+ * odleglosci i typy wspornikow docieraly do przegladarki i nic sie z nimi nie
+ * dzialo - ten sam link z dwoma roznymi zestawami odleglosci dawal zrzuty
+ * o identycznym md5.
+ *
+ * Dlatego tu NADPISUJEMY, a nie uzupelniamy: przyszla zapisana prawda.
+ */
+function zastosujZapisaneUstawienia() {
+  let cos = false
+
+  /* Przypisujemy po indeksie BEZ ograniczania do aktualnej dlugosci tablicy.
+     Gdy dane z linku przychodza przed zbudowaniem drabiny, tablica jest jeszcze
+     pusta i "min(zapisane, aktualne)" dawalo zero - czyli nie zapisywalo nic.
+     Indeksowane przypisanie samo rozszerza tablice, a createLadder() dopycha
+     reszte wartosciami domyslnymi przez "while (length < n) push". */
+  const typy = props.initialWspornikTypes
+  if (typy && typy.length) {
+    for (let i = 0; i < typy.length; i++) {
+      wspornikTypes1[i] = typy[i]
+    }
+    cos = true
+  }
+
+  const odl = props.initialWspornikDistances
+  if (odl && odl.length) {
+    for (let i = 0; i < odl.length; i++) {
+      wspornikDistances1[i] = odl[i]
+    }
+    cos = true
+  }
+
+  const reczne = props.initialWspornikManual
+  if (reczne && reczne.length) {
+    wspornikManual1.length = 0
+    for (const f of reczne) { wspornikManual1.push(f === true) }
+    cos = true
+  }
+
+  const laczniki = props.initialConnectorTypes
+  if (laczniki && laczniki.length) {
+    for (let i = 0; i < laczniki.length; i++) {
+      connectorTypes1[i] = laczniki[i]
+    }
+    cos = true
+  }
+
+  const m = props.initialMidRungBracket
+  if (m) {
+    if (m.connType) { midRungBracketConnType1 = m.connType }
+    if (m.wspornikType) { midRungBracketWspornikType1 = m.wspornikType }
+    if (m.wspornikDistance) { midRungBracketDistance1 = m.wspornikDistance }
+    if (m.manual) { midRungBracketManual1 = true }
+    cos = true
+  }
+
+  const uchwyty = props.initialSciskaneHandles
+  if (uchwyty && uchwyty.length) {
+    sciskaneHandles1.length = 0
+    for (const h of uchwyty) {
+      sciskaneHandles1.push({
+        offsetFromBottom: h.offsetFromBottom,
+        connType: h.connType,
+        wspornikType: h.wspornikType || typWspornikaZProps(),
+        wspornikDistance: h.wspornikDistance
+          || (props.wspornikDistance > 0 ? props.wspornikDistance : 215),
+        wspornikTypeManual: h.wspornikTypeManual === true,
+        autoAdded: false
+      })
+    }
+    cos = true
+  }
+
+  if (cos) {
+    createLadder()
+    if (sciskaneMode) { createSciskanePreview() }
+  }
+}
+
+watch(() => [
+  props.initialWspornikTypes,
+  props.initialWspornikDistances,
+  props.initialWspornikManual,
+  props.initialConnectorTypes,
+  props.initialSciskaneHandles,
+  props.initialMidRungBracket
+], () => {
+  zastosujZapisaneUstawienia()
+}, { deep: true })
+
 // ============================================
 // MODEL LOADING
 // ============================================
@@ -2349,21 +2466,23 @@ function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
   if (ladderNum === 1) {
     globalWspornikDistance1 = distanceMm
     defaultWspornik1 = type
-    // Update all wsporniki (like original configurator)
+    /* Zmiana odleglosci globalnej ustawia wszystkie wsporniki NA NOWO, ale
+       omija te ustawione recznie. Bez tego kazde przesuniecie suwaka kasowalo
+       prace wykonana w oknie "Edytuj uchwyty" - i to po cichu. */
     for (let i = 0; i < wspornikTypes1.length; i++) {
-      if (wspornikTypes1[i] !== 'none') {
+      if (wspornikTypes1[i] !== 'none' && !wspornikManual1[i]) {
         wspornikTypes1[i] = type
         wspornikDistances1[i] = distanceMm
       }
     }
     // Update midRungBracket
-    if (midRungBracketWspornikType1 !== 'none') {
+    if (midRungBracketWspornikType1 !== 'none' && !midRungBracketManual1) {
       midRungBracketWspornikType1 = type
       midRungBracketDistance1 = distanceMm
     }
     // Update sciskane handles
     for (const handle of sciskaneHandles1) {
-      if (handle.wspornikType !== 'none') {
+      if (handle.wspornikType !== 'none' && handle.wspornikTypeManual !== true) {
         handle.wspornikType = type
         handle.wspornikDistance = distanceMm
       }
@@ -2373,15 +2492,17 @@ function updateGlobalWspornikDistance(ladderNum: number, distanceMm: number) {
     defaultWspornik2 = type
     // Update all wsporniki (like original configurator)
     for (let i = 0; i < wspornikTypes2.length; i++) {
-      if (wspornikTypes2[i] !== 'none') {
+      if (wspornikTypes2[i] !== 'none' && !wspornikManual2[i]) {
         wspornikTypes2[i] = type
         wspornikDistances2[i] = distanceMm
       }
     }
     // Update midRungBracket
     if (midRungBracketWspornikType2 !== 'none') {
-      midRungBracketWspornikType2 = type
-      midRungBracketDistance2 = distanceMm
+      if (!midRungBracketManual2) {
+        midRungBracketWspornikType2 = type
+        midRungBracketDistance2 = distanceMm
+      }
     }
     // Update sciskane handles
     for (const handle of sciskaneHandles2) {
@@ -7260,10 +7381,12 @@ function emitUpdate() {
        srodszczeblowego. Typy szly juz wczesniej, ale bez odleglosci wracaly
        na domyslna z calej drabiny, a wspornik srodszczeblowy nie wracal wcale. */
     wspornikDistances: wspornikDistances1.slice(),
+    wspornikManual: wspornikManual1.slice(),
     midRungBracket: {
       connType: midRungBracketConnType1,
       wspornikType: midRungBracketWspornikType1,
-      wspornikDistance: midRungBracketDistance1
+      wspornikDistance: midRungBracketDistance1,
+      manual: midRungBracketManual1
     },
     /* Typ wspornika idzie RAZEM z uchwytem. Bez niego zapisana konfiguracja
        wiedziala, GDZIE stoi uchwyt, ale nie CZYM jest przykrecony - a pod
@@ -8775,23 +8898,26 @@ function setGlobalWspornikDistance(distanceMm: number, ladderNum: number = 1) {
     globalWspornikDistance1 = distanceMm
     defaultWspornik1 = newType
 
-    // Update all sciskane handles
+    // Reczne ustawienia zostaja - patrz updateGlobalWspornikDistance()
     for (const handle of sciskaneHandles1) {
-      handle.wspornikDistance = distanceMm
-      handle.wspornikType = newType
+      if (handle.wspornikTypeManual !== true) {
+        handle.wspornikDistance = distanceMm
+        handle.wspornikType = newType
+      }
     }
 
     // Update mid-rung bracket
-    midRungBracketDistance1 = distanceMm
-    midRungBracketWspornikType1 = newType
-
-    // Update wspornik distances array
-    for (let i = 0; i < wspornikDistances1.length; i++) {
-      wspornikDistances1[i] = distanceMm
+    if (!midRungBracketManual1) {
+      midRungBracketDistance1 = distanceMm
+      midRungBracketWspornikType1 = newType
     }
-    // Update wspornik types array
+
+    // Update wspornik distances / types array
     for (let i = 0; i < wspornikTypes1.length; i++) {
-      wspornikTypes1[i] = newType
+      if (!wspornikManual1[i]) {
+        wspornikDistances1[i] = distanceMm
+        wspornikTypes1[i] = newType
+      }
     }
   } else {
     globalWspornikDistance2 = distanceMm
@@ -8804,8 +8930,10 @@ function setGlobalWspornikDistance(distanceMm: number, ladderNum: number = 1) {
     }
 
     // Update mid-rung bracket
-    midRungBracketDistance2 = distanceMm
-    midRungBracketWspornikType2 = newType
+    if (!midRungBracketManual2) {
+      midRungBracketDistance2 = distanceMm
+      midRungBracketWspornikType2 = newType
+    }
 
     // Update wspornik distances array
     for (let i = 0; i < wspornikDistances2.length; i++) {
@@ -9137,11 +9265,14 @@ function updateJointConnector(pairIndex: number, ladderNum: number, updates: {
         }
       }
     }
+    const wspManual = ladderNum === 1 ? wspornikManual1 : wspornikManual2
     if (updates.wspornikType !== undefined) {
       wspTypes[pairIndex] = updates.wspornikType
+      wspManual[pairIndex] = true
     }
     if (updates.wspornikDistance !== undefined) {
       wspDistances[pairIndex] = updates.wspornikDistance
+      wspManual[pairIndex] = true
     }
 
     createLadder()
@@ -9161,12 +9292,24 @@ function updateMidRungBracket(ladderNum: number, updates: {
 }) {
   if (ladderNum === 1) {
     if (updates.connType !== undefined) midRungBracketConnType1 = updates.connType
-    if (updates.wspornikType !== undefined) midRungBracketWspornikType1 = updates.wspornikType
-    if (updates.wspornikDistance !== undefined) midRungBracketDistance1 = updates.wspornikDistance
+    if (updates.wspornikType !== undefined) {
+      midRungBracketWspornikType1 = updates.wspornikType
+      midRungBracketManual1 = true
+    }
+    if (updates.wspornikDistance !== undefined) {
+      midRungBracketDistance1 = updates.wspornikDistance
+      midRungBracketManual1 = true
+    }
   } else {
     if (updates.connType !== undefined) midRungBracketConnType2 = updates.connType
-    if (updates.wspornikType !== undefined) midRungBracketWspornikType2 = updates.wspornikType
-    if (updates.wspornikDistance !== undefined) midRungBracketDistance2 = updates.wspornikDistance
+    if (updates.wspornikType !== undefined) {
+      midRungBracketWspornikType2 = updates.wspornikType
+      midRungBracketManual2 = true
+    }
+    if (updates.wspornikDistance !== undefined) {
+      midRungBracketDistance2 = updates.wspornikDistance
+      midRungBracketManual2 = true
+    }
   }
 
   createLadder()

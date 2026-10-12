@@ -482,7 +482,8 @@ const threeState = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
   wspornikDistances: [] as number[],
-  midRungBracket: null as { connType: string; wspornikType: string; wspornikDistance: number } | null,
+  wspornikManual: [] as boolean[],
+  midRungBracket: null as { connType: string; wspornikType: string; wspornikDistance: number; manual?: boolean } | null,
   // Dodatkowe uchwyty ściskane (pozycje)
   sciskaneHandles: [] as Array<{
     offsetFromBottom: number
@@ -506,7 +507,8 @@ const wczytaneUchwyty = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
   wspornikDistances: [] as number[],
-  midRungBracket: null as { connType?: string; wspornikType?: string; wspornikDistance?: number } | null,
+  wspornikManual: [] as boolean[],
+  midRungBracket: null as { connType?: string; wspornikType?: string; wspornikDistance?: number; manual?: boolean } | null,
   sciskaneHandles: [] as Array<{
     offsetFromBottom: number
     connType: string
@@ -642,6 +644,7 @@ const threeCanvasProps = computed(() => {
     initialConnectorTypes: wczytaneUchwyty.value.connectorTypes,
     initialWspornikTypes: wczytaneUchwyty.value.wspornikTypes,
     initialWspornikDistances: wczytaneUchwyty.value.wspornikDistances,
+    initialWspornikManual: wczytaneUchwyty.value.wspornikManual,
     initialMidRungBracket: wczytaneUchwyty.value.midRungBracket ?? undefined
   }
 })
@@ -665,7 +668,8 @@ function onThreeUpdate(data: {
   connectorTypes?: string[];
   wspornikTypes?: string[];
   wspornikDistances?: number[];
-  midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number };
+  wspornikManual?: boolean[];
+  midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number; manual?: boolean };
   sciskaneHandles?: Array<{
     offsetFromBottom: number
     connType: string
@@ -691,6 +695,9 @@ function onThreeUpdate(data: {
   }
   if (data.wspornikDistances) {
     threeState.value.wspornikDistances = data.wspornikDistances
+  }
+  if (data.wspornikManual) {
+    threeState.value.wspornikManual = data.wspornikManual
   }
   if (data.midRungBracket) {
     threeState.value.midRungBracket = data.midRungBracket
@@ -2165,6 +2172,9 @@ async function checkUrlAndLoadOffer() {
         wspornikDistances: Array.isArray(ladder.wspornikDistances)
           ? ladder.wspornikDistances.map((d: any) => Number(d) || 0)
           : [],
+        wspornikManual: Array.isArray(ladder.wspornikManual)
+          ? ladder.wspornikManual.map((f: any) => f === true)
+          : [],
         midRungBracket: ladder.midRungBracket || null,
         sciskaneHandles: Array.isArray(ladder.sciskaneHandles)
           ? ladder.sciskaneHandles.map((h: any) => ({
@@ -2527,6 +2537,7 @@ async function generateOffer() {
         wspornikTypes: [...threeState.value.wspornikTypes],
         connectorTypes: [...threeState.value.connectorTypes],
         wspornikDistances: [...threeState.value.wspornikDistances],
+        wspornikManual: [...threeState.value.wspornikManual],
         midRungBracket: threeState.value.midRungBracket
           ? { ...threeState.value.midRungBracket }
           : undefined,
@@ -3603,6 +3614,9 @@ function applyConfigFromPostMessage(config: LadderConfig) {
       wspornikTypes: Array.isArray(config.wspornikTypes) ? [...config.wspornikTypes] : [],
       wspornikDistances: Array.isArray(config.wspornikDistances)
         ? config.wspornikDistances.map(d => Number(d) || 0)
+        : [],
+      wspornikManual: Array.isArray(config.wspornikManual)
+        ? config.wspornikManual.map(f => f === true)
         : [],
       midRungBracket: config.midRungBracket || null,
       sciskaneHandles: Array.isArray(config.sciskaneHandles)

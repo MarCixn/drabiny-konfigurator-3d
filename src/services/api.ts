@@ -82,8 +82,11 @@ export interface LadderConfig {
 
   /** Odleglosc wspornika osobno dla kazdego lacznika (mm). */
   wspornikDistances?: number[]
+  /** Ktore laczniki maja wspornik ustawiony RECZNIE - te nie sa plaszczone
+      przy zmianie odleglosci globalnej. */
+  wspornikManual?: boolean[]
   /** Wspornik srodszczeblowy - ustawiany osobno od pozostalych. */
-  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
+  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number; manual?: boolean }
   /** Reczna korekta liczby obreczy kosza (-5..+5). */
   cageCorrection?: number
 
