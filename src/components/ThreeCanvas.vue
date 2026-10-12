@@ -61,7 +61,13 @@ const props = defineProps<{
   // Ściana strony zejścia dla płaskiego/okapu
   showDescentWall?: boolean  // Pokaż ścianę zejścia (dla płaskiego dachu)
   // Początkowe pozycje ściskanych uchwytów (dla trybu podglądu)
-  initialSciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
+  initialSciskaneHandles?: Array<{
+    offsetFromBottom: number
+    connType: string
+    wspornikType?: string
+    wspornikDistance?: number
+    wspornikTypeManual?: boolean
+  }>
   // Początkowe typy łączników (dla trybu podglądu)
   initialConnectorTypes?: string[]
   // Początkowe typy wsporników (dla trybu podglądu). Bez tego wczytana
@@ -82,7 +88,13 @@ const emit = defineEmits<{
     safetyCageCount: number
     connectorTypes: string[]
     wspornikTypes: string[]
-    sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
+    sciskaneHandles?: Array<{
+      offsetFromBottom: number
+      connType: string
+      wspornikType?: string
+      wspornikDistance?: number
+      wspornikTypeManual?: boolean
+    }>
     lastRungToGround?: number
     lastHoopToGround?: number
     bomData?: BOMData
@@ -896,14 +908,17 @@ function syncPropsToState() {
   // Initialize sciskaneHandles from props if provided (for view mode)
   if (props.initialSciskaneHandles && props.initialSciskaneHandles.length > 0 && sciskaneHandles1.length === 0) {
     for (const handle of props.initialSciskaneHandles) {
+      /* Typ zapisany przy uchwycie ma pierwszenstwo nad typem calej drabiny -
+         inaczej uchwyt z recznie wybranym wspornikiem srednim wracalby jako
+         typ C, bo taka rodzine ma reszta drabiny. Flage niesiemy dalej, zeby
+         typWspornikaUchwytu() nie sprowadzila typu z powrotem. */
       sciskaneHandles1.push({
         offsetFromBottom: handle.offsetFromBottom,
         connType: handle.connType,
-        // Bylo tu zahardkodowane 'krotki' / 215, przez co uchwyty ściskane
-        // wczytane z zapisanej konfiguracji nie znaly ani typu C, ani zadnego
-        // innego ustawienia niz krotki.
-        wspornikType: typWspornikaZProps(),
-        wspornikDistance: props.wspornikDistance > 0 ? props.wspornikDistance : 215,
+        wspornikType: handle.wspornikType || typWspornikaZProps(),
+        wspornikDistance: handle.wspornikDistance
+          || (props.wspornikDistance > 0 ? props.wspornikDistance : 215),
+        wspornikTypeManual: handle.wspornikTypeManual === true,
         autoAdded: false  // Mark as manually added
       })
     }
@@ -7217,9 +7232,17 @@ function emitUpdate() {
     safetyCageCount: safetyCageCount1,
     connectorTypes: connectorTypes1.slice(),
     wspornikTypes: wspornikTypes1.slice(),
+    /* Typ wspornika idzie RAZEM z uchwytem. Bez niego zapisana konfiguracja
+       wiedziala, GDZIE stoi uchwyt, ale nie CZYM jest przykrecony - a pod
+       "Edytuj uchwyty" da sie ustawic kazdemu inny. wspornikTypeManual
+       decyduje, czy typ przezyje: bez tej flagi typWspornikaUchwytu()
+       sprowadza uchwyt do rodziny wspornikow calej drabiny. */
     sciskaneHandles: sciskaneHandles1.map(h => ({
       offsetFromBottom: h.offsetFromBottom,
-      connType: h.connType
+      connType: h.connType,
+      wspornikType: h.wspornikType,
+      wspornikDistance: h.wspornikDistance,
+      wspornikTypeManual: h.wspornikTypeManual === true
     })),
     lastRungToGround: Math.round(lastRungToGround),
     lastHoopToGround,

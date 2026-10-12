@@ -65,7 +65,15 @@ export interface LadderConfig {
   // 3D state data (connector types and sciskane handles positions)
   connectorTypes?: string[]
   wspornikTypes?: string[]
-  sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
+  sciskaneHandles?: Array<{
+    offsetFromBottom: number
+    connType: string
+    /** Typ wspornika przy TYM uchwycie (krotki/sredni/dlugi albo typ_c_*). */
+    wspornikType?: string
+    wspornikDistance?: number
+    /** true = wybrany recznie, nie sprowadzac do rodziny drabiny. */
+    wspornikTypeManual?: boolean
+  }>
   // Wysokości do opłaty stałej (w mm)
   lastHoopToGround?: number
   lastRungToGround?: number

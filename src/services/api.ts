@@ -109,7 +109,13 @@ export interface LadderConfig {
   ralPriceModifier?: number
 
   /** Pozycje dodatkowych uchwytow sciskanych, offset od dolu w mm. */
-  sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>
+  sciskaneHandles?: Array<{
+    offsetFromBottom: number
+    connType: string
+    wspornikType?: string
+    wspornikDistance?: number
+    wspornikTypeManual?: boolean
+  }>
 }
 
 export interface CalculateRequest {

@@ -482,7 +482,13 @@ const threeState = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
   // Dodatkowe uchwyty ściskane (pozycje)
-  sciskaneHandles: [] as Array<{ offsetFromBottom: number; connType: string }>
+  sciskaneHandles: [] as Array<{
+    offsetFromBottom: number
+    connType: string
+    wspornikType?: string
+    wspornikDistance?: number
+    wspornikTypeManual?: boolean
+  }>
 })
 
 const threeReady = ref(false)
@@ -497,7 +503,13 @@ const threeReady = ref(false)
 const wczytaneUchwyty = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
-  sciskaneHandles: [] as Array<{ offsetFromBottom: number; connType: string }>
+  sciskaneHandles: [] as Array<{
+    offsetFromBottom: number
+    connType: string
+    wspornikType?: string
+    wspornikDistance?: number
+    wspornikTypeManual?: boolean
+  }>
 })
 
 // Stan API i komponentów
@@ -2129,7 +2141,10 @@ async function checkUrlAndLoadOffer() {
         sciskaneHandles: Array.isArray(ladder.sciskaneHandles)
           ? ladder.sciskaneHandles.map((h: any) => ({
               offsetFromBottom: Number(h.offsetFromBottom) || 0,
-              connType: String(h.connType || 'uchwyt')
+              connType: String(h.connType || 'uchwyt'),
+              wspornikType: h.wspornikType ? String(h.wspornikType) : undefined,
+              wspornikDistance: h.wspornikDistance ? Number(h.wspornikDistance) : undefined,
+              wspornikTypeManual: h.wspornikTypeManual === true
             }))
           : []
       }
@@ -2480,7 +2495,10 @@ async function generateOffer() {
         connectorTypes: [...threeState.value.connectorTypes],
         sciskaneHandles: threeState.value.sciskaneHandles.map(h => ({
           offsetFromBottom: h.offsetFromBottom,
-          connType: h.connType
+          connType: h.connType,
+          wspornikType: h.wspornikType,
+          wspornikDistance: h.wspornikDistance,
+          wspornikTypeManual: h.wspornikTypeManual === true
         }))
       },
       quantity: 1
@@ -3549,7 +3567,10 @@ function applyConfigFromPostMessage(config: LadderConfig) {
       sciskaneHandles: Array.isArray(config.sciskaneHandles)
         ? config.sciskaneHandles.map(h => ({
             offsetFromBottom: Number(h.offsetFromBottom) || 0,
-            connType: String(h.connType || 'uchwyt')
+            connType: String(h.connType || 'uchwyt'),
+            wspornikType: h.wspornikType ? String(h.wspornikType) : undefined,
+            wspornikDistance: h.wspornikDistance ? Number(h.wspornikDistance) : undefined,
+            wspornikTypeManual: h.wspornikTypeManual === true
           }))
         : []
     }
