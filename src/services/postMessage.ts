@@ -65,6 +65,10 @@ export interface LadderConfig {
   // 3D state data (connector types and sciskane handles positions)
   connectorTypes?: string[]
   wspornikTypes?: string[]
+  wspornikDistances?: number[]
+  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
+  /** Reczna korekta liczby obreczy kosza (-5..+5). */
+  cageCorrection?: number
   sciskaneHandles?: Array<{
     offsetFromBottom: number
     connType: string

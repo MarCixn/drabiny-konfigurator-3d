@@ -73,6 +73,10 @@ const props = defineProps<{
   // Początkowe typy wsporników (dla trybu podglądu). Bez tego wczytana
   // konfiguracja odtwarzała łączniki, ale wsporniki wracały domyślne.
   initialWspornikTypes?: string[]
+  // Odległości wsporników osobno dla każdego łącznika
+  initialWspornikDistances?: number[]
+  // Wspornik śródszczeblowy - typ łącznika, wspornik i odległość
+  initialMidRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
   // Odległość wsporników dla drabiny zejścia (przełaz attykowy z wsporniki)
   descentWspornikDistance?: number  // w mm
 }>()
@@ -88,6 +92,8 @@ const emit = defineEmits<{
     safetyCageCount: number
     connectorTypes: string[]
     wspornikTypes: string[]
+    wspornikDistances?: number[]
+    midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number }
     sciskaneHandles?: Array<{
       offsetFromBottom: number
       connType: string
@@ -939,6 +945,24 @@ function syncPropsToState() {
     for (const type of props.initialWspornikTypes) {
       wspornikTypes1.push(type)
     }
+  }
+
+  // Odległości per łącznik - bez nich wspornik wracał z właściwym typem,
+  // ale na domyślnej odległości dla całej drabiny.
+  if (props.initialWspornikDistances && props.initialWspornikDistances.length > 0
+      && wspornikDistances1.length === 0) {
+    wspornikDistances1.length = 0
+    for (const d of props.initialWspornikDistances) {
+      wspornikDistances1.push(d)
+    }
+  }
+
+  // Wspornik śródszczeblowy
+  if (props.initialMidRungBracket) {
+    const m = props.initialMidRungBracket
+    if (m.connType) { midRungBracketConnType1 = m.connType }
+    if (m.wspornikType) { midRungBracketWspornikType1 = m.wspornikType }
+    if (m.wspornikDistance) { midRungBracketDistance1 = m.wspornikDistance }
   }
 
   numX7Ladders1 = props.numX7Ladders
@@ -7232,6 +7256,15 @@ function emitUpdate() {
     safetyCageCount: safetyCageCount1,
     connectorTypes: connectorTypes1.slice(),
     wspornikTypes: wspornikTypes1.slice(),
+    /* Odleglosci osobno dla kazdego lacznika i stan wspornika
+       srodszczeblowego. Typy szly juz wczesniej, ale bez odleglosci wracaly
+       na domyslna z calej drabiny, a wspornik srodszczeblowy nie wracal wcale. */
+    wspornikDistances: wspornikDistances1.slice(),
+    midRungBracket: {
+      connType: midRungBracketConnType1,
+      wspornikType: midRungBracketWspornikType1,
+      wspornikDistance: midRungBracketDistance1
+    },
     /* Typ wspornika idzie RAZEM z uchwytem. Bez niego zapisana konfiguracja
        wiedziala, GDZIE stoi uchwyt, ale nie CZYM jest przykrecony - a pod
        "Edytuj uchwyty" da sie ustawic kazdemu inny. wspornikTypeManual

@@ -481,6 +481,8 @@ const threeState = ref({
   // Typy łączników i wsporników (z ThreeCanvas)
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
+  wspornikDistances: [] as number[],
+  midRungBracket: null as { connType: string; wspornikType: string; wspornikDistance: number } | null,
   // Dodatkowe uchwyty ściskane (pozycje)
   sciskaneHandles: [] as Array<{
     offsetFromBottom: number
@@ -503,6 +505,8 @@ const threeReady = ref(false)
 const wczytaneUchwyty = ref({
   connectorTypes: [] as string[],
   wspornikTypes: [] as string[],
+  wspornikDistances: [] as number[],
+  midRungBracket: null as { connType?: string; wspornikType?: string; wspornikDistance?: number } | null,
   sciskaneHandles: [] as Array<{
     offsetFromBottom: number
     connType: string
@@ -636,7 +640,9 @@ const threeCanvasProps = computed(() => {
        normalnej pracy w panelu nic sie nie zmienia. */
     initialSciskaneHandles: wczytaneUchwyty.value.sciskaneHandles,
     initialConnectorTypes: wczytaneUchwyty.value.connectorTypes,
-    initialWspornikTypes: wczytaneUchwyty.value.wspornikTypes
+    initialWspornikTypes: wczytaneUchwyty.value.wspornikTypes,
+    initialWspornikDistances: wczytaneUchwyty.value.wspornikDistances,
+    initialMidRungBracket: wczytaneUchwyty.value.midRungBracket ?? undefined
   }
 })
 
@@ -658,7 +664,15 @@ function onThreeUpdate(data: {
   lastHoopToGround?: number;
   connectorTypes?: string[];
   wspornikTypes?: string[];
-  sciskaneHandles?: Array<{ offsetFromBottom: number; connType: string }>;
+  wspornikDistances?: number[];
+  midRungBracket?: { connType: string; wspornikType: string; wspornikDistance: number };
+  sciskaneHandles?: Array<{
+    offsetFromBottom: number
+    connType: string
+    wspornikType?: string
+    wspornikDistance?: number
+    wspornikTypeManual?: boolean
+  }>;
   bomData?: BOMData;
 }) {
   threeState.value.totalRungs = data.totalRungs
@@ -674,6 +688,12 @@ function onThreeUpdate(data: {
   }
   if (data.wspornikTypes) {
     threeState.value.wspornikTypes = data.wspornikTypes
+  }
+  if (data.wspornikDistances) {
+    threeState.value.wspornikDistances = data.wspornikDistances
+  }
+  if (data.midRungBracket) {
+    threeState.value.midRungBracket = data.midRungBracket
   }
   if (data.sciskaneHandles) {
     threeState.value.sciskaneHandles = data.sciskaneHandles
@@ -2135,9 +2155,17 @@ async function checkUrlAndLoadOffer() {
 
       /* Uchwyty ustawione recznie pod "Edytuj uchwyty". To jedyne WEJSCIE dla
          sceny - ThreeCanvas zasiewa z nich swoje tablice, gdy sa niepuste. */
+      // Korekta obreczy musi wrocic PRZED scena - threeCanvasProps liczy z niej
+      // safetyCageCount.
+      cageCorrection.value = Number(ladder.cageCorrection) || 0
+
       wczytaneUchwyty.value = {
         connectorTypes: Array.isArray(ladder.connectorTypes) ? [...ladder.connectorTypes] : [],
         wspornikTypes: Array.isArray(ladder.wspornikTypes) ? [...ladder.wspornikTypes] : [],
+        wspornikDistances: Array.isArray(ladder.wspornikDistances)
+          ? ladder.wspornikDistances.map((d: any) => Number(d) || 0)
+          : [],
+        midRungBracket: ladder.midRungBracket || null,
         sciskaneHandles: Array.isArray(ladder.sciskaneHandles)
           ? ladder.sciskaneHandles.map((h: any) => ({
               offsetFromBottom: Number(h.offsetFromBottom) || 0,
@@ -2490,9 +2518,18 @@ async function generateOffer() {
           bottomHeightMm: obs.heightFrom * 1000,
           heightMm: obs.height * 1000
         })),
+        /* Reczna korekta liczby obreczy kosza. Liczba obreczy wychodzi
+           z wysokosci, ale panel pozwala ja podbic lub obnizyc o max 5 -
+           bez zapisu wczytana oferta wracala do wartosci wyliczonej i korekta
+           przepadala. */
+        cageCorrection: cageCorrection.value,
         // Stan sceny 3D - uchwyty tak, jak je ustawil handlowiec
         wspornikTypes: [...threeState.value.wspornikTypes],
         connectorTypes: [...threeState.value.connectorTypes],
+        wspornikDistances: [...threeState.value.wspornikDistances],
+        midRungBracket: threeState.value.midRungBracket
+          ? { ...threeState.value.midRungBracket }
+          : undefined,
         sciskaneHandles: threeState.value.sciskaneHandles.map(h => ({
           offsetFromBottom: h.offsetFromBottom,
           connType: h.connType,
@@ -3564,6 +3601,10 @@ function applyConfigFromPostMessage(config: LadderConfig) {
     wczytaneUchwyty.value = {
       connectorTypes: Array.isArray(config.connectorTypes) ? [...config.connectorTypes] : [],
       wspornikTypes: Array.isArray(config.wspornikTypes) ? [...config.wspornikTypes] : [],
+      wspornikDistances: Array.isArray(config.wspornikDistances)
+        ? config.wspornikDistances.map(d => Number(d) || 0)
+        : [],
+      midRungBracket: config.midRungBracket || null,
       sciskaneHandles: Array.isArray(config.sciskaneHandles)
         ? config.sciskaneHandles.map(h => ({
             offsetFromBottom: Number(h.offsetFromBottom) || 0,
@@ -3574,6 +3615,11 @@ function applyConfigFromPostMessage(config: LadderConfig) {
           }))
         : []
     }
+  }
+
+  // Korekta liczby obreczy przychodzi z embed.php tak samo jak reszta
+  if (config.cageCorrection !== undefined) {
+    cageCorrection.value = Number(config.cageCorrection) || 0
   }
 
   // Ustaw bracketSpacing na podstawie bracketType (domyślna wartość dla typu)

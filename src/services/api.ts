@@ -80,6 +80,13 @@ export interface LadderConfig {
   /** Zakres wspornika typu C jako napis, np. '16-26' albo '50-60'. */
   bracketTypC?: string
 
+  /** Odleglosc wspornika osobno dla kazdego lacznika (mm). */
+  wspornikDistances?: number[]
+  /** Wspornik srodszczeblowy - ustawiany osobno od pozostalych. */
+  midRungBracket?: { connType?: string; wspornikType?: string; wspornikDistance?: number }
+  /** Reczna korekta liczby obreczy kosza (-5..+5). */
+  cageCorrection?: number
+
   // Opcje i dodatki
   cageClosing?: boolean
   accessLock?: boolean
