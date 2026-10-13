@@ -28,6 +28,15 @@
 *.json       text
 *.md         text
 
+# Konfiguracja serwera. Trzymamy ja bajt w bajt, bo:
+#  - to ona ladzie na serwerze i porownujemy ja po md5 po wgraniu,
+#  - vite kopiuje public/.htaccess do dist/ przy kazdym budowaniu, wiec
+#    znormalizowane zrodlo wnosilo CRLF prosto do zbudowanej paczki
+#    (3397 B na serwerze kontra 3479 B lokalnie - dokladnie 82 bajty,
+#    czyli po jednym na linie).
+.htaccess    -text
+**/.htaccess -text
+
 # Zbudowane paczki (dist/ i docs/ to wdrozenia, nie kod zrodlowy).
 # MUSZA stac na koncu: w gitattributes wygrywa regula pozniejsza, wiec
 # "*.css text" wyzej przykrywalo "dist/** -text" i zbudowany arkusz
