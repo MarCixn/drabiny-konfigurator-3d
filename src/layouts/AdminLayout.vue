@@ -2767,7 +2767,7 @@ const allBomItems = computed(() => {
 
 // Tool modes
 const measureModeActive = ref(false)
-const measureAxisMode = ref<'3d' | 'x' | 'y' | 'z'>('3d')
+const measureAxisMode = ref<'auto' | '3d' | 'x' | 'y' | 'z'>('auto')
 const measureResult = ref<{ distanceMm: number; axisMode: string } | null>(null)
 const techDrawingActive = ref(false)
 const techDrawingView = ref('front')
@@ -4042,7 +4042,7 @@ function closeMeasureWarning() {
   showMeasureWarning.value = false
 }
 
-function setMeasureAxis(mode: '3d' | 'x' | 'y' | 'z') {
+function setMeasureAxis(mode: 'auto' | '3d' | 'x' | 'y' | 'z') {
   measureAxisMode.value = mode
   if (threeCanvasRef.value) {
     threeCanvasRef.value.setMeasureAxisMode(mode)
@@ -4936,34 +4936,31 @@ function toggleCageClosing() {
               </div>
 
               <!-- Kontrolki w prawym górnym rogu (zoom + fullscreen) -->
-              <div v-if="isEmbedMode || isViewMode" class="embed-top-controls">
-                <button
-                  class="embed-control-btn"
-                  @click="zoomIn"
-                  title="Przybliż"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                    <circle cx="11" cy="11" r="8"/>
-                    <path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/>
+              <div v-if="isEmbedMode || isViewMode" class="embed-top-controls"
+                   :class="{ 'pk-zoom': isViewMode }">
+                <button class="embed-control-btn" @click="zoomIn" title="Przybliż">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                       stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                    <circle cx="10.6" cy="10.6" r="6.6"/>
+                    <path d="M15.4 15.4 20.6 20.6"/>
+                    <path d="M10.6 7.8v5.6M7.8 10.6h5.6"/>
                   </svg>
                 </button>
-                <button
-                  class="embed-control-btn"
-                  @click="zoomOut"
-                  title="Oddal"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                    <circle cx="11" cy="11" r="8"/>
-                    <path d="M21 21l-4.35-4.35M8 11h6"/>
+                <button class="embed-control-btn" @click="zoomOut" title="Oddal">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                       stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                    <circle cx="10.6" cy="10.6" r="6.6"/>
+                    <path d="M15.4 15.4 20.6 20.6"/>
+                    <path d="M7.8 10.6h5.6"/>
                   </svg>
                 </button>
-                <button
-                  class="embed-control-btn"
-                  @click="toggleEmbedFullscreen"
-                  title="Pełny ekran"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                    <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
+                <button class="embed-control-btn" @click="toggleEmbedFullscreen" title="Pełny ekran">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                       stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                    <path d="M9 3.6H5.4a1.8 1.8 0 0 0-1.8 1.8V9"/>
+                    <path d="M15 3.6h3.6a1.8 1.8 0 0 1 1.8 1.8V9"/>
+                    <path d="M20.4 15v3.6a1.8 1.8 0 0 1-1.8 1.8H15"/>
+                    <path d="M3.6 15v3.6a1.8 1.8 0 0 0 1.8 1.8H9"/>
                   </svg>
                 </button>
               </div>
@@ -5099,6 +5096,22 @@ function toggleCageClosing() {
                 <span class="measure-toolbar-label">Tryb:</span>
                 <button
                   class="measure-mode-btn"
+                  :class="{ active: measureAxisMode === 'auto' }"
+                  @click="setMeasureAxis('auto')"
+                >
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <!-- Strzalka w cztery strony = "dowolna os". Wczesniej byla
+                         sama strzalka pionowa, nie do odroznienia od ikony Y. -->
+                    <path d="M12 3.8v16.4M3.8 12h16.4"/>
+                    <path d="M9.6 6.2 12 3.8l2.4 2.4M9.6 17.8 12 20.2l2.4-2.4"/>
+                    <path d="M6.2 9.6 3.8 12l2.4 2.4M17.8 9.6 20.2 12l-2.4 2.4"/>
+                  </svg>
+                  <span v-else>A</span>
+                  <span class="tooltip">Auto - dłuższa oś</span>
+                </button>
+                <button
+                  class="measure-mode-btn"
                   :class="{ active: measureAxisMode === '3d' }"
                   @click="setMeasureAxis('3d')"
                 >
@@ -5157,9 +5170,16 @@ function toggleCageClosing() {
               </div>
 
               <!-- WYNIK POMIARU (środek ekranu) -->
-              <div v-if="measureResult" id="measureResultPopup">
-                {{ measureResult.distanceMm.toFixed(1) }} mm
-                <button class="measure-result-close-btn" @click="closeMeasureResult">×</button>
+              <div v-if="measureResult" id="measureResultPopup" :class="{ 'pk-wynik': isViewMode }">
+                <span class="pk-wynik-liczba">{{ measureResult.distanceMm.toFixed(1) }} mm</span>
+                <button class="measure-result-close-btn" @click="closeMeasureResult"
+                        title="Zamknij wynik">
+                  <svg v-if="isViewMode" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       stroke-width="2" stroke-linecap="round">
+                    <path d="M6.6 6.6l10.8 10.8M17.4 6.6 6.6 17.4"/>
+                  </svg>
+                  <span v-else>×</span>
+                </button>
               </div>
 
               <!-- DIALOG POTWIERDZENIA USUNIĘCIA (środek ekranu) -->
@@ -12641,13 +12661,93 @@ body {
   background: #1e293b;
 }
 
-/* Wynik pomiaru - ten sam jezyk wizualny co panel */
-#measureResultPopup {
+/* Wynik pomiaru - ten sam jezyk wizualny co panel.
+   Krzyzyk mial kolor po panelu admina (bialy), wiec na jasnym tle byl
+   niewidoczny - stad jawny kolor i tlo pod kursorem. */
+#measureResultPopup.pk-wynik {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 16px;
+
   background: rgba(255, 255, 255, 0.97);
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 12px;
   box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.3);
   color: #0f172a;
+}
+
+.pk-wynik-liczba {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+#measureResultPopup.pk-wynik .measure-result-close-btn {
+  /* Bazowa regula wyrzuca krzyzyk w prawy gorny rog (position: absolute),
+     przez co nachodzil na jednostke "mm". Tutaj ma byc normalnym
+     elementem rzedu obok liczby. */
+  position: static;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  flex: none;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: #64748b;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+#measureResultPopup.pk-wynik .measure-result-close-btn:hover {
+  background: rgba(15, 23, 42, 0.07);
+  color: #0f172a;
+}
+
+#measureResultPopup.pk-wynik .measure-result-close-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Lupy i pelny ekran - te same ksztalty co panel po lewej */
+.embed-top-controls.pk-zoom {
+  gap: 4px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 12px 32px -8px rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.pk-zoom .embed-control-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  color: #475569;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.pk-zoom .embed-control-btn:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: #0f172a;
+}
+
+.pk-zoom .embed-control-btn:active {
+  background: rgba(15, 23, 42, 0.1);
 }
 
 /* Podpis pod rzutem - zostaje na zrzucie ekranu, ktory klient i tak zrobi. */

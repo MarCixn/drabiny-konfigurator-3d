@@ -543,7 +543,7 @@ let mouse = new THREE.Vector2()
 
 // Measurement mode
 let measureMode = false
-let measureAxisMode: '3d' | 'x' | 'y' | 'z' = '3d'
+let measureAxisMode: 'auto' | '3d' | 'x' | 'y' | 'z' = 'auto'
 let measurePoint1: THREE.Vector3 | null = null
 let measurePoint2: THREE.Vector3 | null = null
 let measureSphere1: THREE.Mesh | null = null
@@ -8119,15 +8119,28 @@ function addMeasurePoint(worldPoint: THREE.Vector3) {
     let lineEndPoint: THREE.Vector3
     let axisLabel = ''
 
-    if (measureAxisMode === 'x') {
+    /* AUTO: bierzemy os, na ktorej punkty rozjechaly sie najbardziej.
+       Przy mierzeniu elementow drabiny prawie zawsze chodzi o jeden kierunek -
+       wysokosc szczebla, odleglosc od sciany, szerokosc - a wybieranie osi
+       recznie przed kazdym pomiarem jest zbedna praca. Skos liczymy dalej
+       trybem 3D, swiadomie wybranym. */
+    let trybOsi: string = measureAxisMode
+    if (trybOsi === 'auto') {
+      const dx = Math.abs(measurePoint2.x - measurePoint1.x)
+      const dy = Math.abs(measurePoint2.y - measurePoint1.y)
+      const dz = Math.abs(measurePoint2.z - measurePoint1.z)
+      trybOsi = (dy >= dx && dy >= dz) ? 'y' : ((dx >= dz) ? 'x' : 'z')
+    }
+
+    if (trybOsi === 'x') {
       distance = Math.abs(measurePoint2.x - measurePoint1.x)
       lineEndPoint = new THREE.Vector3(measurePoint2.x, measurePoint1.y, measurePoint1.z)
       axisLabel = 'X'
-    } else if (measureAxisMode === 'y') {
+    } else if (trybOsi === 'y') {
       distance = Math.abs(measurePoint2.y - measurePoint1.y)
       lineEndPoint = new THREE.Vector3(measurePoint1.x, measurePoint2.y, measurePoint1.z)
       axisLabel = 'Y'
-    } else if (measureAxisMode === 'z') {
+    } else if (trybOsi === 'z') {
       distance = Math.abs(measurePoint2.z - measurePoint1.z)
       lineEndPoint = new THREE.Vector3(measurePoint1.x, measurePoint1.y, measurePoint2.z)
       axisLabel = 'Z'
@@ -8140,9 +8153,11 @@ function addMeasurePoint(worldPoint: THREE.Vector3) {
     const distanceMm = Math.round(distance / SCALE)
 
     // Draw line between points
-    const lineColor = measureAxisMode === 'x' ? 0xff0000 :
-                      measureAxisMode === 'y' ? 0x00ff00 :
-                      measureAxisMode === 'z' ? 0x0000ff : 0x00ff00
+    // Kolor idzie za OSIA FAKTYCZNIE uzyta, nie za wyborem w pasku -
+    // inaczej w trybie auto linia zawsze bylaby zielona.
+    const lineColor = trybOsi === 'x' ? 0xff0000 :
+                      trybOsi === 'y' ? 0x00ff00 :
+                      trybOsi === 'z' ? 0x0000ff : 0x00ff00
     const geometry = new THREE.BufferGeometry().setFromPoints([measurePoint1, lineEndPoint])
     const material = new THREE.LineBasicMaterial({ color: lineColor })
     measureLine = new THREE.Line(geometry, material)
@@ -8171,7 +8186,7 @@ function setMeasureMode(enabled: boolean) {
   }
 }
 
-function setMeasureAxisMode(mode: '3d' | 'x' | 'y' | 'z') {
+function setMeasureAxisMode(mode: 'auto' | '3d' | 'x' | 'y' | 'z') {
   measureAxisMode = mode
 }
 
