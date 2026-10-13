@@ -9973,6 +9973,20 @@ function generateBOM(): BOMData {
     'wspornik_krotki': { namePL: 'Wspornik krótki (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-krotki' },
     'wspornik_sredni': { namePL: 'Wspornik średni (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-sredni' },
     'wspornik_dlugi': { namePL: 'Wspornik długi (para)', unit: 'szt.', category: 'wspornik', image: 'wspornik-dlugi' },
+    // Typ C - jeden element na pozycję, nie para (patrz TYP_C_WARIANTY).
+    //
+    // Bez tych wpisów countsToItems() wyrzucało wsporniki typu C z listy:
+    // pętla wyżej nadaje im klucz 'wspornik_' + typ, a warunek `if (def && ...)`
+    // po cichu pomija klucze bez definicji. Scena je liczyła, ale do panelu,
+    // do postMessage i do wyceny w embed.php nie docierały wcale - i dlatego
+    // doliczano je potem zastępczym wzorem "uchwyty podzielone przez dwa"
+    // (api/get-component-prices.php oraz embed-wycena.js).
+    'wspornik_typ_c_16_26': { namePL: 'Wspornik typ C 16-26 cm', unit: 'szt.', category: 'wspornik' },
+    'wspornik_typ_c_26_36': { namePL: 'Wspornik typ C 26-36 cm', unit: 'szt.', category: 'wspornik' },
+    'wspornik_typ_c_36_46': { namePL: 'Wspornik typ C 36-46 cm', unit: 'szt.', category: 'wspornik' },
+    'wspornik_typ_c_50_60': { namePL: 'Wspornik typ C 50-60 cm', unit: 'szt.', category: 'wspornik' },
+    'wspornik_typ_c_60_70': { namePL: 'Wspornik typ C 60-70 cm', unit: 'szt.', category: 'wspornik' },
+    'wspornik_typ_c_70_80': { namePL: 'Wspornik typ C 70-80 cm', unit: 'szt.', category: 'wspornik' },
     'cage_hoop': { namePL: 'Obręcz kosza bezpieczeństwa', unit: 'szt.', category: 'kosz', image: 'obrecz' },
     'cage_closing': { namePL: 'Zamknięcie kosza', unit: 'szt.', category: 'kosz' },
     'resting_platform': { namePL: 'Podest spoczynkowy', unit: 'szt.', category: 'podest' },
