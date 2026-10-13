@@ -42,6 +42,16 @@ const isViewMode = computed(() => props.mode === 'view')
 /** Tryby bez panelu konfiguracji i naglowka - sama scena 3D. */
 const bezPaneli = computed(() => isEmbedMode.value || isViewMode.value)
 
+/**
+ * Tryby z jasnym interfejsem narzedzi.
+ *
+ * Jasny panel powstal dla podgladu klienta, ale te same narzedzia -
+ * miarka, rysunek techniczny, edycja uchwytow - sa tez w trybie
+ * handlowca. Zamiast powielac style pod drugi warunek, oba tryby
+ * wskazuje jedna flaga.
+ */
+const jasnyInterfejs = computed(() => isViewMode.value || isSellerMode.value)
+
 // Seller mode - panel visibility
 const sellerPanelVisible = ref(false)
 
@@ -4074,7 +4084,11 @@ function toggleTechDrawing() {
   techDrawingActive.value = !techDrawingActive.value
   if (threeCanvasRef.value) {
     if (techDrawingActive.value) {
-      threeCanvasRef.value.enterTechDrawingMode('front')
+      /* Rzut boczny od razu, bez przeklikiwania sie przez "front".
+         To na nim widac to, po co otwiera sie rysunek techniczny: wymiary
+         pionowe, odleglosc od sciany i tabelke. Podglad dla klienta robil
+         tak od poczatku (podgladRysunek), wiec tryby przestaja sie roznic. */
+      threeCanvasRef.value.enterTechDrawingMode('side')
       // Turn off other modes when enabling tech drawing
       if (measureModeActive.value) {
         measureModeActive.value = false
@@ -5055,36 +5069,74 @@ function toggleCageClosing() {
               </div>
 
               <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer/embed mode -->
-              <div v-if="(!isCustomerMode && !bezPaneli) || debugMode" id="controls">
+              <!-- Pasek narzedzi. U handlowca jasny, z ikonami SVG - ten sam
+                   jezyk wizualny co miarka i panel podgladu. W panelu admina
+                   zostaje stary wyglad z emotkami. -->
+              <div v-if="(!isCustomerMode && !bezPaneli) || debugMode"
+                   id="controls"
+                   :class="{ 'pk-narzedzia': jasnyInterfejs }">
                 <button
                   class="btn btn-tech btn-with-tooltip"
                   :class="{ 'btn-active': techDrawingActive }"
                   @click="toggleTechDrawing"
                 >
-                  📐<span class="btn-tooltip">Rysunek techniczny</span>
+                  <svg v-if="jasnyInterfejs" class="pk-n-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3.2" y="3.2" width="17.6" height="17.6" rx="2"/>
+                    <path d="M7.4 7.4v9.2"/>
+                    <path d="M6.1 8.7 7.4 7.4l1.3 1.3"/>
+                    <path d="M6.1 15.3l1.3 1.3 1.3-1.3"/>
+                    <path d="M11.4 16.6V9.9h5.2v6.7"/>
+                  </svg>
+                  <span v-else>📐</span>
+                  <span v-if="jasnyInterfejs" class="pk-n-etykieta">Rysunek<br>techniczny</span>
+                  <span class="btn-tooltip">Rysunek techniczny</span>
                 </button>
                 <button
                   class="btn btn-tech btn-with-tooltip"
                   :class="{ 'btn-active': measureModeActive }"
                   @click="toggleMeasureMode"
                 >
-                  📏<span class="btn-tooltip">Miarka</span>
+                  <svg v-if="jasnyInterfejs" class="pk-n-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="1.8" y="7.6" width="20.4" height="8.8" rx="1.6"
+                          transform="rotate(-45 12 12)"/>
+                    <path d="M8.3 9.6l1.7 1.7M11 6.9l1.7 1.7M13.7 4.2l1.7 1.7"/>
+                  </svg>
+                  <span v-else>📏</span>
+                  <span v-if="jasnyInterfejs" class="pk-n-etykieta">Miarka</span>
+                  <span class="btn-tooltip">Miarka</span>
                 </button>
                 <button
                   class="btn btn-tech btn-with-tooltip"
                   :class="{ 'btn-active': sciskaneModeActive }"
                   @click="toggleSciskaneMode"
                 >
-                  🔧<span class="btn-tooltip">Edytuj uchwyty</span>
+                  <svg v-if="jasnyInterfejs" class="pk-n-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M15.2 3.4a5 5 0 0 0-6 6.4L3.6 15.4a1.9 1.9 0 0 0 0 2.7l2.3 2.3a1.9 1.9 0 0 0 2.7 0l5.6-5.6a5 5 0 0 0 6.4-6l-3.1 3.1-2.8-.7-.7-2.8z"/>
+                  </svg>
+                  <span v-else>🔧</span>
+                  <span v-if="jasnyInterfejs" class="pk-n-etykieta">Edytuj<br>uchwyty</span>
+                  <span class="btn-tooltip">Edytuj uchwyty</span>
                 </button>
                 <!-- Delete mode - tylko w seller mode -->
                 <button
                   v-if="isSellerMode"
-                  class="btn btn-tech btn-with-tooltip"
+                  class="btn btn-tech btn-with-tooltip btn-kasowanie"
                   :class="{ 'btn-active': deleteModeActive }"
                   @click="toggleDeleteMode"
                 >
-                  🗑️<span class="btn-tooltip">Usuń element</span>
+                  <svg v-if="jasnyInterfejs" class="pk-n-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4.5 6.8h15"/>
+                    <path d="M9.4 6.8V4.9h5.2v1.9"/>
+                    <path d="M6.6 6.8l.9 12.3a1.6 1.6 0 0 0 1.6 1.5h5.8a1.6 1.6 0 0 0 1.6-1.5l.9-12.3"/>
+                    <path d="M10.4 10.4v6.4M13.6 10.4v6.4"/>
+                  </svg>
+                  <span v-else>🗑️</span>
+                  <span v-if="jasnyInterfejs" class="pk-n-etykieta">Usuń<br>element</span>
+                  <span class="btn-tooltip">Usuń element</span>
                 </button>
                 <!-- Undo delete - tylko w seller mode gdy są usunięte elementy -->
                 <button
@@ -5092,7 +5144,14 @@ function toggleCageClosing() {
                   class="btn btn-tech btn-with-tooltip btn-undo"
                   @click="undoLastDelete"
                 >
-                  ↩️<span class="btn-tooltip">Cofnij usunięcie ({{ deletedItemsStack.length }})</span>
+                  <svg v-if="jasnyInterfejs" class="pk-n-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4.4 9.4h10.3a4.9 4.9 0 0 1 0 9.8H8.2"/>
+                    <path d="M7.8 5.2 3.9 9.4l3.9 4.2"/>
+                  </svg>
+                  <span v-else>↩️</span>
+                  <span v-if="jasnyInterfejs" class="pk-n-etykieta">Cofnij ({{ deletedItemsStack.length }})</span>
+                  <span class="btn-tooltip">Cofnij usunięcie ({{ deletedItemsStack.length }})</span>
                 </button>
               </div>
 
@@ -5101,14 +5160,14 @@ function toggleCageClosing() {
                    dopasowany do panelu po lewej; w panelu admina zostaje stary. -->
               <div v-if="(!isCustomerMode && !isEmbedMode) || isViewMode || debugMode"
                    id="measureToolbar"
-                   :class="{ active: measureModeActive, 'pk-miarka': isViewMode }">
+                   :class="{ active: measureModeActive, 'pk-miarka': jasnyInterfejs }">
                 <span class="measure-toolbar-label">Tryb:</span>
                 <button
                   class="measure-mode-btn"
                   :class="{ active: measureAxisMode === 'auto' }"
                   @click="setMeasureAxis('auto')"
                 >
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <!-- Strzalka w cztery strony = "dowolna os". Wczesniej byla
                          sama strzalka pionowa, nie do odroznienia od ikony Y. -->
@@ -5124,7 +5183,7 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === '3d' }"
                   @click="setMeasureAxis('3d')"
                 >
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 3.4 19.6 7.7v8.6L12 20.6 4.4 16.3V7.7z"/>
                     <path d="M4.4 7.7 12 12l7.6-4.3M12 12v8.6"/>
@@ -5137,7 +5196,7 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'x' }"
                   @click="setMeasureAxis('x')"
                 >
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M4 12h16"/><path d="M6.8 9.2 4 12l2.8 2.8"/><path d="M17.2 9.2 20 12l-2.8 2.8"/>
                   </svg>
@@ -5149,7 +5208,7 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'y' }"
                   @click="setMeasureAxis('y')"
                 >
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 4v16"/><path d="M9.2 6.8 12 4l2.8 2.8"/><path d="M9.2 17.2 12 20l2.8-2.8"/>
                   </svg>
@@ -5161,7 +5220,7 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'z' }"
                   @click="setMeasureAxis('z')"
                 >
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M6.5 17.5 17.5 6.5"/><path d="M17.5 11V6.5H13"/><path d="M6.5 13v4.5H11"/>
                   </svg>
@@ -5170,7 +5229,7 @@ function toggleCageClosing() {
                 </button>
                 <div class="measure-toolbar-divider"></div>
                 <button class="measure-close-btn" @click="toggleMeasureMode" title="Zamknij miarkę">
-                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                  <svg v-if="jasnyInterfejs" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
                        stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
                     <path d="M6.6 6.6l10.8 10.8M17.4 6.6 6.6 17.4"/>
                   </svg>
@@ -5179,11 +5238,11 @@ function toggleCageClosing() {
               </div>
 
               <!-- WYNIK POMIARU (środek ekranu) -->
-              <div v-if="measureResult" id="measureResultPopup" :class="{ 'pk-wynik': isViewMode }">
+              <div v-if="measureResult" id="measureResultPopup" :class="{ 'pk-wynik': jasnyInterfejs }">
                 <span class="pk-wynik-liczba">{{ measureResult.distanceMm.toFixed(1) }} mm</span>
                 <button class="measure-result-close-btn" @click="closeMeasureResult"
                         title="Zamknij wynik">
-                  <svg v-if="isViewMode" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  <svg v-if="jasnyInterfejs" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                        stroke-width="2" stroke-linecap="round">
                     <path d="M6.6 6.6l10.8 10.8M17.4 6.6 6.6 17.4"/>
                   </svg>
@@ -9422,6 +9481,120 @@ body {
   transform: translateY(-50%);
   border: 6px solid transparent;
   border-right-color: rgba(30,35,45,0.98);
+}
+
+/* ==========================================================================
+   PASEK NARZEDZI W JASNYM STYLU (tryb handlowca i podgladu)
+
+   Ten sam jezyk co panel podgladu .pk-rail: biala plytka na ciemnej scenie,
+   cienkie ikony SVG, stan wybrany na wypelnienie zamiast obwodki. Obwodka
+   na jasnym tle znika przy zmruzeniu oczu, a to jedyna informacja o tym,
+   ktore narzedzie jest wlaczone.
+
+   Reguly sa bardziej szczegolowe niz te wyzej (#controls.pk-narzedzia .btn),
+   wiec przykrywaja granatowe tla bez !important.
+   ========================================================================== */
+/* Proporcje wziete z .pk-rail i zmniejszone: panel 132 -> 102 px,
+   ikona 26 -> 25 px, podpis 11.5 -> 10 px. U handlowca ten pasek dzieli
+   ekran ze scena i lista komponentow, wiec nie moze byc tak okazaly jak
+   w podgladzie dla klienta. */
+#controls.pk-narzedzia {
+  gap: 2px;
+  padding: 8px;
+  width: 102px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 12px 32px -8px rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+#controls.pk-narzedzia .btn,
+#controls.pk-narzedzia .btn-tech {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: auto;
+  padding: 9px 5px;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  color: #475569;
+  box-shadow: none;
+  font-weight: 500;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.pk-n-etykieta {
+  display: block;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+/* Podpis widac na stale, wiec dymek tylko by go powtarzal. */
+#controls.pk-narzedzia .btn-tooltip {
+  display: none;
+}
+
+#controls.pk-narzedzia .btn:hover,
+#controls.pk-narzedzia .btn-tech:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: #0f172a;
+  transform: none;
+  box-shadow: none;
+}
+
+#controls.pk-narzedzia .btn:active,
+#controls.pk-narzedzia .btn-tech:active {
+  background: rgba(15, 23, 42, 0.09);
+  transform: scale(0.96);
+  box-shadow: none;
+}
+
+#controls.pk-narzedzia .btn:focus-visible {
+  outline: 2px solid #0f172a;
+  outline-offset: 2px;
+}
+
+#controls.pk-narzedzia .btn-active {
+  background: #0f172a !important;
+  border-color: #0f172a !important;
+  color: #fff !important;
+  box-shadow: none !important;
+}
+
+/* Usuwanie to jedyna nieodwracalna akcja w tym pasku - gdy jest wlaczone,
+   ma byc widac, ze klikniecie w scene robi co innego niz zwykle. */
+#controls.pk-narzedzia .btn-kasowanie.btn-active {
+  background: #be123c !important;
+  border-color: #be123c !important;
+}
+
+.pk-n-ikona {
+  display: block;
+  width: 25px;
+  height: 25px;
+  flex: none;
+}
+
+#controls.pk-narzedzia .btn-tooltip {
+  background: rgba(255, 255, 255, 0.98);
+  color: #0f172a;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 8px 24px -8px rgba(15, 23, 42, 0.35);
+  font-weight: 500;
+}
+
+#controls.pk-narzedzia .btn-tooltip::before {
+  border-right-color: rgba(255, 255, 255, 0.98);
 }
 
 #controls .btn-with-tooltip:hover .btn-tooltip {
