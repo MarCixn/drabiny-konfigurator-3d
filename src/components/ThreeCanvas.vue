@@ -5835,14 +5835,26 @@ function createLadder() {
          linii wymiarowych i tabelki. */
       const k = props.migawka.kotwice
       if (k) {
+        /* Kazdy wymiar ma swoja glebokosc - tak liczy je panel. Podanie
+           wszystkim jednej wartosci rozjezdza je w rzucie bocznym: wymiar
+           obrecz-ziemia stal w innej plaszczyznie niz dlugosc drabiny. */
+        const zStd = k.przelaz ? k.zPosAttyka : k.zPos
+        const zPrzod = k.przelaz === true
+
         if (roofTopBoxY !== null && finalLadderBottomBoxY !== null) {
-          drawLadderLengthDimension(k.zPos, false)
+          drawLadderLengthDimension(zStd, zPrzod)
         }
         if (roofTopBoxY !== null && handrailTopBoxY !== null) {
-          drawHandrailHeightDimension(k.zPos, false)
+          drawHandrailHeightDimension(zStd, zPrzod)
         }
+        // Obrecz-ziemia idzie w TEJ SAMEJ plaszczyznie co dlugosc kosza
         if (safetyCageCount1 > 0 && lastHoopBoxY !== null && groundTopBoxY !== null) {
-          drawCageHeightDimension(k.zPos)
+          drawCageHeightDimension(k.zPosKosz)
+        }
+        // Wysokosc zawieszenia - panel rysuje ja dopiero powyzej 350 mm
+        if (k.lastRungToGround > 350 && finalLadderBottomBoxY !== null
+            && groundTopBoxY !== null) {
+          drawSuspensionHeightDimension(zStd, zPrzod)
         }
         // Dlugosc kosza: od gornej do dolnej obreczy. Panel rysuje ja w innej
         // glebokosci niz pozostale wymiary, stad osobna kotwica.
@@ -11323,8 +11335,13 @@ export interface KotwiceMigawki {
   safetyCageCount: number
   /** Glebokosc rysowania wymiarow - TA SAMA, ktorej uzywa panel. */
   zPos: number
-  /** Glebokosc linii dlugosci kosza - panel liczy ja inaczej niz reszte. */
+  /** Glebokosc linii dlugosci kosza ORAZ wymiaru obrecz-ziemia.
+      Panel liczy je bez odejmowania backOffset - stad osobna wartosc. */
   zPosKosz: number
+  /** Glebokosc wymiarow przy przelazie attykowym (inna galaz w panelu). */
+  zPosAttyka: number
+  /** Czy to przelaz attykowy - decyduje, ktorej glebokosci uzyc. */
+  przelaz: boolean
   wspornikType: string
   wallHeightMm: number
   isPlatform: boolean
@@ -11369,6 +11386,11 @@ function eksportujKotwice(): KotwiceMigawki {
        w bok ("za blisko prawej"). */
     zPos: geo ? (geo.zOffset + 241) * SCALE - (props.wspornikDistance || 0) * SCALE : 0,
     zPosKosz: geo ? (geo.zOffset + 241) * SCALE + 334 * SCALE : 0,
+    zPosAttyka: geo
+      ? (geo.zOffset + 241) * SCALE + 334 * SCALE
+        - ((!safetyCageCount1 || safetyCageCount1 === 0) ? 1200 * SCALE : 0)
+      : 0,
+    przelaz: props.scheme === 'attic-passage',
     wspornikType: wspornikTypes1.find((t) => t !== 'none') || 'none',
     wallHeightMm: Math.round(wallHeightConfig),
     isPlatform: props.scheme === 'with-platform',
