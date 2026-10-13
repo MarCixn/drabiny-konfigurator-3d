@@ -5861,15 +5861,40 @@ function createLadder() {
         if (firstHoopBoxY !== null && lastHoopBoxY !== null) {
           drawMeasurementLineBetweenBoxes(k.zPosKosz)
         }
-        drawInfoLabel(
-          k.lastRungToGround,
-          k.wallHeightMm,
-          k.wspornikType,
-          k.safetyCageCount > 0,
-          k.isPlatform,
-          k.insulationThickness,
-          k.zPos
-        )
+        /* Przelaz attykowy ma dwa wymiary wiecej i WLASNA tabelke.
+           Panel rozdziela to tym samym warunkiem - tabelka klasyczna i attykowa
+           wykluczaja sie, wiec rysowanie obu naraz zostawiloby jedna na
+           drugiej. */
+        if (k.przelaz) {
+          if (roofTopBoxY !== null && wallTopBoxY !== null) {
+            drawGreenRedDimension(k.zPosSciana, true)
+          }
+          if (roofTopBoxY !== null && descentWallTopBoxY !== null) {
+            drawDescentLadderLengthDimension(k.zPos)
+          }
+          if (k.attyka) {
+            drawAtticInfoLabel({
+              wspornikEntry: k.attyka.wspornikEntry,
+              wspornikDescent: k.attyka.wspornikDescent,
+              hasBigfoot: k.attyka.hasBigfoot,
+              hasCage: k.safetyCageCount > 0,
+              wallHeight: k.wallHeightMm,
+              lastRungToGround: k.lastRungToGround,
+              insulationEntry: k.attyka.insulationEntry,
+              insulationDescent: k.attyka.insulationDescent
+            }, k.zPos)
+          }
+        } else {
+          drawInfoLabel(
+            k.lastRungToGround,
+            k.wallHeightMm,
+            k.wspornikType,
+            k.safetyCageCount > 0,
+            k.isPlatform,
+            k.insulationThickness,
+            k.zPos
+          )
+        }
       }
 
       outlineEnabled = true
@@ -11342,6 +11367,20 @@ export interface KotwiceMigawki {
   zPosAttyka: number
   /** Czy to przelaz attykowy - decyduje, ktorej glebokosci uzyc. */
   przelaz: boolean
+  /** Gora sciany - wymiar zielony-czerwony, tylko przelaz. */
+  wallTopBoxY: number | null
+  /** Gora sciany zejscia - dlugosc drabiny zejscia, tylko przelaz. */
+  descentWallTopBoxY: number | null
+  /** Glebokosc wymiaru przy scianie (liczona od grubosci sciany). */
+  zPosSciana: number
+  /** Dane do tabelki przelazu - panel pokazuje tu inne pozycje. */
+  attyka?: {
+    wspornikEntry: string
+    wspornikDescent: string
+    hasBigfoot: boolean
+    insulationEntry: number
+    insulationDescent: number
+  }
   wspornikType: string
   wallHeightMm: number
   isPlatform: boolean
@@ -11391,6 +11430,17 @@ function eksportujKotwice(): KotwiceMigawki {
         - ((!safetyCageCount1 || safetyCageCount1 === 0) ? 1200 * SCALE : 0)
       : 0,
     przelaz: props.scheme === 'attic-passage',
+    wallTopBoxY,
+    descentWallTopBoxY,
+    zPosSciana: -(globalWspornikDistance1
+      + ((props.atticWallThickness || 250) / 2) + 33) * SCALE,
+    attyka: props.scheme === 'attic-passage' ? {
+      wspornikEntry: wspornikTypes1.find((t) => t !== 'none') || 'none',
+      wspornikDescent: wspornikTypes2.find((t) => t !== 'none') || 'none',
+      hasBigfoot: props.descentMountType === 'bigfoot',
+      insulationEntry: props.atticHasInsulation ? (props.atticInsulationThickness || 0) : 0,
+      insulationDescent: props.atticBackHasInsulation ? (props.atticBackInsulationThickness || 0) : 0
+    } : undefined,
     wspornikType: wspornikTypes1.find((t) => t !== 'none') || 'none',
     wallHeightMm: Math.round(wallHeightConfig),
     isPlatform: props.scheme === 'with-platform',
@@ -11574,6 +11624,8 @@ function przywrocKotwice(k: KotwiceMigawki | null | undefined) {
   lastHoopBoxY = k.lastHoopBoxY ?? null
   firstHoopBoxY = k.firstHoopBoxY ?? null
   groundTopBoxY = k.groundTopBoxY ?? null
+  wallTopBoxY = k.wallTopBoxY ?? null
+  descentWallTopBoxY = k.descentWallTopBoxY ?? null
   ostatnieSzczebelDoZiemi = k.lastRungToGround ?? 0
   safetyCageCount1 = k.safetyCageCount ?? 0
 }
