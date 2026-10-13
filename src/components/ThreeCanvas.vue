@@ -5844,6 +5844,11 @@ function createLadder() {
         if (safetyCageCount1 > 0 && lastHoopBoxY !== null && groundTopBoxY !== null) {
           drawCageHeightDimension(k.zPos)
         }
+        // Dlugosc kosza: od gornej do dolnej obreczy. Panel rysuje ja w innej
+        // glebokosci niz pozostale wymiary, stad osobna kotwica.
+        if (firstHoopBoxY !== null && lastHoopBoxY !== null) {
+          drawMeasurementLineBetweenBoxes(k.zPosKosz)
+        }
         drawInfoLabel(
           k.lastRungToGround,
           k.wallHeightMm,
@@ -11311,10 +11316,15 @@ export interface KotwiceMigawki {
   finalLadderBottomBoxY: number | null
   handrailTopBoxY: number | null
   lastHoopBoxY: number | null
+  /** Gorna obrecz kosza - potrzebna do wymiaru dlugosci kosza. */
+  firstHoopBoxY: number | null
   groundTopBoxY: number | null
   lastRungToGround: number
   safetyCageCount: number
+  /** Glebokosc rysowania wymiarow - TA SAMA, ktorej uzywa panel. */
   zPos: number
+  /** Glebokosc linii dlugosci kosza - panel liczy ja inaczej niz reszte. */
+  zPosKosz: number
   wspornikType: string
   wallHeightMm: number
   isPlatform: boolean
@@ -11350,10 +11360,15 @@ function eksportujKotwice(): KotwiceMigawki {
     finalLadderBottomBoxY,
     handrailTopBoxY,
     lastHoopBoxY,
+    firstHoopBoxY,
     groundTopBoxY,
     lastRungToGround: ostatnieSzczebelDoZiemi,
     safetyCageCount: safetyCageCount1,
-    zPos: geo ? (geo.zOffset + 241) * SCALE : 0,
+    /* Panel odejmuje tu backOffset - bez tego wszystkie wymiary siedza
+       w innej glebokosci, co w rzucie bocznym widac jako przesuniecie
+       w bok ("za blisko prawej"). */
+    zPos: geo ? (geo.zOffset + 241) * SCALE - (props.wspornikDistance || 0) * SCALE : 0,
+    zPosKosz: geo ? (geo.zOffset + 241) * SCALE + 334 * SCALE : 0,
     wspornikType: wspornikTypes1.find((t) => t !== 'none') || 'none',
     wallHeightMm: Math.round(wallHeightConfig),
     isPlatform: props.scheme === 'with-platform',
@@ -11535,6 +11550,7 @@ function przywrocKotwice(k: KotwiceMigawki | null | undefined) {
   finalLadderBottomBoxY = k.finalLadderBottomBoxY ?? null
   handrailTopBoxY = k.handrailTopBoxY ?? null
   lastHoopBoxY = k.lastHoopBoxY ?? null
+  firstHoopBoxY = k.firstHoopBoxY ?? null
   groundTopBoxY = k.groundTopBoxY ?? null
   ostatnieSzczebelDoZiemi = k.lastRungToGround ?? 0
   safetyCageCount1 = k.safetyCageCount ?? 0
