@@ -11299,7 +11299,10 @@ const RODZAJE_MIGAWKI: Array<{ flaga: string; rodzaj: string }> = [
   { flaga: 'isBigfootGuide', rodzaj: 'prowadnica_bigfoot' },
   { flaga: 'isBigfoot', rodzaj: 'bigfoot' },
   { flaga: 'isAtticPassage', rodzaj: 'attyka' },
-  { flaga: 'isKrataWema', rodzaj: 'krata' }
+  { flaga: 'isKrataWema', rodzaj: 'krata' },
+  // Przeszkody nie sa modelem z pliku, tylko bryla liczona w kodzie -
+  // niosa wlasne wymiary, patrz pole "bryla"
+  { flaga: 'isObstacle', rodzaj: 'przeszkoda' }
 ]
 
 /** Wszystko, czego potrzebuja opisy rzutu, a czego nie widac po samych modelach. */
@@ -11328,6 +11331,10 @@ export interface ElementMigawki {
   skala: [number, number, number]
   ladderNum?: number
   side?: string
+  /** Wymiary bryly [szerokosc, wysokosc, glebokosc] - tylko dla przeszkod. */
+  bryla?: [number, number, number]
+  /** Przeszkoda typu "punkt na scianie" rysuje sie na zielono. */
+  punktNaScianie?: boolean
 }
 
 /**
@@ -11400,10 +11407,28 @@ function eksportujScene(): ElementMigawki[] {
       model = 'x' + (u.segments || 2)
     }
 
+    /* Przeszkoda: zamiast nazwy modelu zapisujemy rozmiar bryly, bo nie ma
+       pliku, z ktorego dalaby sie odtworzyc. Czytamy z geometrii, zeby nie
+       powtarzac tu wzorow z renderowania. */
+    let bryla: [number, number, number] | undefined
+    if (trafiony.rodzaj === 'przeszkoda') {
+      const g = (obj as THREE.Mesh).geometry as THREE.BoxGeometry | undefined
+      const p = g && (g as any).parameters
+      if (p) {
+        bryla = [
+          Number(p.width.toFixed(4)),
+          Number(p.height.toFixed(4)),
+          Number(p.depth.toFixed(4))
+        ]
+      }
+    }
+
     wynik.push({
       id,
       rodzaj: trafiony.rodzaj,
       model: model,
+      bryla,
+      punktNaScianie: u.isWallPoint === true,
       poz: [
         Number(obj.position.x.toFixed(3)),
         Number(obj.position.y.toFixed(3)),
@@ -11524,6 +11549,35 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
 
   let postawione = 0
   for (const e of migawka) {
+    /* Przeszkoda nie ma modelu - budujemy bryle z zapisanych wymiarow,
+       razem z obrysem, zeby wygladala jak w panelu. */
+    if (e.rodzaj === 'przeszkoda' && e.bryla) {
+      const zielona = e.punktNaScianie === true
+      const geo = new THREE.BoxGeometry(e.bryla[0], e.bryla[1], e.bryla[2])
+      const mat = new THREE.MeshLambertMaterial({
+        color: zielona ? 0x22c55e : 0x3b82f6,
+        transparent: true,
+        opacity: 0.5,
+        side: THREE.DoubleSide
+      })
+      const bryla = new THREE.Mesh(geo, mat)
+      bryla.position.set(e.poz[0], e.poz[1], e.poz[2])
+      bryla.userData.isObstacle = true
+      bryla.userData.elementId = e.id
+      bryla.userData.zMigawki = true
+      ladderContainer.add(bryla)
+
+      const obrys = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: zielona ? 0x16a34a : 0x60a5fa })
+      )
+      obrys.position.copy(bryla.position)
+      ladderContainer.add(obrys)
+
+      postawione++
+      continue
+    }
+
     const zrodlo = modelDlaMigawki(e)
     if (!zrodlo) { continue }
 
