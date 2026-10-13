@@ -4123,6 +4123,21 @@ function podgladModel() {
   }
 }
 
+/**
+ * Powrot z podgladu.
+ *
+ * Na razie cofa w historii przegladarki, a gdy klient wszedl prosto z linku
+ * (brak historii) - wraca do modelu 3D, zeby przycisk nigdy nie byl martwy.
+ * Docelowe zachowanie do ustalenia.
+ */
+function podgladPowrot() {
+  if (window.history.length > 1) {
+    window.history.back()
+    return
+  }
+  podgladModel()
+}
+
 /** Pokaz uproszczony rysunek techniczny - zawsze rzut boczny. */
 function podgladRysunek() {
   if (measureModeActive.value) {
@@ -4844,30 +4859,75 @@ function toggleCageClosing() {
                    Rzut jest TYLKO boczny - klient nie wybiera widoku, bo
                    podpis pod nim jest czescia tego, co mu wysylamy.
                    ============================================ -->
-              <div v-if="isViewMode" class="podglad-pasek">
+              <nav v-if="isViewMode" class="pk-rail" aria-label="Widok podglądu">
                 <button
-                  class="podglad-btn"
-                  :class="{ active: !techDrawingActive && !measureModeActive }"
+                  class="pk-btn"
+                  :class="{ 'is-active': !techDrawingActive && !measureModeActive }"
                   @click="podgladModel"
                 >
-                  Model 3D
+                  <span class="pk-ikona" aria-hidden="true">
+                    <!-- bryła: sześcian w rzucie izometrycznym -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z"/>
+                      <path d="M3.6 7 12 11.6 20.4 7"/>
+                      <path d="M12 11.6v9.8"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Model 3D</span>
                 </button>
+
                 <button
-                  class="podglad-btn"
-                  :class="{ active: techDrawingActive }"
+                  class="pk-btn"
+                  :class="{ 'is-active': techDrawingActive }"
                   @click="podgladRysunek"
                 >
-                  Uproszczony rysunek techniczny / rzut boczny
+                  <span class="pk-ikona" aria-hidden="true">
+                    <!-- rysunek: arkusz z liniami wymiarowymi -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3.2" y="3.2" width="17.6" height="17.6" rx="2"/>
+                      <path d="M7.4 7.4v9.2"/>
+                      <path d="M6.1 8.7 7.4 7.4l1.3 1.3"/>
+                      <path d="M6.1 15.3l1.3 1.3 1.3-1.3"/>
+                      <path d="M11.4 16.6V9.9h5.2v6.7"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">
+                    Uproszczony rysunek<br>techniczny
+                  </span>
                 </button>
+
                 <button
-                  class="podglad-btn podglad-btn-miarka"
-                  :class="{ active: measureModeActive }"
+                  class="pk-btn"
+                  :class="{ 'is-active': measureModeActive }"
                   @click="toggleMeasureMode"
-                  title="Zmierz odległość między dwoma punktami"
                 >
-                  📏 Miarka
+                  <span class="pk-ikona" aria-hidden="true">
+                    <!-- miarka: przyłożona linijka z podziałką -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="1.8" y="7.6" width="20.4" height="8.8" rx="1.6"
+                            transform="rotate(-45 12 12)"/>
+                      <path d="M8.3 9.6l1.7 1.7M11 6.9l1.7 1.7M13.7 4.2l1.7 1.7"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Miarka</span>
                 </button>
-              </div>
+
+                <div class="pk-kreska"></div>
+
+                <button class="pk-btn pk-btn--powrot" @click="podgladPowrot">
+                  <span class="pk-ikona" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10 5 3.6 11.4a.9.9 0 0 0 0 1.2L10 19"/>
+                      <path d="M3.8 12h16.6"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Powrót</span>
+                </button>
+              </nav>
 
               <!-- Podpis pod rzutem - to on jest trescia, ktora ma zostac
                    klientowi w glowie, wiec stoi na scenie, nie w pasku. -->
@@ -5031,14 +5091,23 @@ function toggleCageClosing() {
               </div>
 
               <!-- TOOLBAR MIARKI (środek góry) - ukryty w customer/embed mode -->
-              <div v-if="(!isCustomerMode && !isEmbedMode) || isViewMode || debugMode" id="measureToolbar" :class="{ active: measureModeActive }">
+              <!-- Pasek miarki. W trybie podgladu ma wlasny, jasny wyglad
+                   dopasowany do panelu po lewej; w panelu admina zostaje stary. -->
+              <div v-if="(!isCustomerMode && !isEmbedMode) || isViewMode || debugMode"
+                   id="measureToolbar"
+                   :class="{ active: measureModeActive, 'pk-miarka': isViewMode }">
                 <span class="measure-toolbar-label">Tryb:</span>
                 <button
                   class="measure-mode-btn"
                   :class="{ active: measureAxisMode === '3d' }"
                   @click="setMeasureAxis('3d')"
                 >
-                  3D
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3.4 19.6 7.7v8.6L12 20.6 4.4 16.3V7.7z"/>
+                    <path d="M4.4 7.7 12 12l7.6-4.3M12 12v8.6"/>
+                  </svg>
+                  <span v-else>3D</span>
                   <span class="tooltip">Odległość przestrzenna</span>
                 </button>
                 <button
@@ -5046,7 +5115,11 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'x' }"
                   @click="setMeasureAxis('x')"
                 >
-                  X
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 12h16"/><path d="M6.8 9.2 4 12l2.8 2.8"/><path d="M17.2 9.2 20 12l-2.8 2.8"/>
+                  </svg>
+                  <span v-else>X</span>
                   <span class="tooltip">Tylko szerokość</span>
                 </button>
                 <button
@@ -5054,7 +5127,11 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'y' }"
                   @click="setMeasureAxis('y')"
                 >
-                  Y
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 4v16"/><path d="M9.2 6.8 12 4l2.8 2.8"/><path d="M9.2 17.2 12 20l2.8-2.8"/>
+                  </svg>
+                  <span v-else>Y</span>
                   <span class="tooltip">Tylko wysokość</span>
                 </button>
                 <button
@@ -5062,11 +5139,21 @@ function toggleCageClosing() {
                   :class="{ active: measureAxisMode === 'z' }"
                   @click="setMeasureAxis('z')"
                 >
-                  Z
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6.5 17.5 17.5 6.5"/><path d="M17.5 11V6.5H13"/><path d="M6.5 13v4.5H11"/>
+                  </svg>
+                  <span v-else>Z</span>
                   <span class="tooltip">Tylko głębokość</span>
                 </button>
                 <div class="measure-toolbar-divider"></div>
-                <button class="measure-close-btn" @click="toggleMeasureMode" title="Zamknij miarkę">✕</button>
+                <button class="measure-close-btn" @click="toggleMeasureMode" title="Zamknij miarkę">
+                  <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                       stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                    <path d="M6.6 6.6l10.8 10.8M17.4 6.6 6.6 17.4"/>
+                  </svg>
+                  <span v-else>✕</span>
+                </button>
               </div>
 
               <!-- WYNIK POMIARU (środek ekranu) -->
@@ -5090,10 +5177,25 @@ function toggleCageClosing() {
               </div>
 
               <!-- OSTRZEŻENIE MIARKI (środek ekranu) -->
-              <div v-if="showMeasureWarning" class="measure-warning-dialog">
+              <div v-if="showMeasureWarning" class="measure-warning-dialog"
+                   :class="{ 'pk-okno': isViewMode }">
                 <div class="measure-warning-content">
-                  <button class="measure-warning-close" @click="closeMeasureWarning">✕</button>
-                  <div class="measure-warning-icon">📏</div>
+                  <button class="measure-warning-close" @click="closeMeasureWarning">
+                    <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                      <path d="M6.6 6.6l10.8 10.8M17.4 6.6 6.6 17.4"/>
+                    </svg>
+                    <span v-else>✕</span>
+                  </button>
+                  <div class="measure-warning-icon">
+                    <svg v-if="isViewMode" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="1.8" y="7.6" width="20.4" height="8.8" rx="1.6"
+                            transform="rotate(-45 12 12)"/>
+                      <path d="M8.3 9.6l1.7 1.7M11 6.9l1.7 1.7M13.7 4.2l1.7 1.7"/>
+                    </svg>
+                    <span v-else>📏</span>
+                  </div>
                   <h3>Informacja o miarce</h3>
                   <p class="measure-warning-text">
                     Model kosza ochronnego jest tylko orientacyjny - faktyczne wymiary obręczy,
@@ -12296,78 +12398,315 @@ body {
 
 /* ==========================================================================
    PODGLAD DLA KLIENTA (?mode=view)
-   Pasek u gory na srodku, poziomo - w przeciwienstwie do paska embed nie ma
-   tu wyboru rzutu, wiec etykiety sa dlugie i nie zmiescilyby sie pionowo
-   przy krawedzi. Na telefonie zawija sie do dwoch wierszy.
+
+   Jasny panel na ciemnej scenie, pionowo przy lewej krawedzi. Pionowo,
+   bo etykiety sa dlugie ("Uproszczony rysunek techniczny") i w poziomie
+   albo sie nie mieszcza, albo trzeba je skracac do nieczytelnych skrotow.
+   Jasny, bo scena jest ciemna - panel ma byc interfejsem, a nie czescia
+   modelu.
    ========================================================================== */
-.podglad-pasek {
+.pk-rail {
   position: absolute;
-  top: 12px;
+  top: 50%;
+  left: 16px;
+  transform: translateY(-50%);
+  z-index: 100;
+
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  width: 132px;
+
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 12px 32px -8px rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.pk-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 8px;
+
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  color: #475569;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.pk-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: #0f172a;
+}
+
+.pk-btn:focus-visible {
+  outline: 2px solid #0f172a;
+  outline-offset: 2px;
+}
+
+/* Stan wybrany: wypelnienie zamiast obwodki - obwodka na jasnym tle
+   znika przy zmrużeniu oczu, a to jedyna informacja o tym, co sie oglada. */
+.pk-btn.is-active {
+  background: #0f172a;
+  color: #fff;
+}
+
+.pk-ikona {
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+
+.pk-ikona svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.pk-etykieta {
+  display: block;
+}
+
+.pk-kreska {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.pk-btn--powrot {
+  color: #64748b;
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------------------
+   Pasek miarki w trybie podgladu.
+   Nadpisuje styl panelu admina przez #measureToolbar.pk-miarka, bo tamten
+   jest ciemny i ma wyzsza specyficznosc niz sama klasa.
+   -------------------------------------------------------------------------- */
+#measureToolbar.pk-miarka {
+  top: 16px;
   left: 50%;
   transform: translateX(-50%);
+  gap: 2px;
+  padding: 6px;
+
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 12px 32px -8px rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+#measureToolbar.pk-miarka .measure-toolbar-label {
+  padding: 0 8px 0 4px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+#measureToolbar.pk-miarka .measure-mode-btn,
+#measureToolbar.pk-miarka .measure-close-btn {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
-  gap: 6px;
-  max-width: calc(100% - 24px);
-  padding: 8px;
-  background: linear-gradient(165deg, rgba(30,30,40,0.92) 0%, rgba(20,20,30,0.95) 100%);
-  border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 10px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-  z-index: 100;
-}
-
-.podglad-btn {
-  padding: 10px 16px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   background: transparent;
-  border: 2px solid transparent;
-  border-radius: 6px;
-  color: #aaa;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.2;
+  border: 0;
+  border-radius: 8px;
+  color: #475569;
   cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.podglad-btn:hover {
+#measureToolbar.pk-miarka .measure-mode-btn:hover,
+#measureToolbar.pk-miarka .measure-close-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: #0f172a;
+}
+
+#measureToolbar.pk-miarka .measure-mode-btn.active {
+  background: #0f172a;
   color: #fff;
-  background: rgba(255,255,255,0.1);
 }
 
-.podglad-btn.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(74, 158, 255, 0.15);
+#measureToolbar.pk-miarka .measure-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: rgba(15, 23, 42, 0.12);
 }
 
-/* Podpis pod rzutem - u dolu na srodku, zeby zostal na zrzucie ekranu,
-   ktory klient i tak zrobi i wysle dalej. */
+.pk-m-ikona {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+/* Okno informacyjne miarki w trybie podgladu - ten sam jezyk co panel.
+   Nadpisujemy przez .pk-okno, bo oryginal jest ciemny i sluzy panelowi. */
+.measure-warning-dialog.pk-okno {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.pk-okno .measure-warning-content {
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 24px 56px -16px rgba(15, 23, 42, 0.45);
+  color: #0f172a;
+  padding: 28px 28px 24px;
+  max-width: 420px;
+}
+
+.pk-okno .measure-warning-content h3 {
+  color: #0f172a;
+  font-size: 17px;
+  font-weight: 600;
+  margin: 10px 0 12px;
+}
+
+.pk-okno .measure-warning-text {
+  color: #475569;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.pk-okno .measure-warning-icon {
+  display: flex;
+  justify-content: center;
+  color: #0f172a;
+}
+
+.pk-okno .measure-warning-icon svg {
+  width: 40px;
+  height: 40px;
+}
+
+.pk-okno .measure-warning-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: #64748b;
+}
+
+.pk-okno .measure-warning-close:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: #0f172a;
+}
+
+.pk-okno .measure-warning-checkbox {
+  color: #64748b;
+  font-size: 12.5px;
+}
+
+.pk-okno .measure-warning-checkbox:hover {
+  color: #0f172a;
+}
+
+/* Przycisk potwierdzenia w tym samym czarnym wypelnieniu co stan wybrany
+   w panelu - niebieski nalezal do poprzedniego stylu. */
+.pk-okno .measure-warning-ok {
+  background: #0f172a;
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 11px 32px;
+}
+
+.pk-okno .measure-warning-ok:hover {
+  background: #1e293b;
+}
+
+/* Wynik pomiaru - ten sam jezyk wizualny co panel */
+#measureResultPopup {
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.3);
+  color: #0f172a;
+}
+
+/* Podpis pod rzutem - zostaje na zrzucie ekranu, ktory klient i tak zrobi. */
 .podglad-podpis {
   position: absolute;
-  bottom: 12px;
+  bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 7px 16px;
-  background: rgba(0,0,0,0.65);
-  border-radius: 6px;
-  font-size: 12px;
-  letter-spacing: 0.03em;
-  color: rgba(255,255,255,0.9);
   z-index: 100;
+
+  padding: 8px 18px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px -8px rgba(15, 23, 42, 0.3);
+
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
   pointer-events: none;
-  text-align: center;
 }
 
-@media (max-width: 560px) {
-  .podglad-btn {
-    padding: 8px 10px;
+/* Telefon: panel kladzie sie na dole, poziomo - pionowy zjadlby pol ekranu. */
+@media (max-width: 640px) {
+  .pk-rail {
+    top: auto;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    flex-direction: row;
+    width: auto;
+    max-width: calc(100% - 24px);
+    border-radius: 16px;
+  }
+
+  .pk-btn {
+    flex: 1;
+    min-width: 72px;
+    padding: 10px 6px;
+    font-size: 10.5px;
+  }
+
+  .pk-kreska {
+    width: 1px;
+    height: auto;
+    margin: 6px 2px;
+  }
+
+  .podglad-podpis {
+    bottom: 96px;
     font-size: 11px;
     white-space: normal;
+    max-width: calc(100% - 32px);
+    text-align: center;
   }
 }
+
 
 /* Reset confirmation popup */
 .reset-confirm-overlay {
