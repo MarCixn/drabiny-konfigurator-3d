@@ -6355,15 +6355,7 @@ function renderAtticPassage(totalHeight: number) {
       bigfoot.position.y = bigfootBaseY * SCALE
       bigfoot.position.z = bigfootZ * SCALE
       bigfoot.userData.isBigfoot = true
-      // Pokoloruj bigfoot na ciemnoszary (zachowaj teksturę)
-      bigfoot.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.material) {
-          const mat = child.material as THREE.MeshStandardMaterial
-          if (mat.color) {
-            mat.color.setHex(0x666666)  // Szary
-          }
-        }
-      })
+      pokolorujBigfoot(bigfoot)
       addOutlineToModel(bigfoot)
       ladderContainer.add(bigfoot)
     }
@@ -11435,6 +11427,26 @@ function eksportujScene(): ElementMigawki[] {
   return wynik
 }
 
+/**
+ * Przemalowanie bigfoota na ciemny.
+ *
+ * Model z pliku ma wlasny, jasniejszy kolor - panel nadpisuje go zaraz po
+ * utworzeniu. Migawka klonuje model, wiec bez tego samego kroku bigfoot
+ * w podgladzie wychodzil szary, a w panelu byl czarny.
+ *
+ * Materialy klonujemy przed zmiana: THREE.Object3D.clone() wspoldzieli je
+ * z oryginalem, wiec malowanie w miejscu zmienialoby tez model zrodlowy.
+ */
+function pokolorujBigfoot(model: THREE.Object3D) {
+  model.traverse((child) => {
+    if (child instanceof THREE.Mesh && child.material) {
+      const mat = (child.material as THREE.MeshStandardMaterial).clone()
+      if (mat.color) { mat.color.setHex(0x666666) }
+      child.material = mat
+    }
+  })
+}
+
 /** Model zrodlowy dla elementu migawki. null = nie umiemy go odtworzyc. */
 function modelDlaMigawki(e: ElementMigawki): THREE.Group | null {
   switch (e.rodzaj) {
@@ -11519,6 +11531,9 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
     model.position.set(e.poz[0], e.poz[1], e.poz[2])
     model.quaternion.set(e.obrot[0], e.obrot[1], e.obrot[2], e.obrot[3])
     model.scale.set(e.skala[0], e.skala[1], e.skala[2])
+    // Elementy, ktorym panel zmienia material po utworzeniu
+    if (e.rodzaj === 'bigfoot') { pokolorujBigfoot(model) }
+
     model.userData.elementId = e.id
     model.userData.zMigawki = true
     model.userData.ladderNum = e.ladderNum || 1
