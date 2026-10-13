@@ -6,7 +6,7 @@ import ThreeCanvas from '../components/ThreeCanvas.vue'
    wymieniany z embed.php, wszystko opcjonalne). Do zapisu oferty idzie
    wersja z api.ts, dlatego importujemy ja pod wlasna nazwa. */
 import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByRef, type ComponentItem, type LoadedConfiguration, type LadderConfig as LadderConfigZapis } from '../services/api'
-import { generateBOMPdf, type BOMData } from '../services/pdf-generator'
+import { type BOMData } from '../services/pdf-generator'
 import { postMessageService, type LadderConfig, type ConfigResult } from '../services/postMessage'
 import type { AppMode } from '../composables/useAppMode'
 import {
@@ -2242,11 +2242,6 @@ async function checkUrlAndLoadOffer() {
   }
 }
 
-function validateEmail(email: string): boolean {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-  return emailRegex.test(email)
-}
-
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr)
   return date.toLocaleDateString('pl-PL', {
@@ -2256,10 +2251,30 @@ function formatDate(dateStr: string): string {
   })
 }
 
-function getOfferLink(): string {
-  if (!savedReference.value) return ''
-  const baseUrl = window.location.origin + window.location.pathname
-  return `${baseUrl}?ref=${savedReference.value.referenceNumber}&code=${savedReference.value.accessCode}`
+const linkSkopiowany = ref(false)
+
+/** Link do trybu podgladu dla ostatnio zapisanej konfiguracji. */
+function getPodgladLink(): string {
+  if (!savedReference.value) { return '' }
+  const baza = window.location.origin + window.location.pathname
+  return `${baza}?mode=view&ref=${savedReference.value.referenceNumber}`
+       + `&code=${savedReference.value.accessCode}`
+}
+
+async function kopiujPodgladLink() {
+  const link = getPodgladLink()
+  if (!link) { return }
+  try {
+    await navigator.clipboard.writeText(link)
+  } catch (e) {
+    // Starsze przegladarki albo brak uprawnien - zaznaczamy pole,
+    // zeby zostalo Ctrl+C
+    const pole = document.querySelector('.podglad-link-input') as HTMLInputElement | null
+    if (pole) { pole.select() }
+    return
+  }
+  linkSkopiowany.value = true
+  setTimeout(() => { linkSkopiowany.value = false }, 2000)
 }
 
 function getVersionLink(referenceNumber: string): string {
@@ -2444,16 +2459,11 @@ function getSchemeLabel(scheme: string): string {
 async function generateOffer() {
   if (isSaving.value) return
 
-  // Wymagaj emaila do wygenerowania oferty
+  /* Email nie jest juz wymagany - api/configurations.php przyjmuje zapis bez
+     niego (sprawdzone: HTTP 200), a ten ekran sluzy do robienia linku
+     podgladowego, nie do wysylania oferty. emailError zostaje jako miejsce
+     na komunikat o bledzie zapisu. */
   emailError.value = ''
-  if (!customerEmail.value.trim()) {
-    emailError.value = 'Podaj adres email aby wygenerować ofertę'
-    return
-  }
-  if (!validateEmail(customerEmail.value.trim())) {
-    emailError.value = 'Podaj poprawny adres email'
-    return
-  }
 
   isSaving.value = true
 
@@ -2667,53 +2677,6 @@ function goToSummary() {
 /**
  * Export Bill of Materials to PDF
  */
-async function exportBOMToPdf() {
-  // Use cached data if available, otherwise try to get from scene
-  let bomData: BOMData | null = cachedBOMData.value
-
-  if (!bomData && threeCanvasRef.value) {
-    bomData = threeCanvasRef.value.generateBOM() as BOMData
-
-    // Fill in configuration data from state
-    bomData.ladder1.config.wallHeight = state.value.wallHeight
-    bomData.ladder1.config.scheme = state.value.scheme
-    bomData.ladder1.config.cage = state.value.cage === 'with-cage'
-      ? `${threeState.value.safetyCageCount} obreczy`
-      : 'brak'
-    bomData.ladder1.config.insulationThickness = state.value.insulationThickness || 0
-
-    // If attic passage, fill descent side config
-    if (state.value.scheme === 'attic-passage' && bomData.ladder2) {
-      bomData.ladder2.config.wallHeight = state.value.atticWallHeight || 0
-      bomData.ladder2.config.mountType = state.value.descentMountType
-      bomData.ladder2.config.insulationThickness = state.value.atticBackHasInsulation
-        ? (state.value.atticBackInsulationThickness || 0)
-        : 0
-      bomData.ladder2.config.minDistance = state.value.atticMinDistance || 0
-    }
-  }
-
-  if (!bomData) {
-    alert('Nie mozna wygenerowac PDF - brak danych')
-    return
-  }
-
-  // Generate PDF (async)
-  await generateBOMPdf(bomData, {
-    projectName: `Drabina ${state.value.wallHeight}m - ${translateScheme(state.value.scheme)}`
-  })
-}
-
-function translateScheme(scheme: string): string {
-  const translations: Record<string, string> = {
-    'no-platform': 'z poreczami',
-    'with-platform': 'z podestem',
-    'attic-passage': 'przejscie przez attyke',
-    'none': 'bez zakonczen'
-  }
-  return translations[scheme] || scheme
-}
-
 // Wróć z podsumowania - dla customer mode wraca do kroku 9, dla admin do params
 function goBackFromSummary() {
   if (isCustomerMode.value) {
@@ -7285,34 +7248,20 @@ function toggleCageClosing() {
                 </div>
               </div>
 
-              <!-- Email do oferty -->
-              <div class="email-input-section">
-                <label for="customer-email">Email do oferty:</label>
-                <input
-                  id="customer-email"
-                  type="email"
-                  v-model="customerEmail"
-                  placeholder="Podaj swój adres email"
-                  class="email-input"
-                  :class="{ 'input-error': emailError }"
-                  @input="emailError = ''"
-                />
-                <p v-if="emailError" class="error-message">{{ emailError }}</p>
-              </div>
-
-              <!-- Przyciski akcji -->
+              <!-- Zapis konfiguracji do podgladu.
+                   Email zostal usuniety: zapis go nie wymaga, a przy podgladzie
+                   dla klienta nie ma kogo o niego pytac. Eksport PDF tez znikl -
+                   ten ekran sluzy teraz do jednego: zrobienia linku. -->
               <div class="summary-action-buttons">
                 <button class="btn-generate-offer" @click="generateOffer" :disabled="isSaving">
-                  {{ loadedOffer ? 'Zapisz jako nową ofertę' : 'Wygeneruj ofertę' }}
-                </button>
-                <button class="btn-export-pdf" @click="exportBOMToPdf">
-                  Eksportuj PDF
+                  {{ isSaving ? 'Zapisuję…' : 'Zapisz i zrób link do podglądu' }}
                 </button>
               </div>
+              <p v-if="emailError" class="error-message">{{ emailError }}</p>
 
               <!-- Wyświetl zapisaną ofertę -->
               <div v-if="savedReference" class="saved-offer-info">
-                <div class="saved-offer-title">Oferta zapisana!</div>
+                <div class="saved-offer-title">Zapisane — link gotowy</div>
                 <div class="saved-offer-details">
                   <div><strong>Numer:</strong> {{ savedReference.referenceNumber }}</div>
                   <div><strong>Kod dostępu:</strong> {{ savedReference.accessCode }}</div>
@@ -7324,7 +7273,16 @@ function toggleCageClosing() {
                   </div>
                 </div>
                 <div class="saved-offer-link">
-                  <a :href="getOfferLink()" target="_blank">Otwórz ofertę w nowym oknie</a>
+                  <a :href="getPodgladLink()" target="_blank">Otwórz podgląd klienta →</a>
+                </div>
+                <!-- Link w polu tekstowym, bo najczesciej trzeba go wkleic
+                     do maila albo wiadomosci, a nie otworzyc u siebie. -->
+                <div class="podglad-link-box">
+                  <input class="podglad-link-input" :value="getPodgladLink()" readonly
+                         @focus="($event.target as HTMLInputElement).select()">
+                  <button class="podglad-link-kopiuj" @click="kopiujPodgladLink">
+                    {{ linkSkopiowany ? 'Skopiowano' : 'Kopiuj' }}
+                  </button>
                 </div>
               </div>
             </div>
@@ -13137,6 +13095,44 @@ body {
 }
 
 /* Przyciski akcji */
+/* Pole z gotowym linkiem do podgladu - najczesciej trzeba go wkleic dalej,
+   a nie otworzyc u siebie, wiec stoi do zaznaczenia i skopiowania. */
+.podglad-link-box {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.podglad-link-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.25);
+  color: #e5e7eb;
+}
+
+.podglad-link-kopiuj {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(74, 158, 255, 0.15);
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.podglad-link-kopiuj:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 .summary-action-buttons {
   display: flex;
   gap: 1rem;
