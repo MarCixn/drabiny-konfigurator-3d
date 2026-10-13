@@ -7,6 +7,7 @@ import ThreeCanvas from '../components/ThreeCanvas.vue'
    wersja z api.ts, dlatego importujemy ja pod wlasna nazwa. */
 import { calculateLadder, calculateLocal, saveConfiguration, getConfigurationByRef, type ComponentItem, type LoadedConfiguration, type LadderConfig as LadderConfigZapis } from '../services/api'
 import { type BOMData } from '../services/pdf-generator'
+import { obreczOdZiemi, ileObreczy, type TypPoreczy } from '../services/kosz-geometria'
 import { postMessageService, type LadderConfig, type ConfigResult } from '../services/postMessage'
 import type { AppMode } from '../composables/useAppMode'
 import {
@@ -1505,18 +1506,20 @@ function calculateCageHoops(
   _suspended: boolean = false,
   _suspendedHeightMm: number = 0,
   scheme: string = 'no-platform',
-  hasHandrails: boolean = true
+  hasHandrails: boolean = true,
+  wallHeightMm: number = 0,
+  atticPlatformDistanceMm: number = 0
 ) {
   void _suspended; void _suspendedHeightMm; // Reserved for future use
+  void firstRungHeight; // wysokość obręczy liczymy teraz z geometrii sceny
 
-  // Środek pierwszej obręczy:
-  // - z poręczami +1.1m: 112.2cm nad górnym szczeblem
-  // - bez poręczy: 1283mm niżej (kosz zaczyna się niżej)
-  const NO_HANDRAILS_OFFSET = 1283  // mm - przesunięcie w dół gdy brak poręczy
-  let firstHoopHeight = firstRungHeight + LADDER_CONSTANTS.CAGE_START_OFFSET
-  if (!hasHandrails && scheme === 'no-platform') {
-    firstHoopHeight -= NO_HANDRAILS_OFFSET
-  }
+  // Jaki typ zakończenia widzi scena 3D - od niego zależy, gdzie siada
+  // pierwsza obręcz. Mapowanie jak w ThreeCanvas.mapSchemeToHandrailType.
+  const typPoreczy: TypPoreczy =
+    scheme === 'attic-passage' ? 'attic'
+    : scheme === 'with-platform' ? 'platform'
+    : hasHandrails ? 'safety'
+    : 'none'
 
   // Oblicz maksymalną ilość otworów dostępnych w modułach
   // Bez poręczy: nie dodajemy +2 za poręcze
@@ -1539,34 +1542,37 @@ function calculateCageHoops(
     maxHolesAvailable += 3
   }
 
-  // KLUCZOWE: Ostatnia obręcz musi być między 2.2m a 3m od ZIEMI (bezwzględnie)
-  // Nie od punktu zawieszenia!
-  const minCageHeightFromGround = LADDER_CONSTANTS.CAGE_MIN_HEIGHT  // 2200mm od ziemi
+  // KLUCZOWE: ostatnia obręcz musi być między 2.2m a 3m od ZIEMI (bezwzględnie,
+  // nie od punktu zawieszenia).
+  //
+  // Wysokości obręczy bierzemy z kosz-geometria.ts, czyli z tego samego
+  // wzoru, którym scena 3D potem RAPORTUJE wynik. Wcześniej był tu drugi,
+  // własny wzór (pierwszy szczebel + 1114), przesunięty o 12 mm względem
+  // sceny - i przy ~2% wysokości ścian panel dobierał liczbę obręczy tak,
+  // że sam potem pokazywał kosz kończący się poniżej 2200 mm.
+  const geomObreczy = {
+    wysokoscScianyMm: wallHeightMm,
+    typPoreczy,
+    dystansAttykiMm: atticPlatformDistanceMm
+  }
 
-  // Oblicz obręcze idąc w dół od pierwszej
-  let hoopCount = 0
+  let hoopCount = ileObreczy({ ...geomObreczy, maksOtworow: maxHolesAvailable })
+
   const hoopHeights: number[] = []
-  let currentHeight = firstHoopHeight
-
-  // Dodawaj obręcze dopóki:
-  // 1. Wysokość obręczy >= 2.2m od ZIEMI (nie od zawieszenia)
-  // 2. Nie przekroczyliśmy max dostępnych otworów
-  while (currentHeight >= minCageHeightFromGround && hoopCount < maxHolesAvailable) {
-    hoopHeights.push(currentHeight)
-    hoopCount++
-    currentHeight -= LADDER_CONSTANTS.CAGE_HOOP_SPACING
+  for (let n = 1; n <= hoopCount; n++) {
+    hoopHeights.push(obreczOdZiemi({ ...geomObreczy, numerObreczy: n }))
   }
 
   // Minimum 2 obręcze - jeśli tylko 1, to traktujemy jako 0
   if (hoopCount === 1) {
     hoopCount = 0
+    hoopHeights.length = 0
   }
 
-  // Oblicz wysokość ostatniej obręczy od ziemi (bezwzględnie)
+  // Wysokość ostatniej obręczy od ziemi (bezwzględnie)
   const lastHoopHeight = hoopHeights.length > 0 ? hoopHeights[hoopHeights.length - 1] : null
-  // Dla zawieszonej: dystans od punktu zawieszenia (groundLevel)
-  // Dla normalnej: dystans od ziemi (groundLevel = 0)
-  const cageDistanceFromGround = lastHoopHeight !== null ? lastHoopHeight : null
+  const firstHoopHeight = hoopHeights.length > 0 ? hoopHeights[0] : null
+  const cageDistanceFromGround = lastHoopHeight
 
   return {
     count: hoopCount,
@@ -1600,7 +1606,10 @@ function calculateLadderStructure() {
 
   // 3. Oblicz kosz (uwzględnij czy są poręcze +1.1m)
   const hasHandrails = state.value.hasHandrails
-  const cage = calculateCageHoops(rungs.firstRungHeight, modules, suspended, suspendedHeightMm, scheme, hasHandrails)
+  const cage = calculateCageHoops(
+    rungs.firstRungHeight, modules, suspended, suspendedHeightMm, scheme, hasHandrails,
+    wallHeightMm, atticPlatformDistanceMm
+  )
 
   // 4. Oblicz numX7 i finalRungs
   const numX7 = modules.startLadder7 + modules.repeatLadder7

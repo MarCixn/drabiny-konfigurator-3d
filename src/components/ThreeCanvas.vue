@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
+import { obreczOdZiemi, type TypPoreczy } from '../services/kosz-geometria'
 import {
   WSPORNIK_ODLEGLOSCI_DOMYSLNE as wspornikDefaultDistances,
   typWspornikaZOdleglosci
@@ -6110,8 +6111,7 @@ function createLadder() {
     }
 
     // Rysuj wymiar Wys. zawieszenia (żółty → niebieski) gdy lastRungToGround > 350mm
-    const distFromGround = props.distanceFromGround || 160
-    const lastRungToGround = distFromGround + suspendedHeight1
+    const lastRungToGround = odlegloscSzczeblaOdZiemi()
     if (lastRungToGround > 350 && finalLadderBottomBoxY !== null && groundTopBoxY !== null) {
       const geoConfig1 = ladderGeometryConfig[1]
       if (isAtticPassage) {
@@ -7418,57 +7418,42 @@ function positionLadder(height1: number, _maxHeight: number) {
 // ============================================
 // EMIT UPDATE
 // ============================================
+/**
+ * Ostatni szczebel → ziemia (mm).
+ *
+ * Przy przełazie attykowym panel liczy tę odległość JUŻ OD ZIEMI: przy
+ * drabinie zawieszonej zmniejsza liczbę szczebli, więc wynik sam w sobie
+ * zawiera wysokość zawieszenia (calculateRungs: e = (a + 36 + b) - 275·d).
+ * Przy klasycznej i z podestem distanceFromGround jest liczone od punktu
+ * zawieszenia, więc trzeba je doliczyć.
+ *
+ * Wzór był przepisany w czterech miejscach i w jednym - tabelce rysowanej
+ * w scenie - zabrakło wyjątku dla attyki, przez co wysokość zawieszenia
+ * wchodziła do wyniku dwa razy.
+ */
+function odlegloscSzczeblaOdZiemi(): number {
+  const distFromGround = props.distanceFromGround || 160
+  return handrailType === 'attic' ? distFromGround : distFromGround + suspendedHeight1
+}
+
 function emitUpdate() {
   const totalRungs = numX7Ladders1 * 7 + (typeof finalLadderRungs1 === 'number' ? finalLadderRungs1 : 7)
   const totalHeightMm = getTotalHeightForLadder(1)
 
-  // Calculate last rung to ground distance
-  const distFromGround = props.distanceFromGround || 160
-  let lastRungToGround: number
-  if (handrailType === 'attic') {
-    // Dla przejścia przez attykę - używamy wartości z App.vue (już obliczone)
-    lastRungToGround = distFromGround
-  } else {
-    // Dla klasycznej i z podestem: standardowa formuła
-    lastRungToGround = distFromGround + suspendedHeight1
-  }
+  const lastRungToGround = odlegloscSzczeblaOdZiemi()
 
-  // Calculate last hoop to ground distance
+  // Ostatnia obręcz → ziemia. Ten sam wzór, którym panel DOBIERA liczbę
+  // obręczy (services/kosz-geometria.ts) - wcześniej były to dwa osobne
+  // wyliczenia rozjeżdżające się o 12 mm, przez co panel potrafił dobrać
+  // kosz, który sam potem raportował jako za niski.
   let lastHoopToGround = 0
   if (safetyCageCount1 > 0) {
-    const height1 = getTotalHeightForLadder(1)
-    const hoopSpacing = 641.7
-
-    let topPosition = height1 / 2
-    let firstHoopOffset: number
-
-    if (handrailType === 'safety' || handrailType === 'platform') {
-      topPosition += DIMS.handrailVertical
-      firstHoopOffset = 25
-    } else if (handrailType === 'attic') {
-      topPosition += DIMS.atticRailHeight
-      firstHoopOffset = 25
-    } else {
-      firstHoopOffset = 294.3
-    }
-
-    // Last hoop Y position (relative to ladder center) - measure to BOTTOM of hoop
-    const hoopHeight = 45  // height of hoop band in mm
-    const lastHoopY = topPosition - firstHoopOffset - ((safetyCageCount1 - 1) * hoopSpacing) - hoopHeight
-
-    // Ground level - same formula as renderWallAndGround
-    const ladderTop = height1 / 2
-    let topOffset = -161
-    if (handrailType === 'platform') {
-      topOffset = -211
-    } else if (handrailType === 'attic') {
-      const atticDist = props.atticPlatformDistance ?? 0
-      topOffset = -161 + 511 - atticDist
-    }
-    const groundLevel = ladderTop - wallHeightConfig + topOffset
-
-    // Distance from last hoop bottom to ground (absolute - groundLevel already accounts for suspension)
-    lastHoopToGround = Math.round(lastHoopY - groundLevel)
+    lastHoopToGround = Math.round(obreczOdZiemi({
+      numerObreczy: safetyCageCount1,
+      wysokoscScianyMm: wallHeightConfig,
+      typPoreczy: handrailType as TypPoreczy,
+      dystansAttykiMm: props.atticPlatformDistance ?? 0
+    }))
   }
 
   ostatnieSzczebelDoZiemi = Math.round(lastRungToGround)
@@ -8804,11 +8789,8 @@ function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
       height: renderer.domElement.height,
       // Wysokosc ostatniego szczebla nad ziemia (mm). Oddajemy ja razem
       // z rysunkiem, zeby strona produktu nie liczyla jej po swojemu -
-      // ta sama scena, ta sama liczba. Wzor jak w emitUpdate():
-      // przy attyce sam dystans od ziemi, inaczej plus zawieszenie.
-      szczebelOdZiemi: Math.round(
-        (props.distanceFromGround || 160) + (handrailType === 'attic' ? 0 : suspendedHeight1)
-      ),
+      // ta sama scena, ta sama liczba.
+      szczebelOdZiemi: Math.round(odlegloscSzczeblaOdZiemi()),
     }
   } catch (e) {
     console.warn('[ThreeCanvas] nie udalo sie wyeksportowac rysunku', e)
@@ -10013,46 +9995,20 @@ function generateBOM(): BOMData {
   let lastRung2ToGround: number | undefined
   let lastCage2ToGround: number | undefined
 
-  // Calculate last rung to ground for ladder 1
-  const distFromGround = props.distanceFromGround || 160
-  if (handrailType === 'attic') {
-    lastRung1ToGround = distFromGround
-  } else {
-    lastRung1ToGround = distFromGround + suspendedHeight1
-  }
+  // Ostatni szczebel → ziemia dla drabiny 1
+  lastRung1ToGround = odlegloscSzczeblaOdZiemi()
 
-  // Calculate last cage hoop to ground for ladder 1
+  // Ostatnia obręcz → ziemia dla drabiny 1 - ten sam wzór co w emitUpdate()
+  // i w panelu. Bez dodawania wysokości zawieszenia: kosz wisi pod szczytem
+  // drabiny, a jego położenie liczymy względem krawędzi ściany, nie względem
+  // dolnego końca drabiny.
   if (safetyCageCount1 > 0) {
-    const height1 = getTotalHeightForLadder(1)
-    const hoopSpacing = 641.7
-
-    let topPosition = height1 / 2
-    let firstHoopOffset: number
-
-    if (handrailType === 'safety' || handrailType === 'platform') {
-      topPosition += DIMS.handrailVertical
-      firstHoopOffset = 25
-    } else if (handrailType === 'attic') {
-      topPosition += DIMS.atticRailHeight
-      firstHoopOffset = 25
-    } else {
-      firstHoopOffset = 294.3
-    }
-
-    const hoopHeight = 45
-    const lastHoopY = topPosition - firstHoopOffset - ((safetyCageCount1 - 1) * hoopSpacing) - hoopHeight
-
-    const ladderTop = height1 / 2
-    let topOffset = -161
-    if (handrailType === 'platform') {
-      topOffset = -211
-    } else if (handrailType === 'attic') {
-      const atticDist = props.atticPlatformDistance ?? 0
-      topOffset = -161 + 511 - atticDist
-    }
-    const groundLevel = ladderTop - wallHeightConfig + topOffset
-
-    lastCage1ToGround = Math.round(lastHoopY - groundLevel + suspendedHeight1)
+    lastCage1ToGround = Math.round(obreczOdZiemi({
+      numerObreczy: safetyCageCount1,
+      wysokoscScianyMm: wallHeightConfig,
+      typPoreczy: handrailType as TypPoreczy,
+      dystansAttykiMm: props.atticPlatformDistance ?? 0
+    }))
   }
 
   function countsToItems(counts: Record<string, { count: number; details?: string }>): BOMItem[] {
