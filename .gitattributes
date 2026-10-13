@@ -12,10 +12,6 @@
 # bajt w bajt.
 # ==========================================================================
 
-# Zbudowane paczki (dist/ i docs/ to wdrozenia, nie kod zrodlowy)
-dist/**      -text
-docs/**      -text
-
 # Modele i tekstury
 *.glb        binary
 *.gltf       binary
@@ -31,3 +27,11 @@ docs/**      -text
 *.css        text
 *.json       text
 *.md         text
+
+# Zbudowane paczki (dist/ i docs/ to wdrozenia, nie kod zrodlowy).
+# MUSZA stac na koncu: w gitattributes wygrywa regula pozniejsza, wiec
+# "*.css text" wyzej przykrywalo "dist/** -text" i zbudowany arkusz
+# dalej byl normalizowany - czyli dokladnie to, przed czym ten plik ma
+# chronic.
+dist/**      -text
+docs/**      -text
