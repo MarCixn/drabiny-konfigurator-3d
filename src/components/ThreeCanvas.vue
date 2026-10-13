@@ -11303,8 +11303,11 @@ const RODZAJE_MIGAWKI: Array<{ flaga: string; rodzaj: string }> = [
   { flaga: 'isHandrail', rodzaj: 'porecz' },
   { flaga: 'isPlatform', rodzaj: 'podest' },
   { flaga: 'isRestingPlatform', rodzaj: 'podest_spoczynkowy' },
+  // Ponizsze nie dostaja elementId z assignElementIds - nadajemy im wlasny
+  { flaga: 'isBigfootGuide', rodzaj: 'prowadnica_bigfoot' },
   { flaga: 'isBigfoot', rodzaj: 'bigfoot' },
-  { flaga: 'isAtticPassage', rodzaj: 'attyka' }
+  { flaga: 'isAtticPassage', rodzaj: 'attyka' },
+  { flaga: 'isKrataWema', rodzaj: 'krata' }
 ]
 
 /** Wszystko, czego potrzebuja opisy rzutu, a czego nie widac po samych modelach. */
@@ -11367,17 +11370,29 @@ function eksportujScene(): ElementMigawki[] {
      wypadlby wtedy kilka razy. Traverse idzie od rodzica, wiec pierwszy
      trafiony jest tym wlasciwym. */
   const widziane = new Set<string>()
+  const liczniki: Record<string, number> = {}
 
   ladderContainer.traverse((obj) => {
     const u = obj.userData || {}
-    if (!u.elementId) { return }
     // Elementy ukryte przez sprzedawce nie maja byc w podgladzie klienta
     if (obj.visible === false) { return }
-    if (widziane.has(String(u.elementId))) { return }
 
     const trafiony = RODZAJE_MIGAWKI.find((r) => u[r.flaga] === true)
     if (!trafiony) { return }
-    widziane.add(String(u.elementId))
+
+    /* Brak elementId nie moze wykluczac elementu z podgladu. Bigfoot, przelaz
+       i krata wema go nie dostaja, bo assignElementIds() ich nie obsluguje -
+       w migawce wystarczy identyfikator unikalny w jej obrebie. */
+    let id: string
+    if (u.elementId) {
+      id = String(u.elementId)
+    } else {
+      const klucz = trafiony.rodzaj + '_' + (u.ladderNum || 1)
+      liczniki[klucz] = (liczniki[klucz] || 0)
+      id = klucz + '_auto_' + liczniki[klucz]++
+    }
+    if (widziane.has(id)) { return }
+    widziane.add(id)
 
     /* Klucz modelu zalezy od rodzaju - kazdy tagowany jest czym innym:
        wsporniki maja wspornikType, laczniki connectorType, moduly
@@ -11394,7 +11409,7 @@ function eksportujScene(): ElementMigawki[] {
     }
 
     wynik.push({
-      id: String(u.elementId),
+      id,
       rodzaj: trafiony.rodzaj,
       model: model,
       poz: [
@@ -11438,6 +11453,9 @@ function modelDlaMigawki(e: ElementMigawki): THREE.Group | null {
       const t = e.model || 'uchwyt'
       if (t === 'sciskany') { return loadedModels.sciskany || null }
       if (t === 'lacznik') { return loadedModels.lacznik || null }
+      // Lacznik porecz asekuracyjnych ma wlasny model - bez tego podglad
+      // podstawial zwykly uchwyt
+      if (t === 'uchwytPoreczy') { return loadedModels.uchwytPoreczy || null }
       return loadedModels.uchwyt || null
     }
     case 'obrecz':     return loadedModels.obrecz || null
@@ -11446,7 +11464,9 @@ function modelDlaMigawki(e: ElementMigawki): THREE.Group | null {
     case 'podest':     return loadedModels.podestKrotki || null
     case 'podest_spoczynkowy': return loadedModels.podestSpoczynkowy || null
     case 'bigfoot':    return loadedModels.bigfoot || null
+    case 'prowadnica_bigfoot': return loadedModels.prowadnicaBigfoot || null
     case 'attyka':     return loadedModels.attyka || null
+    case 'krata':      return loadedModels.krataWema || null
     case 'katownik': {
       const t = e.model || 'x2'
       if (t === 'x3') { return loadedModels.katownikX3 || null }
