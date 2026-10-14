@@ -9753,6 +9753,37 @@ function obrysBryly(siatka: THREE.Mesh): THREE.Box3 | null {
   return geo.boundingBox.clone().translate(siatka.position)
 }
 
+/**
+ * Obrys tego, co stoi NA SZCZYCIE drabiny - poreczy asekuracyjnych albo
+ * przelazu attykowego. Z niego bierze sie wysokosc gornego boxa, zamiast
+ * zgadywanej stalej: przy attyce konstrukcja siega inaczej niz przy
+ * klasycznej, a przy braku poreczy nie ma jej wcale.
+ *
+ * Zwracamy w ukladzie ladderContainer (tak jak reszta pozycji), wiec
+ * swiatowy obrys przeliczamy odwrotnoscia jego macierzy - inaczej obrot
+ * modelu przesuwalby wynik.
+ */
+function obrysSzczytu(): THREE.Box3 | null {
+  if (!ladderContainer) return null
+  const szukany = handrailType === 'attic' ? 'isAtticPassage' : 'isHandrail'
+
+  const laczny = new THREE.Box3()
+  let znaleziono = false
+  ladderContainer.updateMatrixWorld(true)
+  ladderContainer.traverse((obiekt) => {
+    if (!obiekt.userData[szukany]) return
+    if (!(obiekt as THREE.Mesh).isObject3D) return
+    const obrys = new THREE.Box3().setFromObject(obiekt)
+    if (obrys.isEmpty()) return
+    laczny.union(obrys)
+    znaleziono = true
+  })
+  if (!znaleziono || laczny.isEmpty()) return null
+
+  const doLokalnych = new THREE.Matrix4().copy(ladderContainer.matrixWorld).invert()
+  return laczny.applyMatrix4(doLokalnych)
+}
+
 /** Znajdz sciane i podloge po znacznikach, ktorymi oznacza je renderWallAndGround. */
 function znajdzSciangeIPodloge(): { sciana: THREE.Mesh | null; podloga: THREE.Mesh | null } {
   let sciana: THREE.Mesh | null = null
@@ -9790,15 +9821,18 @@ function przypnijBoxyDoRogow() {
      Sam rog nie obejmuje jeszcze calego modelu - ponad szczyt sciany
      wychodza porecze, a drabina stoi odsunieta od sciany na wspornikach.
      Wartosci moga byc stale, bo rog i tak wedruje razem z konfiguracja. */
-  /* Przy przelazie attykowym konstrukcja wychodzi wyzej ponad szczyt
-     sciany niz przy klasycznej - stad dodatkowe 400 mm w gore. */
-  const dodatekAttyki = handrailType === 'attic' ? 400 : 0
-
   const ODSUNIECIE = {
-    // w lewo, w gore (286 + 50 + 1000, przy attyce +400), w tyl
-    kadr_gorny: { x: -200, y: 286 + 50 + 1000 + dodatekAttyki, z: -200 },
+    kadr_gorny: { x: -200, z: -200 },             // w lewo i w tyl
     kadr_dolny: { x: 200, y: -200, z: 200 }       // w prawo, w dol, w przod
   }
+
+  /* Wysokosc gornego boxa wynika z tego, co stoi na szczycie: poreczy
+     albo przelazu attykowego. Box siega od GORY tego elementu w dol,
+     a jest o 50 mm wyzszy, zeby go z zapasem obejmowal.
+     Stale 1336/1736 mm, ktore tu byly, trzeba bylo dobierac na oko pod
+     kazda konfiguracje - a konstrukcja na szczycie zmienia wysokosc. */
+  const LUZ_SZCZYTU = 50
+  const szczyt = obrysSzczytu()
 
   const rogi: Record<string, THREE.Vector3> = {
     kadr_dolny: new THREE.Vector3(
@@ -9808,13 +9842,37 @@ function przypnijBoxyDoRogow() {
     ),
     kadr_gorny: new THREE.Vector3(
       obrysSciany.min.x + ODSUNIECIE.kadr_gorny.x * SCALE,
-      obrysSciany.max.y + ODSUNIECIE.kadr_gorny.y * SCALE,
+      /* Srodek w pionie: box siega od gory szczytu w dol, jest o LUZ
+         wyzszy od samego elementu. Gdy szczytu nie ma (brak poreczy,
+         brak attyki) - zostaje sam szczyt sciany. */
+      szczyt
+        ? szczyt.max.y - (szczyt.max.y - szczyt.min.y + LUZ_SZCZYTU * SCALE) / 2
+        : obrysSciany.max.y,
       /* W glab bierzemy TYLNA KRAWEDZ PODLOGI, nie sciany.
          Podloga siega dalej do tylu niz sama sciana i jej zasieg zmienia
          sie z konfiguracja (grubosc sciany, okap, attyka), wiec to ona
          wyznacza, jak gleboko musi siegac kadr. */
       obrysPodlogi.min.z + ODSUNIECIE.kadr_gorny.z * SCALE
     )
+  }
+
+  /* Gorny box dostaje wysokosc szczytu + luz. Geometrie trzeba przebudowac,
+     bo BoxGeometry ma rozmiar zapieczony przy tworzeniu. */
+  if (szczyt) {
+    const wpisGorny = debugEditorObjects.find(o => o.id === 'kadr_gorny')
+    const siatka = wpisGorny?.object as THREE.Mesh | undefined
+    if (siatka) {
+      const wysokosc = szczyt.max.y - szczyt.min.y + LUZ_SZCZYTU * SCALE
+      const stara = siatka.geometry as THREE.BoxGeometry
+      const p = stara.parameters
+      if (Math.abs(p.height - wysokosc) > 1e-6) {
+        siatka.geometry = new THREE.BoxGeometry(p.width, wysokosc, p.depth)
+        stara.dispose()
+      }
+      if (wpisGorny?.dimensions) {
+        wpisGorny.dimensions.height = Math.round((wysokosc / SCALE) * 100) / 100
+      }
+    }
   }
 
   for (const wpis of debugEditorObjects) {
