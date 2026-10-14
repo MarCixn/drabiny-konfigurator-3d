@@ -869,16 +869,19 @@ watch(() => props.obstacles, () => {
   }
 }, { deep: true })
 
-// Auto-scale camera zoom based on wall height (55 for 3m, 80 for 5m)
+/* Zmiana wysokosci sciany przestawia kadr - chyba ze uzytkownik sam
+   ustawil przyblizenie. Samo dopasowanie liczy dopasujKamere3d() z bryly
+   kadrowania; tu jest tylko zapasowy wzor na wypadek, gdyby sceny jeszcze
+   nie bylo (watcher chodzi z immediate). */
 watch(() => props.wallHeight, (newHeight) => {
-  if (perspectiveCamera && newHeight > 0) {
-    // Linear: 3m→55, 5m→80 (12.5 per meter)
-    const scaledZoom = 17.5 + newHeight * 12.5
-    // Clamp between 40 and 200
-    const clampedZoom = Math.max(40, Math.min(200, scaledZoom))
-    perspectiveCamera.position.z = clampedZoom
-    lastZoom = clampedZoom
-    requestRender() // Render after zoom change
+  if (!perspectiveCamera || !(newHeight > 0) || recznyZoom) return
+  const przed = perspectiveCamera.position.z
+  dopasujKamere3d()
+  if (perspectiveCamera.position.z === przed) {
+    const zapas = Math.max(40, Math.min(200, 17.5 + newHeight * 12.5))
+    perspectiveCamera.position.z = zapas
+    lastZoom = zapas
+    requestRender()
   }
 }, { immediate: true })
 
@@ -1852,6 +1855,8 @@ function setupControls() {
 
   // Wheel zoom
   dom.addEventListener('wheel', (e) => {
+    // Uzytkownik przejmuje przyblizenie - od tej chwili nie nadpisujemy go
+    recznyZoom = true
     e.preventDefault()
 
     if (isTechDrawingMode) {
@@ -6201,6 +6206,11 @@ function createLadder() {
     przypnijBoxyDoRogow()
   }
 
+  /* Kadr widoku 3D po kazdej przebudowie - dopoki uzytkownik sam nie
+     ustawil przyblizenia. Bez tego pierwsze pokazanie drabiny bralo
+     odleglosc ze wzoru i czesc modelu zostawala poza kadrem. */
+  if (!recznyZoom) dopasujKamere3d()
+
   // Check obstacle collisions
   checkObstacleCollisions()
 
@@ -9928,6 +9938,68 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
   return { gorny: rogi.kadr_gorny, dolny: rogi.kadr_dolny }
 }
 
+/** Czy uzytkownik sam ustawil przyblizenie - wtedy nie nadpisujemy go. */
+let recznyZoom = false
+
+/**
+ * Kadr widoku 3D z bryly kadrowania.
+ *
+ * Dotad odleglosc kamery szla ze wzoru "17,5 + wysokosc sciany * 12,5",
+ * czyli z jednej liczby - nie wiedzial o koszu, poreczach, przelazie ani
+ * o glebokosci, wiec przy pierwszym pokazaniu drabiny czesc modelu bywala
+ * poza kadrem.
+ *
+ * Kamera stoi w (0,0,z) i patrzy na srodek obrotu, a obraca sie MODEL,
+ * wiec dopasowujemy kule opisana na bryle i liczona od tego srodka.
+ * Dzieki temu kadr jest dobry pod kazdym katem - takze gdy ktos pozniej
+ * obroci model - i nie trzeba przeliczac przy kazdym obrocie.
+ */
+function dopasujKamere3d() {
+  if (!perspectiveCamera || !containerRef.value || !ladderContainer) return
+  if (isTechDrawingMode) return
+
+  const rogi = rogiKadrowania()
+  if (!rogi) return
+
+  const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
+  // Z ukladu ladderContainer do ukladu obrotu
+  const przesun = ladderContainer.position
+
+  const container = containerRef.value
+  const aspect = Math.max(container.clientWidth / Math.max(container.clientHeight, 1), 0.01)
+  const tgPion = Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov) / 2)
+  const tgPoziom = tgPion * aspect
+
+  /* Liczymy DOKLADNIE dla biezacego ustawienia, a nie kula opisana na
+     bryle. Kula jest duzo wieksza od samej bryly - przy 12 m drabina
+     wychodzila mala i zepchnieta w rog, bo promien ciagnela podloga
+     wysunieta do przodu.
+
+     Kamera stoi w (0,0,d) i patrzy na srodek obrotu, wiec dla rogu p
+     musi zachodzic |p.x| <= (d - p.z) * tgPoziom oraz
+     |p.y| <= (d - p.z) * tgPion. Stad minimalne d dla kazdego rogu;
+     bierzemy najwieksze. */
+  const obrot = new THREE.Quaternion().setFromEuler(pivotGroup.rotation)
+  let dystans = 0
+  for (const x of [bryla.min.x, bryla.max.x]) {
+    for (const y of [bryla.min.y, bryla.max.y]) {
+      for (const z of [bryla.min.z, bryla.max.z]) {
+        const p = new THREE.Vector3(x, y, z).add(przesun).applyQuaternion(obrot)
+        dystans = Math.max(
+          dystans,
+          p.z + Math.abs(p.x) / tgPoziom,
+          p.z + Math.abs(p.y) / tgPion
+        )
+      }
+    }
+  }
+  if (!(dystans > 0)) return
+
+  perspectiveCamera.position.z = Math.max(dystans * 1.06, 10)
+  lastZoom = perspectiveCamera.position.z
+  requestRender()
+}
+
 function przypnijBoxyDoRogow() {
   const wyliczone = rogiKadrowania()
   if (!wyliczone) return
@@ -12207,6 +12279,7 @@ defineExpose({
       orthoCamera.updateProjectionMatrix()
       requestRender()
     } else if (perspectiveCamera) {
+      recznyZoom = true
       perspectiveCamera.position.z = Math.max(3, perspectiveCamera.position.z * 0.8)
       requestRender()
     }
@@ -12224,6 +12297,7 @@ defineExpose({
       orthoCamera.updateProjectionMatrix()
       requestRender()
     } else if (perspectiveCamera) {
+      recznyZoom = true
       perspectiveCamera.position.z = Math.min(300, perspectiveCamera.position.z * 1.25)
       requestRender()
     }
