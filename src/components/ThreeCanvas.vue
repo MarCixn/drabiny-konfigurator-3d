@@ -9842,11 +9842,12 @@ function przypnijBoxyDoRogow() {
     ),
     kadr_gorny: new THREE.Vector3(
       obrysSciany.min.x + ODSUNIECIE.kadr_gorny.x * SCALE,
-      /* Srodek w pionie: box siega od gory szczytu w dol, jest o LUZ
-         wyzszy od samego elementu. Gdy szczytu nie ma (brak poreczy,
-         brak attyki) - zostaje sam szczyt sciany. */
+      /* Pion: 50 mm ponad GORA tego, co stoi na szczycie drabiny -
+         poreczy albo przelazu attykowego. Box zostaje szescianem,
+         zmienia sie tylko jego polozenie. Gdy szczytu nie ma (brak
+         poreczy i brak attyki) - zostaje sam szczyt sciany. */
       szczyt
-        ? szczyt.max.y - (szczyt.max.y - szczyt.min.y + LUZ_SZCZYTU * SCALE) / 2
+        ? szczyt.max.y + LUZ_SZCZYTU * SCALE
         : obrysSciany.max.y,
       /* W glab bierzemy TYLNA KRAWEDZ PODLOGI, nie sciany.
          Podloga siega dalej do tylu niz sama sciana i jej zasieg zmienia
@@ -9856,24 +9857,6 @@ function przypnijBoxyDoRogow() {
     )
   }
 
-  /* Gorny box dostaje wysokosc szczytu + luz. Geometrie trzeba przebudowac,
-     bo BoxGeometry ma rozmiar zapieczony przy tworzeniu. */
-  if (szczyt) {
-    const wpisGorny = debugEditorObjects.find(o => o.id === 'kadr_gorny')
-    const siatka = wpisGorny?.object as THREE.Mesh | undefined
-    if (siatka) {
-      const wysokosc = szczyt.max.y - szczyt.min.y + LUZ_SZCZYTU * SCALE
-      const stara = siatka.geometry as THREE.BoxGeometry
-      const p = stara.parameters
-      if (Math.abs(p.height - wysokosc) > 1e-6) {
-        siatka.geometry = new THREE.BoxGeometry(p.width, wysokosc, p.depth)
-        stara.dispose()
-      }
-      if (wpisGorny?.dimensions) {
-        wpisGorny.dimensions.height = Math.round((wysokosc / SCALE) * 100) / 100
-      }
-    }
-  }
 
   for (const wpis of debugEditorObjects) {
     const rog = rogi[wpis.id]
