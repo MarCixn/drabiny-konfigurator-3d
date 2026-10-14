@@ -6192,6 +6192,11 @@ function createLadder() {
   // Create green collision boxes for wsporniki
   createGreenCollisionBoxes()
 
+  /* Znaczniki kadrowania musza isc za scena: sciana zmienia wysokosc,
+     a podloga swoje polozenie, wiec rogi wedruja przy kazdej przebudowie.
+     Bez tego boxy zostawaly tam, gdzie staly w chwili wlaczenia debuga. */
+  if (debugMode) przypnijBoxyDoRogow()
+
   // Check obstacle collisions
   checkObstacleCollisions()
 
@@ -9011,7 +9016,10 @@ function createDebugBoxes() {
 
   // Znaczniki kadrowania - stawiane razem z reszta pomocy debugowych,
   // zeby przezyly przebudowe drabiny (clearDebugObjects czysci liste).
+  // Przypinamy je do rogow juz po utworzeniu, bo pozycja wynika ze sciany
+  // i podlogi, a te zmieniaja sie z kazda zmiana konfiguracji.
   utworzBoxyKadrowania()
+  przypnijBoxyDoRogow()
 
   // Create collision zone boxes for wsporniki
   const height1 = getTotalHeightForLadder(1)
@@ -9710,19 +9718,105 @@ function addDebugModel(modelName: string): DebugObject | null {
 const BOXY_KADROWANIA = [
   {
     id: 'kadr_gorny',
-    nazwa: 'Kadr — górny',
+    nazwa: 'Kadr — górny (ściana: lewy/góra/tył)',
     kolor: '#f59e0b',
-    poz: { x: -3002.73, y: 5059.94, z: -3072.29 },
-    wym: { szerokosc: 600, wysokosc: 600, glebokosc: 600 }
+    poz: { x: 0, y: 0, z: 0 },
+    wym: { szerokosc: 300, wysokosc: 300, glebokosc: 300 }
   },
   {
     id: 'kadr_dolny',
-    nazwa: 'Kadr — dolny',
+    nazwa: 'Kadr — dolny (podłoga: prawy/przód/dół)',
     kolor: '#0ea5e9',
-    poz: { x: 4859.55, y: -3612.93, z: 3993.66 },
-    wym: { szerokosc: 600, wysokosc: 600, glebokosc: 600 }
+    poz: { x: 0, y: 0, z: 0 },
+    wym: { szerokosc: 300, wysokosc: 300, glebokosc: 300 }
   }
 ]
+
+/**
+ * Lokalny prostopadloscian obejmujacy bryle (w mm, wzgledem ladderContainer).
+ *
+ * Liczymy z GEOMETRII, a nie z powtorzonych wymiarow sciany i podlogi -
+ * te zmieniaja sie z wysokoscia, grubosciem ocieplenia, attyka i okapem,
+ * a kazdy przepisany wzor to kolejne miejsce do rozjechania sie.
+ * Obie bryly to nieobrocone prostopadlosciany, wiec wystarczy pudelko
+ * geometrii przesuniete o pozycje siatki.
+ */
+function obrysBryly(siatka: THREE.Mesh): THREE.Box3 | null {
+  const geo = siatka.geometry as THREE.BufferGeometry
+  if (!geo) return null
+  if (!geo.boundingBox) geo.computeBoundingBox()
+  if (!geo.boundingBox) return null
+  return geo.boundingBox.clone().translate(siatka.position)
+}
+
+/** Znajdz sciane i podloge po znacznikach, ktorymi oznacza je renderWallAndGround. */
+function znajdzSciangeIPodloge(): { sciana: THREE.Mesh | null; podloga: THREE.Mesh | null } {
+  let sciana: THREE.Mesh | null = null
+  let podloga: THREE.Mesh | null = null
+  if (!ladderContainer) return { sciana, podloga }
+  for (const dziecko of ladderContainer.children) {
+    if (dziecko.userData.isWallIndicator) sciana = dziecko as THREE.Mesh
+    if (dziecko.userData.isGroundIndicator) podloga = dziecko as THREE.Mesh
+  }
+  return { sciana, podloga }
+}
+
+/**
+ * Przypnij znaczniki do rogow sceny.
+ *
+ * Kierunki jak w rysunku technicznym: +X = prawo, +Z = przod, +Y = gora.
+ *   dolny  -> podloga: prawy, przod, dol
+ *   gorny  -> sciana:  lewy, gora, tyl
+ *
+ * Srodek boxa siada dokladnie na rogu, wiec odleglosc miedzy nimi rowna
+ * sie przekatnej bryly obejmujacej sciane i podloge - to z niej pojdzie
+ * pozniej kadrowanie kamery.
+ */
+function przypnijBoxyDoRogow() {
+  const { sciana, podloga } = znajdzSciangeIPodloge()
+  if (!sciana || !podloga) return
+
+  const obrysSciany = obrysBryly(sciana)
+  const obrysPodlogi = obrysBryly(podloga)
+  if (!obrysSciany || !obrysPodlogi) return
+
+  /* Stale przesuniecie od rogu, w MILIMETRACH.
+     Sam rog sciany i podlogi nie obejmuje jeszcze calego modelu - poreczy
+     asekuracyjnych wystajacych ponad wyjscie ani wspornikow odsuwajacych
+     drabine od sciany. Zakotwiczenie jest juz zalatwione, wiec wystarczy
+     tu dolozyc stale wartosci; nie zaleza od wysokosci sciany, bo ta
+     wedruje razem z rogiem. */
+  const ODSUNIECIE = {
+    // gora: ponad szczyt sciany musi sie zmiescic porecz (DIMS.handrailVertical)
+    kadr_gorny: { x: 0, y: DIMS.handrailVertical, z: 0 },
+    kadr_dolny: { x: 0, y: 0, z: 0 }
+  }
+
+  const rogi: Record<string, THREE.Vector3> = {
+    kadr_dolny: new THREE.Vector3(
+      obrysPodlogi.max.x + ODSUNIECIE.kadr_dolny.x * SCALE,
+      obrysPodlogi.min.y + ODSUNIECIE.kadr_dolny.y * SCALE,
+      obrysPodlogi.max.z + ODSUNIECIE.kadr_dolny.z * SCALE
+    ),
+    kadr_gorny: new THREE.Vector3(
+      obrysSciany.min.x + ODSUNIECIE.kadr_gorny.x * SCALE,
+      obrysSciany.max.y + ODSUNIECIE.kadr_gorny.y * SCALE,
+      obrysSciany.min.z + ODSUNIECIE.kadr_gorny.z * SCALE
+    )
+  }
+
+  for (const wpis of debugEditorObjects) {
+    const rog = rogi[wpis.id]
+    if (!rog) continue
+    wpis.object.position.copy(rog)
+    // Edytor pokazuje milimetry, a scena liczy w jednostkach - stad podzial
+    wpis.position = {
+      x: Math.round((rog.x / SCALE) * 100) / 100,
+      y: Math.round((rog.y / SCALE) * 100) / 100,
+      z: Math.round((rog.z / SCALE) * 100) / 100
+    }
+  }
+}
 
 function utworzBoxyKadrowania() {
   if (!ladderContainer) return
