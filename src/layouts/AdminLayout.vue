@@ -50,7 +50,9 @@ const bezPaneli = computed(() => isEmbedMode.value || isViewMode.value)
  * handlowca. Zamiast powielac style pod drugi warunek, oba tryby
  * wskazuje jedna flaga.
  */
-const jasnyInterfejs = computed(() => isViewMode.value || isSellerMode.value)
+const jasnyInterfejs = computed(
+  () => isViewMode.value || isSellerMode.value || isEmbedMode.value
+)
 
 // Seller mode - panel visibility
 const sellerPanelVisible = ref(false)
@@ -4849,32 +4851,61 @@ function toggleCageClosing() {
               />
 
               <!-- Przyciski widoku dla trybu embed (lewa strona, pionowo) -->
-              <div v-if="isEmbedMode" class="embed-view-selector">
+              <!-- Przelacznik widoku na stronie produktu. Ten sam jasny jezyk
+                   co panel podgladu klienta, ale BEZ przycisku powrotu - tu
+                   nie ma dokad wracac, kalkulator siedzi w ramce na stronie.
+                   Zostaja wszystkie trzy widoki, bo tylko stad da sie je
+                   przelaczyc: naglowek rysunku technicznego jest w tym
+                   trybie ukryty. -->
+              <nav v-if="isEmbedMode" class="pk-rail" aria-label="Widok modelu">
                 <button
-                  class="embed-view-btn"
-                  :class="{ active: techDrawingActive && techDrawingView === 'front' }"
-                  @click="setTechDrawingView('front')"
-                  title="Widok z przodu"
-                >
-                  Przód
-                </button>
-                <button
-                  class="embed-view-btn"
-                  :class="{ active: techDrawingActive && techDrawingView === 'side' }"
-                  @click="setTechDrawingView('side')"
-                  title="Widok z boku"
-                >
-                  Bok
-                </button>
-                <button
-                  class="embed-view-btn"
-                  :class="{ active: !techDrawingActive }"
+                  class="pk-btn"
+                  :class="{ 'is-active': !techDrawingActive }"
                   @click="exitTechDrawingMode"
-                  title="Widok 3D"
                 >
-                  3D
+                  <span class="pk-ikona" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z"/>
+                      <path d="M3.6 7 12 11.6 20.4 7"/>
+                      <path d="M12 11.6v9.8"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Model 3D</span>
                 </button>
-              </div>
+                <button
+                  class="pk-btn"
+                  :class="{ 'is-active': techDrawingActive && techDrawingView === 'front' }"
+                  @click="setTechDrawingView('front')"
+                >
+                  <span class="pk-ikona" aria-hidden="true">
+                    <!-- rzut z przodu: drabina widziana wprost -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8 3.4v17.2M16 3.4v17.2"/>
+                      <path d="M8 7.6h8M8 12h8M8 16.4h8"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Przód</span>
+                </button>
+                <button
+                  class="pk-btn"
+                  :class="{ 'is-active': techDrawingActive && techDrawingView === 'side' }"
+                  @click="setTechDrawingView('side')"
+                >
+                  <span class="pk-ikona" aria-hidden="true">
+                    <!-- rzut z boku: drabina przy scianie, z wymiarem -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                         stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M15.4 3.4v17.2"/>
+                      <path d="M11 6.6h4.4M11 11h4.4M11 15.4h4.4"/>
+                      <path d="M4.6 4.6v14.8"/>
+                      <path d="M3.4 6 4.6 4.6 5.8 6M3.4 18l1.2 1.4L5.8 18"/>
+                    </svg>
+                  </span>
+                  <span class="pk-etykieta">Bok</span>
+                </button>
+              </nav>
 
               <!-- ============================================
                    PASEK KLIENTA (tryb view)
@@ -4960,7 +4991,7 @@ function toggleCageClosing() {
 
               <!-- Kontrolki w prawym górnym rogu (zoom + fullscreen) -->
               <div v-if="isEmbedMode || isViewMode" class="embed-top-controls"
-                   :class="{ 'pk-zoom': isViewMode }">
+                   :class="{ 'pk-zoom': jasnyInterfejs }">
                 <button class="embed-control-btn" @click="zoomIn" title="Przybliż">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
                        stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
@@ -12493,49 +12524,10 @@ body {
   background: rgba(74, 158, 255, 0.15);
 }
 
-/* Embed mode view selector (positioned on left side, vertical) */
-.embed-view-selector {
-  position: absolute;
-  top: 50%;
-  left: 12px;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  background: linear-gradient(165deg, rgba(30,30,40,0.92) 0%, rgba(20,20,30,0.95) 100%);
-  padding: 8px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.15);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-  z-index: 100;
-}
-
-.embed-view-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 10px 14px;
-  background: transparent;
-  border: 2px solid transparent;
-  border-radius: 6px;
-  color: #aaa;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  min-width: 50px;
-}
-
-.embed-view-btn:hover {
-  color: #fff;
-  background: rgba(255,255,255,0.1);
-}
-
-.embed-view-btn.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(74, 158, 255, 0.15);
-}
+/* Przelacznik widoku w trybie embed korzysta teraz z .pk-rail - tego samego
+   jasnego panelu co podglad klienta. Stare reguly .embed-view-selector
+   i .embed-view-btn (ciemny panel, obwodka w kolorze akcentu) zostaly
+   usuniete razem z ostatnim miejscem, ktore ich uzywalo. */
 
 /* Embed top controls (zoom + fullscreen) - right top corner */
 .embed-top-controls {
