@@ -6194,8 +6194,12 @@ function createLadder() {
 
   /* Znaczniki kadrowania musza isc za scena: sciana zmienia wysokosc,
      a podloga swoje polozenie, wiec rogi wedruja przy kazdej przebudowie.
-     Bez tego boxy zostawaly tam, gdzie staly w chwili wlaczenia debuga. */
-  if (debugMode) przypnijBoxyDoRogow()
+     Najpierw wieszamy je z powrotem (czyszczenie kontenera wyzej zdjelo
+     je ze sceny), potem ustawiamy na rogach. */
+  if (debugMode) {
+    utworzBoxyKadrowania()
+    przypnijBoxyDoRogow()
+  }
 
   // Check obstacle collisions
   checkObstacleCollisions()
@@ -9821,7 +9825,16 @@ function przypnijBoxyDoRogow() {
 function utworzBoxyKadrowania() {
   if (!ladderContainer) return
   for (const b of BOXY_KADROWANIA) {
-    if (debugEditorObjects.some(o => o.id === b.id)) continue
+    /* UWAGA: createLadder() czysci ladderContainer do zera przy kazdej
+       przebudowie, a wpis na liscie edytora zostaje. Samo "jest na liscie,
+       wiec pomijam" gubilo wiec siatke ze sceny i boxy znikaly z widoku,
+       choc edytor dalej pokazywal dwa obiekty. Jesli siatka stracila
+       rodzica - wieszamy ja z powrotem zamiast tworzyc od nowa. */
+    const istniejacy = debugEditorObjects.find(o => o.id === b.id)
+    if (istniejacy) {
+      if (!istniejacy.object.parent) ladderContainer.add(istniejacy.object)
+      continue
+    }
 
     const geometria = new THREE.BoxGeometry(
       b.wym.szerokosc * SCALE,
