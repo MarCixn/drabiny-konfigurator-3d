@@ -8668,13 +8668,40 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     sceneHeight = Math.max(wallHeightConfig, totalHeightWithHandrails + suspendedHeight1)
   }
 
-  // Ortho camera size with margin
-  const modelHeight = sceneHeight * SCALE
-  const margin = 1.3
-  let orthoSize = Math.max(modelHeight * margin / 2, 5)
-
   const container = containerRef.value!
   const aspect = container.clientWidth / container.clientHeight
+  const margin = 1.08
+
+  /* Kadr z dwoch rogow kadrowania.
+     Dotad rozmiar kamery wynikal z samej WYSOKOSCI sceny - szerokosc nie
+     wchodzila do rachunku wcale, wiec przy szerokiej podlodze albo
+     glebokiej attyce rysunek wychodzil poza ekran. Teraz liczymy obie osie
+     i bierzemy tę, ktora wiaze.
+
+     Ktora os jest pozioma, zalezy od rzutu: przod/tyl patrza wzdluz Z,
+     wiec w poziomie jest X; bok patrzy wzdluz X, wiec w poziomie jest Z;
+     gora patrzy w dol, wiec w pionie jest Z. */
+  const rogi = rogiKadrowania()
+  let orthoSize: number
+  let srodek: THREE.Vector3 | null = null
+
+  if (rogi) {
+    const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
+    const rozmiar = bryla.getSize(new THREE.Vector3())
+    srodek = bryla.getCenter(new THREE.Vector3())
+
+    const poziom = view === 'side' ? rozmiar.z : rozmiar.x
+    const pion = view === 'top' ? rozmiar.z : rozmiar.y
+
+    // Polowa wysokosci kadru: wieksza z potrzeb pionu i przeliczonego poziomu
+    orthoSize = Math.max(pion / 2, poziom / (2 * aspect)) * margin
+  } else {
+    // Zapas na wypadek braku sciany lub podlogi (np. oba wylaczone)
+    const modelHeight = sceneHeight * SCALE
+    orthoSize = Math.max(modelHeight * 1.3 / 2, 5)
+  }
+  orthoSize = Math.max(orthoSize, 5)
+
   orthoCamera.left = -orthoSize * aspect
   orthoCamera.right = orthoSize * aspect
   orthoCamera.top = orthoSize
@@ -8703,19 +8730,25 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     orthoCamera.up.set(0, 1, 0)
   }
 
+  /* Celujemy w SRODEK bryly kadrowania. Wczesniej byl tu lookAtY dobrany
+     mnoznikami (0.42 + 0.01/0.08) liczonymi z samej wysokosci drabiny -
+     nie wiedzial ani o scianie, ani o podlodze, ani o glebokosci, wiec
+     rysunek bywal przesuniety. Gdy rogow nie ma, zostaje stary sposob. */
+  const cel = srodek ?? new THREE.Vector3(0, lookAtY, 0)
+
   if (view === 'front') {
-    orthoCamera.position.set(0, lookAtY, 50)
-    orthoCamera.lookAt(0, lookAtY, 0)
+    orthoCamera.position.set(cel.x, cel.y, cel.z + 50)
+    orthoCamera.lookAt(cel.x, cel.y, cel.z)
   } else if (view === 'side') {
-    orthoCamera.position.set(50, lookAtY, 0)
-    orthoCamera.lookAt(0, lookAtY, 0)
+    orthoCamera.position.set(cel.x + 50, cel.y, cel.z)
+    orthoCamera.lookAt(cel.x, cel.y, cel.z)
   } else if (view === 'back') {
-    orthoCamera.position.set(0, lookAtY, -50)
-    orthoCamera.lookAt(0, lookAtY, 0)
+    orthoCamera.position.set(cel.x, cel.y, cel.z - 50)
+    orthoCamera.lookAt(cel.x, cel.y, cel.z)
   } else if (view === 'top') {
     orthoCamera.up.set(0, 0, -1)
-    orthoCamera.position.set(0, 50, 0)
-    orthoCamera.lookAt(0, 0, 0)
+    orthoCamera.position.set(cel.x, cel.y + 50, cel.z)
+    orthoCamera.lookAt(cel.x, cel.y, cel.z)
   }
 
   orthoCamera.updateProjectionMatrix()
@@ -9807,13 +9840,20 @@ function znajdzSciangeIPodloge(): { sciana: THREE.Mesh | null; podloga: THREE.Me
  * sie przekatnej bryly obejmujacej sciane i podloge - to z niej pojdzie
  * pozniej kadrowanie kamery.
  */
-function przypnijBoxyDoRogow() {
+/**
+ * Dwa rogi wyznaczajace bryle kadrowania (w ukladzie ladderContainer).
+ *
+ * Liczone BEZ udzialu boxow debugowych - te sa tylko podgladem tego samego
+ * wyniku i istnieja wylacznie przy Ctrl+Shift+D, a kadrowanie kamery musi
+ * dzialac w kazdym trybie.
+ */
+function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null {
   const { sciana, podloga } = znajdzSciangeIPodloge()
-  if (!sciana || !podloga) return
+  if (!sciana || !podloga) return null
 
   const obrysSciany = obrysBryly(sciana)
   const obrysPodlogi = obrysBryly(podloga)
-  if (!obrysSciany || !obrysPodlogi) return
+  if (!obrysSciany || !obrysPodlogi) return null
 
   /* Stale przesuniecie od rogu, w MILIMETRACH. Kierunki jak w rysunku
      technicznym: +X w prawo, +Y w gore, +Z w przod.
@@ -9857,6 +9897,16 @@ function przypnijBoxyDoRogow() {
     )
   }
 
+  return { gorny: rogi.kadr_gorny, dolny: rogi.kadr_dolny }
+}
+
+function przypnijBoxyDoRogow() {
+  const wyliczone = rogiKadrowania()
+  if (!wyliczone) return
+  const rogi: Record<string, THREE.Vector3> = {
+    kadr_gorny: wyliczone.gorny,
+    kadr_dolny: wyliczone.dolny
+  }
 
   for (const wpis of debugEditorObjects) {
     const rog = rogi[wpis.id]
