@@ -9790,8 +9790,13 @@ function przypnijBoxyDoRogow() {
      Sam rog nie obejmuje jeszcze calego modelu - ponad szczyt sciany
      wychodza porecze, a drabina stoi odsunieta od sciany na wspornikach.
      Wartosci moga byc stale, bo rog i tak wedruje razem z konfiguracja. */
+  /* Przy przelazie attykowym konstrukcja wychodzi wyzej ponad szczyt
+     sciany niz przy klasycznej - stad dodatkowe 400 mm w gore. */
+  const dodatekAttyki = handrailType === 'attic' ? 400 : 0
+
   const ODSUNIECIE = {
-    kadr_gorny: { x: -200, y: 286 + 50, z: 0 },   // w lewo i w gore
+    // w lewo, w gore (286 + 50 + 1000, przy attyce +400), w tyl
+    kadr_gorny: { x: -200, y: 286 + 50 + 1000 + dodatekAttyki, z: -200 },
     kadr_dolny: { x: 200, y: -200, z: 200 }       // w prawo, w dol, w przod
   }
 
