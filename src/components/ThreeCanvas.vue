@@ -8681,9 +8681,23 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
      Ktora os jest pozioma, zalezy od rzutu: przod/tyl patrza wzdluz Z,
      wiec w poziomie jest X; bok patrzy wzdluz X, wiec w poziomie jest Z;
      gora patrzy w dol, wiec w pionie jest Z. */
+  /* Gorny pasek "Rysunek techniczny" lezy NAD plotnem, wiec przy ciasnym
+     kadrze szczyt modelu wsuwal sie pod niego. Rezerwujemy u gory pas
+     pikseli: kadr rosnie o tyle, zeby model zmiescil sie w tym, co
+     zostaje PONIZEJ paska, a cel kamery jedzie w gore o pol pasa, zeby
+     rysunek zszedl na wolne miejsce.
+
+     Rosna obie osie naraz - inaczej zmienilyby sie proporcje odwzorowania
+     i rysunek wyszedlby rozciagniety. */
+  const REZERWA_GORA_PX = 92
+  const wysPx = Math.max(container.clientHeight, 1)
+  // Przy bardzo niskim oknie rezerwa nie moze zjesc calego kadru
+  const udzialTresci = Math.max(0.5, (wysPx - REZERWA_GORA_PX) / wysPx)
+
   const rogi = rogiKadrowania()
   let orthoSize: number
   let srodek: THREE.Vector3 | null = null
+  let przesuniecieGora = 0
 
   if (rogi) {
     const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
@@ -8693,8 +8707,14 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     const poziom = view === 'side' ? rozmiar.z : rozmiar.x
     const pion = view === 'top' ? rozmiar.z : rozmiar.y
 
-    // Polowa wysokosci kadru: wieksza z potrzeb pionu i przeliczonego poziomu
-    orthoSize = Math.max(pion / 2, poziom / (2 * aspect)) * margin
+    // Wysokosc kadru w jednostkach sceny: wieksza z potrzeb pionu
+    // (powiekszonego o rezerwe) i przeliczonego poziomu
+    const wysSwiata = Math.max(
+      (pion * margin) / udzialTresci,
+      (poziom * margin) / aspect
+    )
+    orthoSize = wysSwiata / 2
+    przesuniecieGora = (REZERWA_GORA_PX / 2) * (wysSwiata / wysPx)
   } else {
     // Zapas na wypadek braku sciany lub podlogi (np. oba wylaczone)
     const modelHeight = sceneHeight * SCALE
@@ -8735,6 +8755,13 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
      nie wiedzial ani o scianie, ani o podlodze, ani o glebokosci, wiec
      rysunek bywal przesuniety. Gdy rogow nie ma, zostaje stary sposob. */
   const cel = srodek ?? new THREE.Vector3(0, lookAtY, 0)
+
+  /* Rezerwa u gory: celujemy wyzej, wiec rysunek siada nizej i wychodzi
+     spod paska. Dla rzutu z gory pomijamy - tam pionem na ekranie jest Z
+     (wektor "gora" to 0,0,-1), wiec przesuniecie w Y nic by nie dalo. */
+  if (srodek && view !== 'top') {
+    cel.y += przesuniecieGora
+  }
 
   if (view === 'front') {
     orthoCamera.position.set(cel.x, cel.y, cel.z + 50)
