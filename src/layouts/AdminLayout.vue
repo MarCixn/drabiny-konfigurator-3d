@@ -5297,7 +5297,7 @@ function toggleCageClosing() {
 
               <!-- OSTRZEŻENIE MIARKI (środek ekranu) -->
               <div v-if="showMeasureWarning" class="measure-warning-dialog"
-                   :class="{ 'pk-okno': isViewMode }">
+                   :class="{ 'pk-okno': jasnyInterfejs }">
                 <div class="measure-warning-content">
                   <button class="measure-warning-close" @click="closeMeasureWarning">
                     <svg v-if="isViewMode" class="pk-m-ikona" viewBox="0 0 24 24" fill="none"
@@ -12570,18 +12570,24 @@ body {
 }
 
 /* Embed navigation hint (bottom left) */
+/* Podpowiedz nawigacji. Pokazuje sie TYLKO w embed i w podgladzie klienta,
+   nigdy w panelu admina, wiec nie potrzebuje warunku - jest jasna zawsze. */
 .embed-nav-hint {
   position: absolute;
   bottom: 12px;
   left: 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: rgba(0,0,0,0.6);
-  border-radius: 6px;
-  font-size: 11px;
-  color: rgba(255,255,255,0.6);
+  gap: 7px;
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px -8px rgba(15, 23, 42, 0.3);
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #64748b;
   z-index: 100;
   pointer-events: none;
 }
