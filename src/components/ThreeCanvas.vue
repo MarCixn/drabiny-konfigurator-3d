@@ -8681,15 +8681,16 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
      Ktora os jest pozioma, zalezy od rzutu: przod/tyl patrza wzdluz Z,
      wiec w poziomie jest X; bok patrzy wzdluz X, wiec w poziomie jest Z;
      gora patrzy w dol, wiec w pionie jest Z. */
-  /* Gorny pasek "Rysunek techniczny" lezy NAD plotnem, wiec przy ciasnym
-     kadrze szczyt modelu wsuwal sie pod niego. Rezerwujemy u gory pas
-     pikseli: kadr rosnie o tyle, zeby model zmiescil sie w tym, co
-     zostaje PONIZEJ paska, a cel kamery jedzie w gore o pol pasa, zeby
-     rysunek zszedl na wolne miejsce.
+  /* Drobna rezerwa u gory, zeby rysunek nie dotykal krawedzi.
+     Bylo tu 92 px pod pasek "Rysunek techniczny" lezacy nad plotnem -
+     sterowanie przeniesione do prawej kolumny, wiec nie ma juz czego
+     omijac i kadr moze byc ciasniejszy.
 
-     Rosna obie osie naraz - inaczej zmienilyby sie proporcje odwzorowania
-     i rysunek wyszedlby rozciagniety. */
-  const REZERWA_GORA_PX = 92
+     Rezerwa dziala przez dwie rzeczy naraz: kadr rosnie o tyle, zeby
+     model zmiescil sie PONIZEJ niej, a cel kamery jedzie w gore o pol
+     pasa. Obie osie rosna razem - inaczej zmienilyby sie proporcje
+     odwzorowania i rysunek wyszedlby rozciagniety. */
+  const REZERWA_GORA_PX = 16
   const wysPx = Math.max(container.clientHeight, 1)
   // Przy bardzo niskim oknie rezerwa nie moze zjesc calego kadru
   const udzialTresci = Math.max(0.5, (wysPx - REZERWA_GORA_PX) / wysPx)

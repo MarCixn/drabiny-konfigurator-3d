@@ -5097,6 +5097,36 @@ function toggleCageClosing() {
                 >
                   Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
                 </button>
+
+                <!-- Sterowanie rysunkiem technicznym. U handlowca siedzi
+                     w TEJ kolumnie zamiast w pasku nad scena: pasek lezal
+                     nad plotnem i zjadal gore kadru, a sam napis "Rysunek
+                     techniczny" niczego nie wnosil - widac to po modelu. -->
+                <template v-if="isSellerMode && techDrawingActive">
+                  <button
+                    v-if="techDrawingView === 'side'"
+                    class="viewer3d-visibility-btn"
+                    :class="{ active: showDimensions }"
+                    @click="toggleDimensions"
+                    title="Pokaż/ukryj wymiary"
+                  >
+                    Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
+                  </button>
+                  <button
+                    class="viewer3d-visibility-btn"
+                    @click="switchTechDrawingView"
+                    title="Przełącz widok rzutu"
+                  >
+                    Widok: {{ techDrawingView }}
+                  </button>
+                  <button
+                    class="viewer3d-visibility-btn viewer3d-zamknij"
+                    @click="toggleTechDrawing"
+                    title="Zamknij rysunek techniczny"
+                  >
+                    Zamknij rysunek
+                  </button>
+                </template>
               </div>
 
               <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer/embed mode -->
@@ -5448,7 +5478,11 @@ function toggleCageClosing() {
               </div>
 
               <!-- Panel rysunku technicznego (góra środek) - ukryty w customer/embed mode -->
-              <div v-if="techDrawingActive && !isCustomerMode && !bezPaneli" id="techDrawingPanel">
+              <!-- Pasek nad scena. U handlowca go nie ma - jego przyciski
+                   przeniesione do prawej kolumny, zeby nie zaslanialy gory
+                   rysunku. W panelu admina zostaje. -->
+              <div v-if="techDrawingActive && !isCustomerMode && !bezPaneli && !isSellerMode"
+                   id="techDrawingPanel">
                 <span class="tech-label">Rysunek techniczny</span>
                 <span class="tech-view">Widok: {{ techDrawingView }}</span>
                 <span class="tech-hint">Przeciągnij = przesuń | Scroll = zoom</span>
@@ -9397,6 +9431,17 @@ body {
 .viewer3d-visibility-btn.active {
   background: rgba(76, 175, 80, 0.9);
   border-color: #6fcf7c;
+}
+
+/* Zamkniecie rysunku - jedyny przycisk w tej kolumnie, ktory nie
+   przelacza, tylko wychodzi; stad inny kolor. */
+.viewer3d-zamknij {
+  background: rgba(190, 18, 60, 0.85);
+  border-color: rgba(190, 18, 60, 0.9);
+}
+
+.viewer3d-zamknij:hover {
+  background: rgba(225, 29, 72, 0.95);
 }
 
 .viewer3d-visibility-btn:hover {
