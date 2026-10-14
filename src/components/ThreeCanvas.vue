@@ -789,11 +789,25 @@ onMounted(() => {
     requestRender()
   }, 100)
   window.addEventListener('resize', handleResize)
+
+  /* Samo nasluchiwanie na oknie nie wystarcza: widok 3D zmienia rozmiar
+     takze wtedy, gdy okno stoi w miejscu - przy ukladaniu strony po
+     starcie i przy zwijaniu bocznego panelu. Wlasnie dlatego pierwsze
+     dopasowanie kadru lapalo rozmiar sprzed ulozenia i model wychodzil
+     za maly. */
+  if (typeof ResizeObserver !== 'undefined' && containerRef.value) {
+    obserwatorRozmiaru = new ResizeObserver(() => handleResize())
+    obserwatorRozmiaru.observe(containerRef.value)
+  }
 })
 
 onUnmounted(() => {
   isDisposed = true
   window.removeEventListener('resize', handleResize)
+  if (obserwatorRozmiaru) {
+    obserwatorRozmiaru.disconnect()
+    obserwatorRozmiaru = null
+  }
 
   // Cancel pending animation frame
   if (animationFrameId) {
@@ -8039,6 +8053,13 @@ function handleResize() {
   orthoCamera.updateProjectionMatrix()
 
   renderer.setSize(width, height)
+
+  /* Kadr zalezy od PROPORCJI okna, wiec po kazdej zmianie rozmiaru trzeba
+     go przeliczyc. Bez tego pierwsze dopasowanie lapalo rozmiar sprzed
+     ulozenia strony i model wychodzil za maly - poprawial sie dopiero
+     przy czyms, co wymuszalo przebudowe sceny (np. Ctrl+Shift+D). */
+  if (!recznyZoom) dopasujKamere3d()
+
   requestRender() // Render after resize
 }
 
@@ -9941,6 +9962,9 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
 /** Czy uzytkownik sam ustawil przyblizenie - wtedy nie nadpisujemy go. */
 let recznyZoom = false
 
+/** Pilnuje rozmiaru samego widoku 3D, nie tylko okna przegladarki. */
+let obserwatorRozmiaru: ResizeObserver | null = null
+
 /**
  * Kadr widoku 3D z bryly kadrowania.
  *
@@ -9962,8 +9986,16 @@ function dopasujKamere3d() {
   if (!rogi) return
 
   const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
-  // Z ukladu ladderContainer do ukladu obrotu
-  const przesun = ladderContainer.position
+
+  /* Przesuniecie ladderContainer liczymy TAK SAMO jak animate(), a nie
+     czytamy z obiektu. animate() nadpisuje te pozycje co klatke
+     wartoscia z cameraOffset, a my jestesmy wolani tuz po
+     positionLadder(), ktore wpisuje tam zupelnie co innego. Czytanie
+     "na zywo" dawalo wiec za duzy dystans i model wychodzil maly -
+     poprawial sie dopiero po przebudowie, ktora trafiala juz na wartosc
+     ustawiona przez animate (stad "powieksza sie po Ctrl+Shift+D"). */
+  const atticZOffset = (handrailType === 'attic') ? 510 * SCALE : 0
+  const przesun = new THREE.Vector3(0, -cameraOffset.y, -cameraOffset.z + atticZOffset)
 
   const container = containerRef.value
   const aspect = Math.max(container.clientWidth / Math.max(container.clientHeight, 1), 0.01)
