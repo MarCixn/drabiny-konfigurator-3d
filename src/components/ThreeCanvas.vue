@@ -10012,24 +10012,37 @@ function dopasujKamere3d() {
      |p.y| <= (d - p.z) * tgPion. Stad minimalne d dla kazdego rogu;
      bierzemy najwieksze. */
   const obrot = new THREE.Quaternion().setFromEuler(pivotGroup.rotation)
-  let dystans = 0
+  const srodek = bryla.getCenter(new THREE.Vector3()).add(przesun).applyQuaternion(obrot)
+
+  let najX = 0
+  let najY = 0
   for (const x of [bryla.min.x, bryla.max.x]) {
     for (const y of [bryla.min.y, bryla.max.y]) {
       for (const z of [bryla.min.z, bryla.max.z]) {
         const p = new THREE.Vector3(x, y, z).add(przesun).applyQuaternion(obrot)
-        dystans = Math.max(
-          dystans,
-          p.z + Math.abs(p.x) / tgPoziom,
-          p.z + Math.abs(p.y) / tgPion
-        )
+        najX = Math.max(najX, Math.abs(p.x))
+        najY = Math.max(najY, Math.abs(p.y))
       }
     }
   }
+
+  /* Odleglosc liczymy wzgledem SRODKA bryly, a nie jej najblizszego rogu.
+     Warunek "kazdy rog musi sie zmiescic" brał pod uwage takze rogi
+     wysuniete do przodu - a te leza w pustce (podloga siega daleko przed
+     drabine) i odpychaly kamere tak, ze model zajmowal tylko 80% wysokosci
+     ekranu. Teraz pod uwage idzie rozpietosc bryly i jej srodek, wiec
+     ekran wypelnia sie prawie w calosci.
+
+     Skutek uboczny: skrajny, najblizszy rog bryly moze o wlos wyjsc poza
+     kadr. Sam model i oba znaczniki zostaja w srodku. */
+  const dystans = Math.max(najX / tgPoziom, najY / tgPion) + srodek.z
   if (!(dystans > 0)) return
 
-  /* Luz wokol modelu. 1.06 dawalo wyrazny pas pustki u gory i u dolu;
-     1.015 zostawia tylko tyle, zeby model nie dotykal krawedzi. */
-  perspectiveCamera.position.z = Math.max(dystans * 1.015, 10)
+  /* Zapas. Liczenie wzgledem srodka bryly zaklada, ze wszystko lezy na
+     jej glebokosci - a to, co blizej kamery, rzutuje sie wieksze. Bez
+     zapasu szczyt poreczy wychodzil poza gorna krawedz. 1.08 wystarcza,
+     zeby model miescil sie w calosci, a ekran nadal byl wypelniony. */
+  perspectiveCamera.position.z = Math.max(dystans * 1.08, 10)
   lastZoom = perspectiveCamera.position.z
   requestRender()
 }
