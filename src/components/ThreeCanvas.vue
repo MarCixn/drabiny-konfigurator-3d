@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
@@ -187,6 +187,10 @@ const emit = defineEmits<{
 // REFS
 // ============================================
 const containerRef = ref<HTMLDivElement | null>(null)
+
+/** Wskaznik osi w prawym gornym rogu - wlaczany razem z trybem debug. */
+const pokazOsie = ref(false)
+const osieRef = ref<HTMLElement | null>(null)
 
 // ============================================
 // CONSTANTS - Dimensions in mm
@@ -7514,6 +7518,110 @@ function emitUpdate() {
 // ============================================
 
 // Request a single render frame
+// ============================================
+// WSKAZNIK OSI (debug)
+// ============================================
+/**
+ * Mala roza osi w rogu widoku: pokazuje, z ktorej strony patrzymy.
+ *
+ * Rysowana w SVG, a nie drugim przebiegiem renderera, zeby nie dotykac
+ * stanu WebGL (nozyce, viewport, autoClear) przy renderowaniu na zadanie.
+ * Elementy podmieniamy bezposrednio w DOM - przez reaktywnosc Vue
+ * szlaby przebudowa szablonu na kazdej klatce obrotu.
+ *
+ * Kierunki jak w rysunku technicznym: przod = +Z, bok = +X, gora = +Y.
+ */
+const OSIE_GIZMO = [
+  { klucz: 'x', wektor: new THREE.Vector3(1, 0, 0) },
+  { klucz: 'y', wektor: new THREE.Vector3(0, 1, 0) },
+  { klucz: 'z', wektor: new THREE.Vector3(0, 0, 1) }
+]
+const PROMIEN_OSI = 33
+type WezelOsi = { linia: SVGLineElement; tekst: SVGTextElement; kropka: SVGCircleElement }
+let wezlyOsi: Record<string, WezelOsi> | null = null
+let opisOsi: { widok: HTMLElement; katy: HTMLElement } | null = null
+
+/** Nazwa widoku dla kata - tylko gdy patrzymy prawie dokladnie z danej strony. */
+function nazwaWidoku(azymut: number, wzniesienie: number): string {
+  if (wzniesienie > 60) return 'Góra'
+  if (wzniesienie < -60) return 'Dół'
+  if (Math.abs(wzniesienie) > 12) return '—'
+  // Roznica katow sprowadzona do (-180, 180]; blisko = mniej niz 12 stopni.
+  const blisko = (cel: number) => Math.abs(((azymut - cel + 540) % 360) - 180) < 12
+  if (blisko(0)) return 'Przód'
+  if (blisko(90)) return 'Bok (prawy)'
+  if (blisko(-90)) return 'Bok (lewy)'
+  if (blisko(180)) return 'Tył'
+  return '—'
+}
+
+function odswiezOsie() {
+  const korzen = osieRef.value
+  if (!korzen || !camera) return
+
+  if (!wezlyOsi) {
+    const zebrane: Record<string, WezelOsi> = {}
+    for (const os of OSIE_GIZMO) {
+      const linia = korzen.querySelector(`[data-os="${os.klucz}"]`) as SVGLineElement | null
+      const tekst = korzen.querySelector(`[data-etykieta="${os.klucz}"]`) as SVGTextElement | null
+      const kropka = korzen.querySelector(`[data-ujemna="${os.klucz}"]`) as SVGCircleElement | null
+      if (!linia || !tekst || !kropka) return
+      zebrane[os.klucz] = { linia, tekst, kropka }
+    }
+    wezlyOsi = zebrane
+    opisOsi = {
+      widok: korzen.querySelector('[data-opis="widok"]') as HTMLElement,
+      katy: korzen.querySelector('[data-opis="katy"]') as HTMLElement
+    }
+  }
+
+  /* UWAGA: w widoku 3D obraca sie MODEL (pivotGroup), a kamera stoi
+     nieruchomo - liczenie z samego camera.quaternion dawalo wiecznie 0/0.
+     W rysunku technicznym jest odwrotnie: pivot wraca do zera, a rusza sie
+     kamera ortograficzna. Dlatego skladamy oba obroty: najpierw model,
+     potem odwrocona kamera. */
+  const wezly = wezlyOsi
+  const obrotModelu = new THREE.Quaternion()
+  if (pivotGroup) pivotGroup.getWorldQuaternion(obrotModelu)
+  const obrotKamery = camera.getWorldQuaternion(new THREE.Quaternion()).invert()
+
+  for (const os of OSIE_GIZMO) {
+    const w = os.wektor.clone()
+      .applyQuaternion(obrotModelu)
+      .applyQuaternion(obrotKamery)
+    const wezel = wezly[os.klucz]
+    const x = w.x * PROMIEN_OSI
+    const y = -w.y * PROMIEN_OSI
+
+    wezel.linia.setAttribute('x2', x.toFixed(1))
+    wezel.linia.setAttribute('y2', y.toFixed(1))
+    wezel.tekst.setAttribute('x', (x * 1.3).toFixed(1))
+    wezel.tekst.setAttribute('y', (y * 1.3).toFixed(1))
+    wezel.kropka.setAttribute('cx', (-x).toFixed(1))
+    wezel.kropka.setAttribute('cy', (-y).toFixed(1))
+
+    // Os odchylona od widza blednie - inaczej nie widac, ktora jest z przodu
+    const przod = (w.z + 1) / 2
+    const krycie = (0.3 + 0.7 * przod).toFixed(2)
+    wezel.linia.setAttribute('opacity', krycie)
+    wezel.tekst.setAttribute('opacity', krycie)
+    wezel.kropka.setAttribute('opacity', (0.15 + 0.35 * (1 - przod)).toFixed(2))
+  }
+
+  if (!opisOsi) return
+  /* Kat liczymy W UKLADZIE MODELU, nie swiata - pytanie brzmi "z ktorej
+     strony drabiny patrzymy", a to model sie obraca. */
+  const patrzy = new THREE.Vector3()
+  camera.getWorldDirection(patrzy)
+  const doKamery = patrzy.negate().applyQuaternion(obrotModelu.clone().invert())
+  const azymut = THREE.MathUtils.radToDeg(Math.atan2(doKamery.x, doKamery.z))
+  const wzniesienie = THREE.MathUtils.radToDeg(
+    Math.asin(THREE.MathUtils.clamp(doKamery.y, -1, 1))
+  )
+  opisOsi.widok.textContent = nazwaWidoku(azymut, wzniesienie)
+  opisOsi.katy.textContent = `${Math.round(azymut)}° / ${Math.round(wzniesienie)}°`
+}
+
 function requestRender() {
   scheduleFrame()
 }
@@ -7884,6 +7992,9 @@ function animate() {
 
   // Render the frame
   renderer.render(scene, camera)
+
+  // Wskaznik osi idzie za kamera, wiec odswiezamy go razem z klatka
+  if (pokazOsie.value) odswiezOsie()
 
   // Continue animation loop while interacting or smoothly interpolating
   if (isAnimating || isDragging || isPanning) {
@@ -8935,6 +9046,19 @@ function setDebugMode(enabled: boolean) {
   debugMode = enabled
   editMode = enabled  // Enable edit mode when debug mode is on
   showDebugBboxes = enabled
+
+  // Wskaznik osi pojawia sie razem z trybem debug. Odwolania do wezlow
+  // zerujemy, bo przy wylaczeniu Vue usuwa je z drzewa i po ponownym
+  // wlaczeniu trzeba je znalezc od nowa.
+  pokazOsie.value = enabled
+  wezlyOsi = null
+  opisOsi = null
+  if (enabled) {
+    nextTick(() => {
+      odswiezOsie()
+      requestRender()
+    })
+  }
 
   if (enabled) {
     createDebugBoxes()
@@ -11794,7 +11918,30 @@ defineExpose({
 </script>
 
 <template>
-  <div ref="containerRef" class="three-canvas"></div>
+  <div ref="containerRef" class="three-canvas">
+    <!-- Wskaznik osi - tylko w trybie debug.
+         Pokazuje, z ktorej strony patrzymy na model. Konwencja ta sama,
+         co w rysunku technicznym: przod = +Z, bok = +X, gora = +Y. -->
+    <div v-if="pokazOsie" ref="osieRef" class="osie-gizmo">
+      <svg viewBox="-50 -50 100 100" aria-hidden="true">
+        <!-- ujemne konce: same kropki, zeby nie mylily sie z dodatnimi -->
+        <circle data-ujemna="x" r="3" cx="0" cy="0" />
+        <circle data-ujemna="y" r="3" cx="0" cy="0" />
+        <circle data-ujemna="z" r="3" cx="0" cy="0" />
+        <line data-os="x" x1="0" y1="0" x2="0" y2="0" />
+        <line data-os="y" x1="0" y1="0" x2="0" y2="0" />
+        <line data-os="z" x1="0" y1="0" x2="0" y2="0" />
+        <circle class="osie-srodek" r="2.6" cx="0" cy="0" />
+        <text data-etykieta="x" x="0" y="0">X</text>
+        <text data-etykieta="y" x="0" y="0">Y</text>
+        <text data-etykieta="z" x="0" y="0">Z</text>
+      </svg>
+      <div class="osie-opis">
+        <span data-opis="widok">&mdash;</span>
+        <span data-opis="katy" class="osie-katy">0&deg; / 0&deg;</span>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -11806,5 +11953,86 @@ defineExpose({
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+  /* Kotwica dla wskaznika osi - bez tego pozycjonowalby sie wzgledem
+     calego okna, a nie wzgledem widoku 3D. */
+  position: relative;
+}
+
+/* ==========================================================================
+   WSKAZNIK OSI (tryb debug)
+   Ten sam jasny jezyk co pozostale nakladki. Nie przechwytuje klikniec -
+   lezy nad plotnem, a obrot modelu musi dzialac tak samo pod nim.
+   ========================================================================== */
+.osie-gizmo {
+  position: absolute;
+  /* Pod stosem przyciskow widocznosci (.viewer3d-visibility), ktory stoi
+     w tym samym rogu. W trybie debug ma zawsze piec pozycji - Sciana,
+     Podloga, Ocieplenie, Wymiary box i Wymiary - i konczy sie 190 px od
+     gory plotna (zmierzone, nie oszacowane). */
+  top: 202px;
+  right: 12px;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 10px 7px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px -10px rgba(15, 23, 42, 0.35);
+  pointer-events: none;
+}
+
+.osie-gizmo svg {
+  display: block;
+  width: 78px;
+  height: 78px;
+  overflow: visible;
+}
+
+.osie-gizmo line {
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+
+/* Kolory jak w powszechnej konwencji CAD: X czerwony, Y zielony, Z niebieski */
+.osie-gizmo [data-os='x'],
+.osie-gizmo [data-ujemna='x'] { stroke: #ef4444; fill: #ef4444; }
+.osie-gizmo [data-os='y'],
+.osie-gizmo [data-ujemna='y'] { stroke: #22c55e; fill: #22c55e; }
+.osie-gizmo [data-os='z'],
+.osie-gizmo [data-ujemna='z'] { stroke: #3b82f6; fill: #3b82f6; }
+
+.osie-gizmo [data-etykieta='x'] { fill: #ef4444; }
+.osie-gizmo [data-etykieta='y'] { fill: #22c55e; }
+.osie-gizmo [data-etykieta='z'] { fill: #3b82f6; }
+
+.osie-gizmo text {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.osie-srodek { fill: #94a3b8; stroke: none; }
+
+.osie-opis {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.osie-katy {
+  font-weight: 500;
+  font-size: 10px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
 }
 </style>
