@@ -9784,16 +9784,15 @@ function przypnijBoxyDoRogow() {
   const obrysPodlogi = obrysBryly(podloga)
   if (!obrysSciany || !obrysPodlogi) return
 
-  /* Stale przesuniecie od rogu, w MILIMETRACH.
-     Sam rog sciany i podlogi nie obejmuje jeszcze calego modelu - poreczy
-     asekuracyjnych wystajacych ponad wyjscie ani wspornikow odsuwajacych
-     drabine od sciany. Zakotwiczenie jest juz zalatwione, wiec wystarczy
-     tu dolozyc stale wartosci; nie zaleza od wysokosci sciany, bo ta
-     wedruje razem z rogiem. */
+  /* Stale przesuniecie od rogu, w MILIMETRACH. Kierunki jak w rysunku
+     technicznym: +X w prawo, +Y w gore, +Z w przod.
+
+     Sam rog nie obejmuje jeszcze calego modelu - ponad szczyt sciany
+     wychodza porecze, a drabina stoi odsunieta od sciany na wspornikach.
+     Wartosci moga byc stale, bo rog i tak wedruje razem z konfiguracja. */
   const ODSUNIECIE = {
-    // gora: ponad szczyt sciany musi sie zmiescic porecz (DIMS.handrailVertical)
-    kadr_gorny: { x: 0, y: DIMS.handrailVertical, z: 0 },
-    kadr_dolny: { x: 0, y: 0, z: 0 }
+    kadr_gorny: { x: -200, y: 286 + 50, z: 0 },   // w lewo i w gore
+    kadr_dolny: { x: 200, y: -200, z: 200 }       // w prawo, w dol, w przod
   }
 
   const rogi: Record<string, THREE.Vector3> = {
@@ -9805,7 +9804,11 @@ function przypnijBoxyDoRogow() {
     kadr_gorny: new THREE.Vector3(
       obrysSciany.min.x + ODSUNIECIE.kadr_gorny.x * SCALE,
       obrysSciany.max.y + ODSUNIECIE.kadr_gorny.y * SCALE,
-      obrysSciany.min.z + ODSUNIECIE.kadr_gorny.z * SCALE
+      /* W glab bierzemy TYLNA KRAWEDZ PODLOGI, nie sciany.
+         Podloga siega dalej do tylu niz sama sciana i jej zasieg zmienia
+         sie z konfiguracja (grubosc sciany, okap, attyka), wiec to ona
+         wyznacza, jak gleboko musi siegac kadr. */
+      obrysPodlogi.min.z + ODSUNIECIE.kadr_gorny.z * SCALE
     )
   }
 
