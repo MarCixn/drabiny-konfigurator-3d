@@ -10027,7 +10027,9 @@ function dopasujKamere3d() {
   }
   if (!(dystans > 0)) return
 
-  perspectiveCamera.position.z = Math.max(dystans * 1.06, 10)
+  /* Luz wokol modelu. 1.06 dawalo wyrazny pas pustki u gory i u dolu;
+     1.015 zostawia tylko tyle, zeby model nie dotykal krawedzi. */
+  perspectiveCamera.position.z = Math.max(dystans * 1.015, 10)
   lastZoom = perspectiveCamera.position.z
   requestRender()
 }
