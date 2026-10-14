@@ -5054,6 +5054,28 @@ function toggleCageClosing() {
 
               <!-- Kontrolki widoczności 3D (prawy górny róg) - ukryte w customer/embed mode -->
               <div v-if="(!isCustomerMode && !bezPaneli) || debugMode" class="viewer3d-visibility">
+                <!-- Sterowanie rysunkiem technicznym na SAMEJ GORZE i w innym
+                     stylu niz przelaczniki widocznosci pod spodem: to nie sa
+                     przelaczniki "widac/nie widac", tylko wyjscie z trybu
+                     i zmiana rzutu. -->
+                <template v-if="isSellerMode && techDrawingActive">
+                  <button
+                    class="viewer3d-visibility-btn viewer3d-rysunek viewer3d-zamknij"
+                    @click="toggleTechDrawing"
+                    title="Zamknij rysunek techniczny"
+                  >
+                    Zamknij rysunek
+                  </button>
+                  <button
+                    class="viewer3d-visibility-btn viewer3d-rysunek viewer3d-widok"
+                    @click="switchTechDrawingView"
+                    title="Przełącz widok rzutu"
+                  >
+                    Widok: {{ techDrawingView }}
+                  </button>
+                  <div class="viewer3d-kreska"></div>
+                </template>
+
                 <button
                   class="viewer3d-visibility-btn"
                   :class="{ active: show3DWall }"
@@ -5098,35 +5120,17 @@ function toggleCageClosing() {
                   Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
                 </button>
 
-                <!-- Sterowanie rysunkiem technicznym. U handlowca siedzi
-                     w TEJ kolumnie zamiast w pasku nad scena: pasek lezal
-                     nad plotnem i zjadal gore kadru, a sam napis "Rysunek
-                     techniczny" niczego nie wnosil - widac to po modelu. -->
-                <template v-if="isSellerMode && techDrawingActive">
-                  <button
-                    v-if="techDrawingView === 'side'"
-                    class="viewer3d-visibility-btn"
-                    :class="{ active: showDimensions }"
-                    @click="toggleDimensions"
-                    title="Pokaż/ukryj wymiary"
-                  >
-                    Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
-                  </button>
-                  <button
-                    class="viewer3d-visibility-btn"
-                    @click="switchTechDrawingView"
-                    title="Przełącz widok rzutu"
-                  >
-                    Widok: {{ techDrawingView }}
-                  </button>
-                  <button
-                    class="viewer3d-visibility-btn viewer3d-zamknij"
-                    @click="toggleTechDrawing"
-                    title="Zamknij rysunek techniczny"
-                  >
-                    Zamknij rysunek
-                  </button>
-                </template>
+                <!-- Wymiary zostaja przy przelacznikach widocznosci, bo tym
+                     wlasnie sa. Jak wczesniej - tylko w rzucie bocznym. -->
+                <button
+                  v-if="isSellerMode && techDrawingActive && techDrawingView === 'side'"
+                  class="viewer3d-visibility-btn"
+                  :class="{ active: showDimensions }"
+                  @click="toggleDimensions"
+                  title="Pokaż/ukryj wymiary"
+                >
+                  Wymiary: {{ showDimensions ? 'ON' : 'OFF' }}
+                </button>
               </div>
 
               <!-- GŁÓWNE KONTROLKI (lewy górny róg) - ukryte w customer/embed mode -->
@@ -9433,15 +9437,43 @@ body {
   border-color: #6fcf7c;
 }
 
-/* Zamkniecie rysunku - jedyny przycisk w tej kolumnie, ktory nie
-   przelacza, tylko wychodzi; stad inny kolor. */
+/* Sterowanie rysunkiem technicznym. Wyrozniamy je od przelacznikow
+   widocznosci pod spodem: te na dole mowia "widac / nie widac", a te dwa
+   zmieniaja to, NA CO sie patrzy albo wychodza z trybu. Stad mocniejszy
+   tekst, wyrazniejsza ramka i wlasne kolory. */
+.viewer3d-rysunek {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 7px 12px;
+  border-width: 1.5px;
+  box-shadow: 0 2px 10px -2px rgba(0, 0, 0, 0.5);
+}
+
 .viewer3d-zamknij {
-  background: rgba(190, 18, 60, 0.85);
-  border-color: rgba(190, 18, 60, 0.9);
+  background: rgba(190, 18, 60, 0.92);
+  border-color: #fb7185;
+  color: #fff;
 }
 
 .viewer3d-zamknij:hover {
-  background: rgba(225, 29, 72, 0.95);
+  background: rgba(225, 29, 72, 1);
+}
+
+.viewer3d-widok {
+  background: rgba(37, 99, 235, 0.92);
+  border-color: #60a5fa;
+  color: #fff;
+}
+
+.viewer3d-widok:hover {
+  background: rgba(59, 130, 246, 1);
+}
+
+/* Oddziela sterowanie rysunkiem od przelacznikow widocznosci */
+.viewer3d-kreska {
+  height: 1px;
+  margin: 3px 2px 1px;
+  background: rgba(255, 255, 255, 0.18);
 }
 
 .viewer3d-visibility-btn:hover {
