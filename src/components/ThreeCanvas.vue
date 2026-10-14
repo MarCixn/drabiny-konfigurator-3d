@@ -9009,6 +9009,10 @@ function createDebugBoxes() {
   clearDebugObjects()
   if (!debugMode) return
 
+  // Znaczniki kadrowania - stawiane razem z reszta pomocy debugowych,
+  // zeby przezyly przebudowe drabiny (clearDebugObjects czysci liste).
+  utworzBoxyKadrowania()
+
   // Create collision zone boxes for wsporniki
   const height1 = getTotalHeightForLadder(1)
   const ladderTop = height1 / 2
@@ -9684,6 +9688,82 @@ function addDebugModel(modelName: string): DebugObject | null {
   debugEditorObjects.push(debugObj)
 
   return debugObj
+}
+
+/* ============================================
+   BOXY KADROWANIA (etap 2)
+
+   Dwa znaczniki, ktore maja w przyszlosci wyznaczac bryle obejmujaca
+   caly model - kamera bedzie sie odsuwac tak, zeby zmiescila sie w kadrze.
+   Na razie stoja w pozycjach podanych recznie, bo nie wiadomo jeszcze,
+   ktore z nich maja isc za konfiguracja.
+
+   Wspolrzedne w MILIMETRACH, lokalnie wzgledem ladderContainer - dokladnie
+   tak, jak pokazuje i przyjmuje edytor debugowy, zeby dalo sie je przesuwac
+   myszka i odczytywac nowe wartosci bez przeliczania.
+
+   Rejestrujemy je w debugEditorObjects, wiec obsluguje je istniejacy edytor:
+   mozna je zaznaczyc, przeciagnac i wpisac pozycje recznie.
+   Do zestawienia materialowego nie wchodza - generateBOM liczy tylko
+   rozpoznane rodzaje (`if (itemKey)`).
+   ============================================ */
+const BOXY_KADROWANIA = [
+  {
+    id: 'kadr_gorny',
+    nazwa: 'Kadr — górny',
+    kolor: '#f59e0b',
+    poz: { x: -3002.73, y: 5059.94, z: -3072.29 },
+    wym: { szerokosc: 600, wysokosc: 600, glebokosc: 600 }
+  },
+  {
+    id: 'kadr_dolny',
+    nazwa: 'Kadr — dolny',
+    kolor: '#0ea5e9',
+    poz: { x: 4859.55, y: -3612.93, z: 3993.66 },
+    wym: { szerokosc: 600, wysokosc: 600, glebokosc: 600 }
+  }
+]
+
+function utworzBoxyKadrowania() {
+  if (!ladderContainer) return
+  for (const b of BOXY_KADROWANIA) {
+    if (debugEditorObjects.some(o => o.id === b.id)) continue
+
+    const geometria = new THREE.BoxGeometry(
+      b.wym.szerokosc * SCALE,
+      b.wym.wysokosc * SCALE,
+      b.wym.glebokosc * SCALE
+    )
+    // Polprzezroczyste, zeby nie zaslanialy drabiny przy dobieraniu pozycji
+    const material = new THREE.MeshStandardMaterial({
+      color: b.kolor,
+      transparent: true,
+      opacity: 0.45,
+      metalness: 0.1,
+      roughness: 0.8
+    })
+    const mesh = new THREE.Mesh(geometria, material)
+    mesh.position.set(b.poz.x * SCALE, b.poz.y * SCALE, b.poz.z * SCALE)
+    mesh.userData.debugObjectId = b.id
+    mesh.userData.isBoxKadrowania = true
+    ladderContainer.add(mesh)
+
+    debugEditorObjects.push({
+      id: b.id,
+      name: b.nazwa,
+      type: 'box',
+      object: mesh,
+      position: { ...b.poz },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      color: b.kolor,
+      dimensions: {
+        width: b.wym.szerokosc,
+        height: b.wym.wysokosc,
+        depth: b.wym.glebokosc
+      }
+    })
+  }
 }
 
 function addDebugBox(width: number, height: number, depth: number, color: string): DebugObject | null {
