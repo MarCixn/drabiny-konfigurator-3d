@@ -9093,21 +9093,37 @@ function wierszeTabelkiZrzutu(): Array<{ label: string; value: string }> {
  * skad wiedziec, ktora jest w kolejnosci.
  */
 function rysujPodpisZrzutu(
-  ctx: CanvasRenderingContext2D, k: number, lewa: number, podpis: string, naCiemnym: boolean
+  ctx: CanvasRenderingContext2D, k: number, lewa: number, szerKolumny: number,
+  podpis: string, naCiemnym: boolean
 ): void {
   const tekst = podpis.trim()
   if (!tekst) { return }
 
   const KROJ = KROJ_ZRZUTU
-  const czcionka = Math.round(26 * k)
   const margines = Math.round(28 * k)
-  const padX = Math.round(18 * k)
-  const padY = Math.round(12 * k)
+  const padX = Math.round(24 * k)
+  const padY = Math.round(16 * k)
 
   ctx.save()
-  ctx.font = `600 ${czcionka}px ${KROJ}`
   ctx.textBaseline = 'middle'
   ctx.textAlign = 'left'
+
+  /* Wyraznie wiekszy niz tabelka pod spodem - to tytul calego arkusza
+     i ma byc czytelny takze z miniatury w mailu. Ale plakietka musi zmiescic
+     sie w kolumnie: przy dwoch sztukach podpis jest dluzszy ("Drabina nr 1
+     · szt. 2") i w pelnym rozmiarze wszedlby na rysunek. Dlatego gdy nie
+     mieci sie w kolumnie, zmniejszamy go dokladnie o tyle, ile trzeba. */
+  let czcionka = Math.round(40 * k)
+  ctx.font = `600 ${czcionka}px ${KROJ}`
+
+  const dostepne = szerKolumny - margines * 2
+  if (dostepne > 0) {
+    const potrzebne = ctx.measureText(tekst).width + padX * 2
+    if (potrzebne > dostepne) {
+      czcionka = Math.max(Math.round(16 * k), Math.floor(czcionka * dostepne / potrzebne))
+      ctx.font = `600 ${czcionka}px ${KROJ}`
+    }
+  }
 
   const szer = ctx.measureText(tekst).width + padX * 2
   const wys = czcionka + padY * 2
@@ -9407,7 +9423,10 @@ function eksportujRysunek(
 
       if (opcje.zTabelka) { rysujTabelkeZrzutu(ctx, k, 0, plotno.height) }
       // Perspektywa ma ciemne tlo, rzuty techniczne biale
-      if (podpis) { rysujPodpisZrzutu(ctx, k, 0, podpis, model3d) }
+      if (podpis) {
+        // Bez tabelki kolumny nie ma - podpis dostaje wtedy caly obraz
+        rysujPodpisZrzutu(ctx, k, 0, szerKolumny || plotno.width, podpis, model3d)
+      }
       image = plotno.toDataURL('image/png')
       szerPliku = plotno.width
     } else {
