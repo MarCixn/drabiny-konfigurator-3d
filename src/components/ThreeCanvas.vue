@@ -7704,9 +7704,12 @@ function animate() {
     pivotGroup.rotation.y = currentRotation.y
 
     // Apply camera X offset
+    // Pion: kamera stoi na wysokosci srodka bryly kadrowania
+    // (kadrPrzesuniecieY), wiec model siedzi nizej w kadrze. Punkt
+    // obrotu zostaje w zerze - obracanie dziala jak dotad.
     perspectiveCamera.position.x = cameraOffset.x
-    perspectiveCamera.position.y = 0
-    perspectiveCamera.lookAt(cameraOffset.x, 0, 0)
+    perspectiveCamera.position.y = kadrPrzesuniecieY
+    perspectiveCamera.lookAt(cameraOffset.x, kadrPrzesuniecieY, 0)
   }
 
   // Skaluj measurement label wraz z odległością kamery / zoom
@@ -9963,6 +9966,13 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
 /** Czy uzytkownik sam ustawil przyblizenie - wtedy nie nadpisujemy go. */
 let recznyZoom = false
 
+/**
+ * O ile kamera stoi wyzej niz srodek obrotu (jednostki sceny).
+ * Dzieki temu model moze siedziec nizej w kadrze, bez ruszania modelu
+ * ani punktu, wokol ktorego sie obraca.
+ */
+let kadrPrzesuniecieY = 0
+
 /** Pilnuje rozmiaru samego widoku 3D, nie tylko okna przegladarki. */
 let obserwatorRozmiaru: ResizeObserver | null = null
 
@@ -10013,19 +10023,29 @@ function dopasujKamere3d() {
      |p.y| <= (d - p.z) * tgPion. Stad minimalne d dla kazdego rogu;
      bierzemy najwieksze. */
   const obrot = new THREE.Quaternion().setFromEuler(pivotGroup.rotation)
-  const srodek = bryla.getCenter(new THREE.Vector3()).add(przesun).applyQuaternion(obrot)
 
-  let najX = 0
-  let najY = 0
+  const rogiObrocone: THREE.Vector3[] = []
   for (const x of [bryla.min.x, bryla.max.x]) {
     for (const y of [bryla.min.y, bryla.max.y]) {
       for (const z of [bryla.min.z, bryla.max.z]) {
-        const p = new THREE.Vector3(x, y, z).add(przesun).applyQuaternion(obrot)
-        najX = Math.max(najX, Math.abs(p.x))
-        najY = Math.max(najY, Math.abs(p.y))
+        rogiObrocone.push(new THREE.Vector3(x, y, z).add(przesun).applyQuaternion(obrot))
       }
     }
   }
+
+  /* Kamera siada na SRODKU PIONOWYM bryly, zamiast patrzec zawsze na
+     wysokosc srodka obrotu. Bez tego przy 22 m urywalo gore: przy
+     obrocie o 20 stopni szczyt tak wysokiej drabiny wychyla sie mocno
+     w strone kamery i rzutuje sie wiekszy, niz zakladal rachunek liczony
+     od srodka glebokosci. Model siedzi teraz nizej w kadrze, a punkt
+     obrotu zostaje na miejscu. */
+  let goraY = -Infinity
+  let dolY = Infinity
+  for (const p of rogiObrocone) {
+    goraY = Math.max(goraY, p.y)
+    dolY = Math.min(dolY, p.y)
+  }
+  kadrPrzesuniecieY = (goraY + dolY) / 2
 
   /* Odleglosc liczymy wzgledem SRODKA bryly, a nie jej najblizszego rogu.
      Warunek "kazdy rog musi sie zmiescic" brał pod uwage takze rogi
@@ -10036,7 +10056,17 @@ function dopasujKamere3d() {
 
      Skutek uboczny: skrajny, najblizszy rog bryly moze o wlos wyjsc poza
      kadr. Sam model i oba znaczniki zostaja w srodku. */
-  const dystans = Math.max(najX / tgPoziom, najY / tgPion) + srodek.z
+  /* Teraz juz KAZDY rog z osobna, bo blad liczenia "od srodka glebokosci"
+     rosnie z wysokoscia modelu. Po wysrodkowaniu w pionie nie kosztuje to
+     juz luznego kadru - polowa rozpietosci jest o tyle mniejsza. */
+  let dystans = 0
+  for (const p of rogiObrocone) {
+    dystans = Math.max(
+      dystans,
+      p.z + Math.abs(p.x) / tgPoziom,
+      p.z + Math.abs(p.y - kadrPrzesuniecieY) / tgPion
+    )
+  }
   if (!(dystans > 0)) return
 
   /* Zapas. Liczenie wzgledem srodka bryly zaklada, ze wszystko lezy na
