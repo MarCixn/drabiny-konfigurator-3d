@@ -9922,7 +9922,8 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
      Wartosci moga byc stale, bo rog i tak wedruje razem z konfiguracja. */
   const ODSUNIECIE = {
     kadr_gorny: { x: -200, z: -200 },             // w lewo i w tyl
-    kadr_dolny: { x: 200, y: -200, z: 200 }       // w prawo, w dol, w przod
+    // 200 - 350 w lewo, -200 + 400 - 100 w gore, 200 - 350 w tyl
+    kadr_dolny: { x: -150, y: 100, z: -150 }
   }
 
   /* Wysokosc gornego boxa wynika z tego, co stoi na szczycie: poreczy
