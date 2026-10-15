@@ -3960,9 +3960,14 @@ onMounted(() => {
     postMessageService.startListening()
 
     postMessageService.on('GET_TECH_DRAWING', (data) => {
-      const zadany = (data && (data.payload as any)?.view) || 'side'
-      const wynik = threeCanvasRef.value?.eksportujRysunek(zadany)
-        ?? { view: zadany, image: null }
+      const ladunek = (data && (data.payload as any)) || {}
+      const zadany = ladunek.view || 'side'
+      /* zTabelka - patrz eksportujRysunek. Sklep tego pola nie przysyla
+         i ma dostawac rysunek bez tabelki, dokladnie jak dotad. Panel
+         sprzedawcy pobiera plik na dysk, wiec prosi o nia wprost. */
+      const wynik = threeCanvasRef.value?.eksportujRysunek(
+        zadany, { zTabelka: !!ladunek.zTabelka }
+      ) ?? { view: zadany, image: null }
       postMessageService.sendToParent('TECH_DRAWING', wynik as any)
     })
   }

@@ -8939,7 +8939,21 @@ function przywrocEtykietyPoZrzucie(): void {
   zapisaneSkaleEtykiet = []
 }
 
-function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
+/**
+ * Zrzut sceny jako PNG.
+ *
+ * `view` to jeden z rzutow technicznych albo `model3d` - wtedy oddajemy
+ * zwykla perspektywe, dokladnie taka, jaka uzytkownik ma przed soba.
+ *
+ * `zTabelka` zostawia na obrazku tabelke z podsumowaniem konfiguracji.
+ * Strona produktu w sklepie jej NIE chce, bo te same dane wypisuje sama
+ * tekstem w HTML obok rysunku - dlatego domyslnie znika. Panel sprzedawcy
+ * pobiera plik, ktory ma byc samodzielny, wiec prosi o nia wprost.
+ */
+function eksportujRysunek(
+  view: 'front' | 'side' | 'back' | 'top' | 'model3d' = 'side',
+  opcje: { zTabelka?: boolean } = {}
+): {
   view: string; image: string | null; width?: number; height?: number; szczebelOdZiemi?: number
 } {
   if (!renderer || !scene || isDisposed) {
@@ -8958,6 +8972,7 @@ function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
 
   const bylWTrybie = isTechDrawingMode
   const poprzedniWidok = techDrawingView
+  const model3d = view === 'model3d'
 
   // Ramka na stronie produktu ma ~440 px wysokosci. Przy drabinie na 6 metrow
   // opisy wymiarow wychodza w kilku pikselach i sa nieczytelne. Renderujemy
@@ -8982,16 +8997,26 @@ function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
       false
     )
 
-    enterTechDrawingMode(view)
+    if (model3d) {
+      /* Gdy uzytkownik akurat oglada rysunek techniczny, na czas zrzutu
+         wychodzimy do perspektywy - a blok finally wraca tam, gdzie byl.
+         Kadru ani przyblizenia nie ruszamy: zrzut ma pokazywac to, co
+         sprzedawca ma przed soba, lacznie z obrotem, ktory sam ustawil. */
+      if (bylWTrybie) { exitTechDrawingMode() }
+    } else {
+      enterTechDrawingMode(view)
+    }
 
     // Jedna klatka animacji. To ona przelicza rozmiary i pozycje etykiet dla
     // trybu rysunku - bez niej zostawaly ustawienia z widoku perspektywicznego,
     // wiec napisy byly male i nie rozsuwaly sie na boki. Renderuje tez scene.
     animate()
 
-    // Dopiero teraz powiekszamy - proporcje z klatki zostaja nietkniete
-    ustawEtykietyNaZrzut()
-    ukryjTabeleNaZrzut()
+    // Dopiero teraz powiekszamy - proporcje z klatki zostaja nietkniete.
+    // W perspektywie nie ruszamy etykiet: tam maja wygladac tak jak na
+    // ekranie, a powiekszenie liczone pod rzut rozsadzaloby je na boki.
+    if (!model3d) { ustawEtykietyNaZrzut() }
+    if (!opcje.zTabelka) { ukryjTabeleNaZrzut() }
 
     // Render i odczyt w jednym ciagu - bez tego bufor bywa juz wyczyszczony
     renderer.render(scene, camera)
@@ -9020,8 +9045,9 @@ function eksportujRysunek(view: 'front' | 'side' | 'back' | 'top' = 'side'): {
 
     // Wracamy dokladnie tam, gdzie byl uzytkownik
     if (!bylWTrybie) {
-      exitTechDrawingMode()
-    } else if (poprzedniWidok !== view) {
+      // Przy model3d w tryb rysunku w ogole nie weszlismy - nie ma z czego wychodzic
+      if (!model3d) { exitTechDrawingMode() }
+    } else if (model3d || poprzedniWidok !== view) {
       enterTechDrawingMode(poprzedniWidok)
     }
     handleResize()

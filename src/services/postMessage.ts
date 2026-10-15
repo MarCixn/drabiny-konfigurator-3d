@@ -115,7 +115,14 @@ export type MessageType =
 
 /** Prośba o rzut techniczny. */
 export interface TechDrawingRequest {
-  view?: 'front' | 'side' | 'back' | 'top'
+  /** `model3d` oddaje zwykłą perspektywę zamiast rzutu ortogonalnego. */
+  view?: 'front' | 'side' | 'back' | 'top' | 'model3d'
+  /**
+   * Zostawić na obrazku tabelkę z podsumowaniem konfiguracji.
+   * Sklep tego nie chce — wypisuje te dane tekstem obok rysunku. Panel
+   * sprzedawcy pobiera plik na dysk, więc ma być samodzielny.
+   */
+  zTabelka?: boolean
 }
 
 /** Odpowiedź z rzutem. image = null, gdy nie udało się wyrenderować. */
