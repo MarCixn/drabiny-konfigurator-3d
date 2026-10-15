@@ -10033,19 +10033,31 @@ function dopasujKamere3d() {
     }
   }
 
-  /* Kamera siada na SRODKU PIONOWYM bryly, zamiast patrzec zawsze na
-     wysokosc srodka obrotu. Bez tego przy 22 m urywalo gore: przy
-     obrocie o 20 stopni szczyt tak wysokiej drabiny wychyla sie mocno
-     w strone kamery i rzutuje sie wiekszy, niz zakladal rachunek liczony
-     od srodka glebokosci. Model siedzi teraz nizej w kadrze, a punkt
-     obrotu zostaje na miejscu. */
-  let goraY = -Infinity
-  let dolY = Infinity
+  /* NAJWIEKSZY MOZLIWY ZOOM.
+     Kamera moze siedziec na dowolnej wysokosci; od tego, gdzie siadzie,
+     zalezy jak blisko moze podjechac. Jest jedno polozenie optymalne
+     i da sie je policzyc, zamiast dobierac na oko.
+
+     Warunek dla rogu p przy kamerze na wysokosci h i odleglosci d:
+         |p.y - h| <= (d - p.z) * tg
+     Rozbite na gore i dol daje dwa ograniczenia:
+         d >= (U - h) / tg,  gdzie U = max(p.y + p.z*tg)
+         d >= (h - L) / tg,  gdzie L = min(p.y - p.z*tg)
+     Pierwsze maleje z h, drugie rosnie - najmniejsze d jest tam, gdzie
+     sie zrownuja, czyli przy h = (U + L) / 2 i d = (U - L) / (2*tg).
+
+     Samo "srodek pionowy bryly" bylo tylko przyblizeniem: nie
+     uwzglednialo, ze rogi blizsze kamery rzutuja sie wieksze. Przez to
+     przy niskich drabinach kadr byl luzniejszy niz mogl, a przy wysokich
+     - za ciasny. Teraz wysokosc dobiera sie sama: niskie modele ida
+     lekko w gore, wysokie w dol. */
+  let U = -Infinity
+  let L = Infinity
   for (const p of rogiObrocone) {
-    goraY = Math.max(goraY, p.y)
-    dolY = Math.min(dolY, p.y)
+    U = Math.max(U, p.y + p.z * tgPion)
+    L = Math.min(L, p.y - p.z * tgPion)
   }
-  kadrPrzesuniecieY = (goraY + dolY) / 2
+  kadrPrzesuniecieY = (U + L) / 2
 
   /* Odleglosc liczymy wzgledem SRODKA bryly, a nie jej najblizszego rogu.
      Warunek "kazdy rog musi sie zmiescic" brał pod uwage takze rogi
@@ -10056,16 +10068,11 @@ function dopasujKamere3d() {
 
      Skutek uboczny: skrajny, najblizszy rog bryly moze o wlos wyjsc poza
      kadr. Sam model i oba znaczniki zostaja w srodku. */
-  /* Teraz juz KAZDY rog z osobna, bo blad liczenia "od srodka glebokosci"
-     rosnie z wysokoscia modelu. Po wysrodkowaniu w pionie nie kosztuje to
-     juz luznego kadru - polowa rozpietosci jest o tyle mniejsza. */
-  let dystans = 0
+  /* Pion wychodzi wprost ze wzoru wyzej, poziom liczymy po rogach -
+     w poziomie kamera nie ma swobody, bo stoi na osi obrotu. */
+  let dystans = (U - L) / (2 * tgPion)
   for (const p of rogiObrocone) {
-    dystans = Math.max(
-      dystans,
-      p.z + Math.abs(p.x) / tgPoziom,
-      p.z + Math.abs(p.y - kadrPrzesuniecieY) / tgPion
-    )
+    dystans = Math.max(dystans, p.z + Math.abs(p.x) / tgPoziom)
   }
   if (!(dystans > 0)) return
 
