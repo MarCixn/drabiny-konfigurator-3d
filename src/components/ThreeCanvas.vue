@@ -9996,8 +9996,6 @@ function dopasujKamere3d() {
   const rogi = rogiKadrowania()
   if (!rogi) return
 
-  const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
-
   /* Przesuniecie ladderContainer liczymy TAK SAMO jak animate(), a nie
      czytamy z obiektu. animate() nadpisuje te pozycje co klatke
      wartoscia z cameraOffset, a my jestesmy wolani tuz po
@@ -10024,14 +10022,37 @@ function dopasujKamere3d() {
      bierzemy najwieksze. */
   const obrot = new THREE.Quaternion().setFromEuler(pivotGroup.rotation)
 
-  const rogiObrocone: THREE.Vector3[] = []
-  for (const x of [bryla.min.x, bryla.max.x]) {
-    for (const y of [bryla.min.y, bryla.max.y]) {
-      for (const z of [bryla.min.z, bryla.max.z]) {
-        rogiObrocone.push(new THREE.Vector3(x, y, z).add(przesun).applyQuaternion(obrot))
+  /* Punkty, ktore musza sie zmiescic.
+     NIE sa to rogi prostopadloscianu rozpietego na dwoch znacznikach -
+     taki prostopadloscian ma rogi tam, gdzie nic nie stoi (np. wysoko
+     nad przednia krawedzia podlogi) i to one odpychaly kamere. Przy 1 m
+     zostawialo to 135 px pustki u gory, a znacznik dolny ledwo miescil
+     sie na dole.
+
+     Bierzemy wiec rzeczywiste rogi sciany, podlogi i tego, co stoi na
+     szczycie, plus oba znaczniki. Kazdy z tych punktow faktycznie
+     istnieje, wiec kadr nie odsuwa sie dla pustego miejsca. */
+  const punkty: THREE.Vector3[] = [rogi.gorny.clone(), rogi.dolny.clone()]
+  const { sciana, podloga } = znajdzSciangeIPodloge()
+  const pudla = [
+    sciana ? obrysBryly(sciana) : null,
+    podloga ? obrysBryly(podloga) : null,
+    obrysSzczytu()
+  ]
+  for (const pudlo of pudla) {
+    if (!pudlo) continue
+    for (const x of [pudlo.min.x, pudlo.max.x]) {
+      for (const y of [pudlo.min.y, pudlo.max.y]) {
+        for (const z of [pudlo.min.z, pudlo.max.z]) {
+          punkty.push(new THREE.Vector3(x, y, z))
+        }
       }
     }
   }
+
+  const rogiObrocone = punkty.map(
+    (p) => p.clone().add(przesun).applyQuaternion(obrot)
+  )
 
   /* NAJWIEKSZY MOZLIWY ZOOM.
      Kamera moze siedziec na dowolnej wysokosci; od tego, gdzie siadzie,
@@ -10070,9 +10091,39 @@ function dopasujKamere3d() {
      kadr. Sam model i oba znaczniki zostaja w srodku. */
   /* Pion wychodzi wprost ze wzoru wyzej, poziom liczymy po rogach -
      w poziomie kamera nie ma swobody, bo stoi na osi obrotu. */
-  let dystans = (U - L) / (2 * tgPion)
+  const dystansPion = (U - L) / (2 * tgPion)
+  let dystans = dystansPion
   for (const p of rogiObrocone) {
     dystans = Math.max(dystans, p.z + Math.abs(p.x) / tgPoziom)
+  }
+
+  /* Gdy wiaze SZEROKOSC - a tak jest przy niskich drabinach, bo podloga
+     jest szeroka, a model niski - kamera odjezdza dalej, niz wymaga tego
+     pion. Zostaje wtedy zapas w pionie, ale wysokosc h policzona wyzej
+     byla optymalna dla ciasnego pionu, wiec caly ten zapas ladowal u gory,
+     a dol bywal przyciety.
+
+     Dobieramy wiec h jeszcze raz, juz dla tej wiekszej odleglosci: tak,
+     zeby najbardziej wystajacy rog u gory i u dolu odstawaly od krawedzi
+     po rowno. Funkcja jest wypukla, wiec wystarczy wyszukiwanie trojkowe. */
+  if (dystans > dystansPion * 1.0001) {
+    const odstep = (h: number) => {
+      let najgorszy = 0
+      for (const p of rogiObrocone) {
+        const zasieg = Math.max(dystans - p.z, 0.001)
+        najgorszy = Math.max(najgorszy, Math.abs(p.y - h) / zasieg)
+      }
+      return najgorszy
+    }
+    let lewa = L
+    let prawa = U
+    for (let i = 0; i < 40; i++) {
+      const a = lewa + (prawa - lewa) / 3
+      const b = prawa - (prawa - lewa) / 3
+      if (odstep(a) < odstep(b)) prawa = b
+      else lewa = a
+    }
+    kadrPrzesuniecieY = (lewa + prawa) / 2
   }
   if (!(dystans > 0)) return
 
