@@ -3969,7 +3969,8 @@ onMounted(() => {
         zTabelka: !!ladunek.zTabelka,
         // Bez tych pol zrzut ma proporcje okna - tak dziala sklep
         szerokosc: Number(ladunek.szerokosc) || undefined,
-        wysokosc: Number(ladunek.wysokosc) || undefined
+        wysokosc: Number(ladunek.wysokosc) || undefined,
+        podpis: typeof ladunek.podpis === 'string' ? ladunek.podpis : undefined
       }) ?? { view: zadany, image: null }
       postMessageService.sendToParent('TECH_DRAWING', wynik as any)
     })

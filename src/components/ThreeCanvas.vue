@@ -3137,6 +3137,8 @@ function drawLadderLengthDimension(zPos: number, frontSide: boolean = false) {
 
   // Oblicz dystans w mm
   const distanceMm = Math.round(Math.abs(greenTop - yellowTop) / SCALE)
+  // Ta sama liczba trafia do tabelki na zrzucie - patrz wymiaryZeSceny
+  wymiaryZeSceny.dlugoscDrabiny = distanceMm
 
   // Rysuj linię - pozycja zależy od strony
   const xOffset = -150 * SCALE // Linia po lewej stronie
@@ -3245,6 +3247,8 @@ function drawCageHeightDimension(zPos: number) {
 
   // Oblicz dystans w mm
   const distanceMm = Math.round(Math.abs(cyanTop - groundTop) / SCALE)
+  // Ta sama liczba trafia do tabelki na zrzucie - patrz wymiaryZeSceny
+  wymiaryZeSceny.ostatniaObreczOdZiemi = distanceMm
 
   // Rysuj linię (w tym samym miejscu co wymiar kosza)
   const xOffset = 150 * SCALE
@@ -3343,6 +3347,8 @@ function drawHandrailHeightDimension(zPos: number, frontSide: boolean = false) {
 
   // Oblicz dystans w mm
   const distanceMm = Math.round(Math.abs(orangeBottom - greenBottom) / SCALE)
+  // Ta sama liczba trafia do tabelki na zrzucie - patrz wymiaryZeSceny
+  wymiaryZeSceny.wysokoscPoreczy = distanceMm
 
   // Rysuj linię - pozycja zależy od strony (tak samo jak dł. drabiny)
   const xOffset = -150 * SCALE // Linia po lewej stronie
@@ -3676,6 +3682,8 @@ function drawSuspensionHeightDimension(zPos: number, frontSide: boolean = false)
 
   // Oblicz dystans w mm
   const distanceMm = Math.round(Math.abs(yellowTop - blueTop) / SCALE)
+  // Ta sama liczba trafia do tabelki na zrzucie - patrz wymiaryZeSceny
+  wymiaryZeSceny.zawieszenie = distanceMm
 
   // Rysuj linię - pozycja zależy od strony (tak samo jak dł. drabiny)
   const xOffset = -150 * SCALE // Linia po lewej stronie
@@ -3874,6 +3882,8 @@ function drawDescentLadderLengthDimension(zPos: number) {
 
   // Oblicz dystans w mm
   const distanceMm = Math.round(Math.abs(greenTop - purpleBottom) / SCALE)
+  // Ta sama liczba trafia do tabelki na zrzucie - patrz wymiaryZeSceny
+  wymiaryZeSceny.dlugoscDrabinyZejscia = distanceMm
 
   // Rysuj linię - z tyłu (jak klasyczna dł. drabiny), przesunięta 600mm w tył
   const xOffset = -150 * SCALE // Linia po lewej stronie
@@ -5840,6 +5850,12 @@ function renderSciskaneHandles() {
 // MAIN CREATE LADDER FUNCTION
 // ============================================
 function createLadder() {
+  /* Wymiary z poprzedniej drabiny musza zniknac PRZED przebudowa.
+     Funkcje rysujace linie wymiarowe wychodza wczesniej, gdy dany wymiar
+     nie dotyczy tej konfiguracji (np. kosz, ktorego juz nie ma) - bez
+     czyszczenia stara wartosc zostawalaby w tabelce na zrzucie. */
+  wymiaryZeSceny = {}
+
   /* MIGAWKA MA PIERWSZENSTWO.
      Wpinamy sie na samym poczatku, a nie w miejscu wywolania, bo scena
      przebudowuje sie z wielu miejsc (watchery propsow, zaladowanie modelu,
@@ -8913,6 +8929,15 @@ let zrzutRozmiar: { szerokosc: number; wysokosc: number } | null = null
 let wierszeTabelki: Array<{ label: string; value: string }> = []
 
 /**
+ * Wymiary (mm) policzone przy rysowaniu linii wymiarowych.
+ *
+ * Tabelka na zrzucie bierze je stad, a nie liczy po swojemu - dzieki temu
+ * liczba w tabelce i liczba przy linii na rysunku to zawsze ta sama liczba.
+ * Czyszczone przy kazdej przebudowie sceny (createLadder).
+ */
+let wymiaryZeSceny: Record<string, number> = {}
+
+/**
  * Tabelka z podsumowaniem konfiguracji, rysowana w scenie jako sprite.
  *
  * Na zrzucie jej NIE pokazujemy - te same dane strona produktu wypisuje
@@ -8991,6 +9016,117 @@ function zaokraglonyProstokat(
 }
 
 /**
+ * Pelna lista parametrow na zrzut do pliku.
+ *
+ * Tabelka w scenie jest krotka celowo - wisi nad modelem, a dluga zaslanialaby
+ * drabine. Plik, ktory sprzedawca wysyla klientowi, nie ma tego ograniczenia
+ * i ma odpowiadac na wiecej pytan, wiec dokladamy to, co scena i tak juz wie.
+ *
+ * Wymiary bierzemy z wymiaryZeSceny, czyli z tych samych liczb, ktore stoja
+ * przy liniach wymiarowych na rysunku. Policzenie ich tutaj po raz drugi
+ * skonczyloby sie tym, czym zawsze: dwiema wartosciami rozniacymi sie
+ * o kilka milimetrow.
+ */
+function wierszeTabelkiZrzutu(): Array<{ label: string; value: string }> {
+  const w = wierszeTabelki.slice()
+  if (!w.length) { return w }
+
+  const mm = (x: number) => `${x} mm`
+  const attyka = handrailType === 'attic'
+
+  const schemat = attyka
+    ? 'Przełaz przez attykę'
+    : (props.scheme === 'platform' || props.scheme === 'with-platform')
+      ? 'Z podestem'
+      : 'Klasyczna'
+  w.push({ label: 'Schemat', value: schemat })
+
+  if (wymiaryZeSceny.dlugoscDrabiny) {
+    w.push({ label: 'Długość drabiny', value: mm(wymiaryZeSceny.dlugoscDrabiny) })
+  }
+  if (attyka && wymiaryZeSceny.dlugoscDrabinyZejscia) {
+    w.push({ label: 'Długość drabiny zejścia', value: mm(wymiaryZeSceny.dlugoscDrabinyZejscia) })
+  }
+
+  const szczeble = numX7Ladders1 * 7
+    + (typeof finalLadderRungs1 === 'number' ? finalLadderRungs1 : 7)
+  if (szczeble > 0) {
+    w.push({ label: 'Liczba szczebli', value: `${szczeble} szt.` })
+  }
+
+  const wsporniki = wspornikTypes1.filter((t) => t !== 'none').length
+  if (wsporniki > 0) {
+    w.push({ label: 'Liczba wsporników', value: `${wsporniki} szt.` })
+  }
+
+  w.push({
+    label: 'Kosz ochronny',
+    value: safetyCageCount1 > 0 ? `${safetyCageCount1} obręczy` : 'Nie'
+  })
+  if (safetyCageCount1 > 0 && wymiaryZeSceny.ostatniaObreczOdZiemi) {
+    w.push({
+      label: 'Ostatnia obręcz → ziemia',
+      value: mm(wymiaryZeSceny.ostatniaObreczOdZiemi)
+    })
+  }
+
+  w.push({ label: 'Poręcze asekuracyjne', value: hasHandrailsLocal ? 'Tak' : 'Nie' })
+  if (hasHandrailsLocal && wymiaryZeSceny.wysokoscPoreczy) {
+    w.push({ label: 'Wys. poręczy', value: mm(wymiaryZeSceny.wysokoscPoreczy) })
+  }
+
+  if (props.suspended && wymiaryZeSceny.zawieszenie) {
+    w.push({ label: 'Zawieszenie nad ziemią', value: mm(wymiaryZeSceny.zawieszenie) })
+  }
+
+  return w
+}
+
+/**
+ * Podpis w lewym gornym rogu zrzutu, np. "Drabina nr 1  ·  szt. 2".
+ *
+ * Tresc przychodzi z zewnatrz, bo numer drabiny i liczba sztuk naleza do
+ * zamowienia, a nie do sceny - konfigurator sklada jedna drabine i nie ma
+ * skad wiedziec, ktora jest w kolejnosci.
+ */
+function rysujPodpisZrzutu(
+  ctx: CanvasRenderingContext2D, szerObrazu: number, podpis: string, naCiemnym: boolean
+): void {
+  const tekst = podpis.trim()
+  if (!tekst) { return }
+
+  const k = Math.max(szerObrazu / 1240, 0.5)
+  const KROJ = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
+  const czcionka = Math.round(26 * k)
+  const margines = Math.round(28 * k)
+  const padX = Math.round(18 * k)
+  const padY = Math.round(12 * k)
+
+  ctx.save()
+  ctx.font = `600 ${czcionka}px ${KROJ}`
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'left'
+
+  const szer = ctx.measureText(tekst).width + padX * 2
+  const wys = czcionka + padY * 2
+
+  /* Plakietka, a nie sam napis. Zrzut 3D ma ciemne tlo, rysunek techniczny
+     biale - sam tekst musialby zmieniac kolor i tak czy tak gdzies by sie
+     zlewal. Plakietka wyglada tak samo na obu. */
+  ctx.fillStyle = naCiemnym ? 'rgba(15, 23, 42, 0.78)' : '#ffffff'
+  zaokraglonyProstokat(ctx, margines, margines, szer, wys, Math.round(10 * k))
+  ctx.fill()
+  ctx.strokeStyle = naCiemnym ? 'rgba(255, 255, 255, 0.28)' : '#cbd5e1'
+  ctx.lineWidth = Math.max(1, Math.round(k))
+  zaokraglonyProstokat(ctx, margines, margines, szer, wys, Math.round(10 * k))
+  ctx.stroke()
+
+  ctx.fillStyle = naCiemnym ? '#f8fafc' : '#0f172a'
+  ctx.fillText(tekst, margines + padX, margines + wys / 2)
+  ctx.restore()
+}
+
+/**
  * Rysuje tabelke parametrow w lewym dolnym rogu gotowego zrzutu.
  *
  * Zastepuje sprite'a ze sceny, ktory na zrzut sie nie nadawal: byl
@@ -9002,7 +9138,7 @@ function zaokraglonyProstokat(
 function rysujTabelkeZrzutu(
   ctx: CanvasRenderingContext2D, szerObrazu: number, wysObrazu: number
 ): void {
-  const wiersze = wierszeTabelki
+  const wiersze = wierszeTabelkiZrzutu()
   if (!wiersze.length) { return }
 
   // Wszystko skalujemy szerokoscia obrazu, zeby tabelka czytala sie tak
@@ -9113,7 +9249,13 @@ function przywrocEtykietyPoZrzucie(): void {
  */
 function eksportujRysunek(
   view: 'front' | 'side' | 'back' | 'top' | 'model3d' = 'side',
-  opcje: { zTabelka?: boolean; szerokosc?: number; wysokosc?: number } = {}
+  opcje: {
+    zTabelka?: boolean
+    szerokosc?: number
+    wysokosc?: number
+    /** Napis w lewym gornym rogu, np. "Drabina nr 1  ·  szt. 2". */
+    podpis?: string
+  } = {}
 ): {
   view: string; image: string | null; width?: number; height?: number; szczebelOdZiemi?: number
 } {
@@ -9198,13 +9340,16 @@ function eksportujRysunek(
     renderer.render(scene, camera)
 
     let image: string
-    if (opcje.zTabelka) {
+    const podpis = (opcje.podpis || '').trim()
+    if (opcje.zTabelka || podpis) {
       const plotno = document.createElement('canvas')
       plotno.width = renderer.domElement.width
       plotno.height = renderer.domElement.height
       const ctx = plotno.getContext('2d')!
       ctx.drawImage(renderer.domElement, 0, 0)
-      rysujTabelkeZrzutu(ctx, plotno.width, plotno.height)
+      if (opcje.zTabelka) { rysujTabelkeZrzutu(ctx, plotno.width, plotno.height) }
+      // Perspektywa ma ciemne tlo, rzuty techniczne biale
+      if (podpis) { rysujPodpisZrzutu(ctx, plotno.width, podpis, model3d) }
       image = plotno.toDataURL('image/png')
     } else {
       image = renderer.domElement.toDataURL('image/png')

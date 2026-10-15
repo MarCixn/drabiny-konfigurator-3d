@@ -129,6 +129,12 @@ export interface TechDrawingRequest {
    */
   szerokosc?: number
   wysokosc?: number
+  /**
+   * Napis w lewym górnym rogu, np. „Drabina nr 1 · szt. 2".
+   * Numer drabiny i liczba sztuk należą do zamówienia, nie do sceny —
+   * konfigurator składa jedną drabinę i sam ich nie zna.
+   */
+  podpis?: string
 }
 
 /** Odpowiedź z rzutem. image = null, gdy nie udało się wyrenderować. */
