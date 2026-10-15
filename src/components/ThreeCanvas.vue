@@ -9000,6 +9000,9 @@ function ustawEtykietyNaZrzut(): void {
   }
 }
 
+/** Jeden kroj dla wszystkiego, co dorysowujemy na zrzucie. */
+const KROJ_ZRZUTU = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
+
 /** Prostokat z zaokraglonymi rogami. ctx.roundRect bywa niedostepny. */
 function zaokraglonyProstokat(
   ctx: CanvasRenderingContext2D,
@@ -9090,13 +9093,12 @@ function wierszeTabelkiZrzutu(): Array<{ label: string; value: string }> {
  * skad wiedziec, ktora jest w kolejnosci.
  */
 function rysujPodpisZrzutu(
-  ctx: CanvasRenderingContext2D, szerObrazu: number, podpis: string, naCiemnym: boolean
+  ctx: CanvasRenderingContext2D, k: number, lewa: number, podpis: string, naCiemnym: boolean
 ): void {
   const tekst = podpis.trim()
   if (!tekst) { return }
 
-  const k = Math.max(szerObrazu / 1240, 0.5)
-  const KROJ = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
+  const KROJ = KROJ_ZRZUTU
   const czcionka = Math.round(26 * k)
   const margines = Math.round(28 * k)
   const padX = Math.round(18 * k)
@@ -9113,16 +9115,17 @@ function rysujPodpisZrzutu(
   /* Plakietka, a nie sam napis. Zrzut 3D ma ciemne tlo, rysunek techniczny
      biale - sam tekst musialby zmieniac kolor i tak czy tak gdzies by sie
      zlewal. Plakietka wyglada tak samo na obu. */
+  const x = lewa + margines
   ctx.fillStyle = naCiemnym ? 'rgba(15, 23, 42, 0.78)' : '#ffffff'
-  zaokraglonyProstokat(ctx, margines, margines, szer, wys, Math.round(10 * k))
+  zaokraglonyProstokat(ctx, x, margines, szer, wys, Math.round(10 * k))
   ctx.fill()
   ctx.strokeStyle = naCiemnym ? 'rgba(255, 255, 255, 0.28)' : '#cbd5e1'
   ctx.lineWidth = Math.max(1, Math.round(k))
-  zaokraglonyProstokat(ctx, margines, margines, szer, wys, Math.round(10 * k))
+  zaokraglonyProstokat(ctx, x, margines, szer, wys, Math.round(10 * k))
   ctx.stroke()
 
   ctx.fillStyle = naCiemnym ? '#f8fafc' : '#0f172a'
-  ctx.fillText(tekst, margines + padX, margines + wys / 2)
+  ctx.fillText(tekst, x + padX, margines + wys / 2)
   ctx.restore()
 }
 
@@ -9135,16 +9138,20 @@ function rysujPodpisZrzutu(
  * Tutaj rysujemy po renderze, wprost na pikselach - zawsze ostro, zawsze
  * w tym samym miejscu i bez zaslaniania modelu.
  */
-function rysujTabelkeZrzutu(
-  ctx: CanvasRenderingContext2D, szerObrazu: number, wysObrazu: number
-): void {
+function miaryTabelkiZrzutu(k: number): {
+  wiersze: Array<{ label: string; value: string }>
+  szerPanelu: number
+  wysPanelu: number
+  czcionka: number
+  wysWiersza: number
+  margines: number
+  padX: number
+  padY: number
+  wysNaglowka: number
+} | null {
   const wiersze = wierszeTabelkiZrzutu()
-  if (!wiersze.length) { return }
+  if (!wiersze.length) { return null }
 
-  // Wszystko skalujemy szerokoscia obrazu, zeby tabelka czytala sie tak
-  // samo niezaleznie od tego, jak duzy plik zamowiono.
-  const k = Math.max(szerObrazu / 1240, 0.5)
-  const KROJ = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
   const czcionka = Math.round(20 * k)
   const wysWiersza = Math.round(38 * k)
   const margines = Math.round(28 * k)
@@ -9153,22 +9160,55 @@ function rysujTabelkeZrzutu(
   const odstepKolumn = Math.round(32 * k)
   const wysNaglowka = Math.round(30 * k)
 
+  /* Mierzymy na WLASNYM plotnie, zeby szerokosc tabelki byla znana, zanim
+     powstanie obrazek koncowy - od niej zalezy, jak szeroki ma on byc. */
+  const miarka = document.createElement('canvas').getContext('2d')!
+
+  miarka.font = `${czcionka}px ${KROJ_ZRZUTU}`
+  let szerEtykiet = 0
+  for (const w of wiersze) { szerEtykiet = Math.max(szerEtykiet, miarka.measureText(w.label).width) }
+
+  miarka.font = `600 ${czcionka}px ${KROJ_ZRZUTU}`
+  let szerWartosci = 0
+  for (const w of wiersze) { szerWartosci = Math.max(szerWartosci, miarka.measureText(w.value).width) }
+
+  return {
+    wiersze,
+    szerPanelu: Math.ceil(szerEtykiet + odstepKolumn + szerWartosci + padX * 2),
+    wysPanelu: padY * 2 + wysNaglowka + wiersze.length * wysWiersza,
+    czcionka, wysWiersza, margines, padX, padY, wysNaglowka
+  }
+}
+
+/**
+ * Szerokosc kolumny, ktora trzeba dolozyc obok rysunku, zeby tabelka
+ * miala gdzie stanac.
+ *
+ * Wynika z TRESCI - najdluzszy wiersz to np. "Wspornik | Regulowany
+ * 160-260mm", a przy attyce dochodza dluzsze. Stala szerokosc albo
+ * ucinalaby tekst, albo zostawiala pustke; dlatego mierzymy. Dolna granica
+ * pilnuje, zeby przy krotkiej tabelce kolumna nie byla niechlujnie waska.
+ */
+function szerokoscKolumnyZrzutu(k: number, szerRysunku: number): number {
+  const m = miaryTabelkiZrzutu(k)
+  if (!m) { return 0 }
+  return Math.max(m.szerPanelu + m.margines * 2, Math.round(szerRysunku * 0.3))
+}
+
+function rysujTabelkeZrzutu(
+  ctx: CanvasRenderingContext2D, k: number, lewa: number, wysObrazu: number
+): void {
+  const m = miaryTabelkiZrzutu(k)
+  if (!m) { return }
+
+  const { wiersze, szerPanelu, wysPanelu, czcionka, wysWiersza,
+          margines, padX, padY, wysNaglowka } = m
+  const KROJ = KROJ_ZRZUTU
+
   ctx.save()
   ctx.textBaseline = 'middle'
 
-  ctx.font = `${czcionka}px ${KROJ}`
-  let szerEtykiet = 0
-  for (const w of wiersze) { szerEtykiet = Math.max(szerEtykiet, ctx.measureText(w.label).width) }
-
-  ctx.font = `600 ${czcionka}px ${KROJ}`
-  let szerWartosci = 0
-  for (const w of wiersze) { szerWartosci = Math.max(szerWartosci, ctx.measureText(w.value).width) }
-
-  const szerTresci = szerEtykiet + odstepKolumn + szerWartosci
-  const szerPanelu = szerTresci + padX * 2
-  const wysPanelu = padY * 2 + wysNaglowka + wiersze.length * wysWiersza
-
-  const x = margines
+  const x = lewa + margines
   const y = wysObrazu - margines - wysPanelu
 
   // Tlo. Cien jest delikatny - ma odkleic panel od rysunku, nie rzucac sie w oczy.
@@ -9318,7 +9358,11 @@ function eksportujRysunek(
          ustawil. Kadr przeliczamy tylko przy stalym formacie, bo zmienily
          sie proporcje - chyba ze uzytkownik sam dobral przyblizenie. */
       if (bylWTrybie) { exitTechDrawingMode() }
-      if (staly && !recznyZoom) { dopasujKamere3d() }
+      /* Przy stalym formacie kadr przeliczamy ZAWSZE, takze gdy uzytkownik
+         sam dobral przyblizenie. Plik jest wezszy niz okno, wiec pole
+         widzenia w poziomie jest inne - przeniesiony zoom z szerokiego
+         okna wypychal drabine poza kadr. Obrot zostaje jego. */
+      if (staly) { dopasujKamere3d() }
     } else {
       enterTechDrawingMode(view)
     }
@@ -9340,17 +9384,32 @@ function eksportujRysunek(
     renderer.render(scene, camera)
 
     let image: string
+    let szerPliku = renderer.domElement.width
     const podpis = (opcje.podpis || '').trim()
     if (opcje.zTabelka || podpis) {
+      /* Tabelka dostaje WLASNA KOLUMNE obok rysunku, a nie miejsce na nim.
+         Doklejana na wierzchu zachodzila na model: na rzucie przednim
+         i na perspektywie drabina stoi posrodku i wolnego rogu po prostu
+         nie ma. Teraz nachodzenie jest niemozliwe z konstrukcji - render
+         zajmuje swoja czesc obrazu, kolumna swoja. */
+      const k = Math.max(szerZrzutu / 1240, 0.5)
+      const szerKolumny = opcje.zTabelka ? szerokoscKolumnyZrzutu(k, szerZrzutu) : 0
+
       const plotno = document.createElement('canvas')
-      plotno.width = renderer.domElement.width
+      plotno.width = renderer.domElement.width + szerKolumny
       plotno.height = renderer.domElement.height
       const ctx = plotno.getContext('2d')!
-      ctx.drawImage(renderer.domElement, 0, 0)
-      if (opcje.zTabelka) { rysujTabelkeZrzutu(ctx, plotno.width, plotno.height) }
+
+      // Tlo kolumny takie jak tlo sceny, zeby nie bylo widac szwu
+      ctx.fillStyle = model3d ? '#1a1a1a' : '#ffffff'
+      ctx.fillRect(0, 0, plotno.width, plotno.height)
+      ctx.drawImage(renderer.domElement, szerKolumny, 0)
+
+      if (opcje.zTabelka) { rysujTabelkeZrzutu(ctx, k, 0, plotno.height) }
       // Perspektywa ma ciemne tlo, rzuty techniczne biale
-      if (podpis) { rysujPodpisZrzutu(ctx, plotno.width, podpis, model3d) }
+      if (podpis) { rysujPodpisZrzutu(ctx, k, 0, podpis, model3d) }
       image = plotno.toDataURL('image/png')
+      szerPliku = plotno.width
     } else {
       image = renderer.domElement.toDataURL('image/png')
     }
@@ -9358,7 +9417,8 @@ function eksportujRysunek(
     return {
       view,
       image,
-      width: renderer.domElement.width,
+      // Szerokosc PLIKU, a nie samego renderu - przy tabelce dochodzi kolumna
+      width: szerPliku,
       height: renderer.domElement.height,
       // Wysokosc ostatniego szczebla nad ziemia (mm). Oddajemy ja razem
       // z rysunkiem, zeby strona produktu nie liczyla jej po swojemu -
