@@ -3965,9 +3965,12 @@ onMounted(() => {
       /* zTabelka - patrz eksportujRysunek. Sklep tego pola nie przysyla
          i ma dostawac rysunek bez tabelki, dokladnie jak dotad. Panel
          sprzedawcy pobiera plik na dysk, wiec prosi o nia wprost. */
-      const wynik = threeCanvasRef.value?.eksportujRysunek(
-        zadany, { zTabelka: !!ladunek.zTabelka }
-      ) ?? { view: zadany, image: null }
+      const wynik = threeCanvasRef.value?.eksportujRysunek(zadany, {
+        zTabelka: !!ladunek.zTabelka,
+        // Bez tych pol zrzut ma proporcje okna - tak dziala sklep
+        szerokosc: Number(ladunek.szerokosc) || undefined,
+        wysokosc: Number(ladunek.wysokosc) || undefined
+      }) ?? { view: zadany, image: null }
       postMessageService.sendToParent('TECH_DRAWING', wynik as any)
     })
   }

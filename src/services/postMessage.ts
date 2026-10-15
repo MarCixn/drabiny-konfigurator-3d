@@ -123,6 +123,12 @@ export interface TechDrawingRequest {
    * sprzedawcy pobiera plik na dysk, więc ma być samodzielny.
    */
   zTabelka?: boolean
+  /**
+   * Stały format pliku w pikselach. Bez nich zrzut ma proporcje okna
+   * konfiguratora — a okno jest szerokie, podczas gdy drabina jest pionowa.
+   */
+  szerokosc?: number
+  wysokosc?: number
 }
 
 /** Odpowiedź z rzutem. image = null, gdy nie udało się wyrenderować. */

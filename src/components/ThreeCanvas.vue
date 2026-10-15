@@ -3455,6 +3455,9 @@ function drawInfoLabel(lastRungToGround: number, wallHeight: number, wspornikTyp
     { label: 'Grubość ocieplenia', value: `${insulationThickness} mm` }
   )
 
+  // Te same dane rysuje potem zrzut do pliku - patrz wierszeTabelki
+  wierszeTabelki = rows
+
   // Utwórz canvas z tabelą
   const canvas = document.createElement('canvas')
   const ctx = canvas.getContext('2d')!
@@ -3573,6 +3576,9 @@ function drawAtticInfoLabel(params: AtticInfoParams, zPos: number) {
     { label: 'Ocieplenie wejście', value: `${params.insulationEntry} mm` },
     { label: 'Ocieplenie zejście', value: `${params.insulationDescent} mm` }
   )
+
+  // Te same dane rysuje potem zrzut do pliku - patrz wierszeTabelki
+  wierszeTabelki = rows
 
   // Utwórz canvas z tabelą
   const canvas = document.createElement('canvas')
@@ -8038,6 +8044,20 @@ function animate() {
   }
 }
 
+/**
+ * Rozmiar, pod ktory liczymy kadr. Normalnie jest to okno konfiguratora,
+ * ale na czas zrzutu do pliku podmieniamy go na staly format - patrz
+ * zrzutRozmiar i eksportujRysunek.
+ */
+function wymiaryWidoku(): { szerokosc: number; wysokosc: number } {
+  if (zrzutRozmiar) { return zrzutRozmiar }
+  const k = containerRef.value
+  return {
+    szerokosc: k ? k.clientWidth : 800,
+    wysokosc: Math.max(k ? k.clientHeight : 440, 1)
+  }
+}
+
 function handleResize() {
   if (!containerRef.value || isDisposed) return
 
@@ -8702,8 +8722,8 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
     sceneHeight = Math.max(wallHeightConfig, totalHeightWithHandrails + suspendedHeight1)
   }
 
-  const container = containerRef.value!
-  const aspect = container.clientWidth / container.clientHeight
+  const wymiary = wymiaryWidoku()
+  const aspect = wymiary.szerokosc / wymiary.wysokosc
   const margin = 1.08
 
   /* Kadr z dwoch rogow kadrowania.
@@ -8725,7 +8745,7 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
      pasa. Obie osie rosna razem - inaczej zmienilyby sie proporcje
      odwzorowania i rysunek wyszedlby rozciagniety. */
   const REZERWA_GORA_PX = 16
-  const wysPx = Math.max(container.clientHeight, 1)
+  const wysPx = wymiary.wysokosc
   // Przy bardzo niskim oknie rezerwa nie moze zjesc calego kadru
   const udzialTresci = Math.max(0.5, (wysPx - REZERWA_GORA_PX) / wysPx)
 
@@ -8869,6 +8889,30 @@ let zapisaneSkaleEtykiet: Array<{ sprite: THREE.Sprite; x: number; y: number; z:
 let zapisanaWidocznoscTabeli: Array<{ sprite: THREE.Sprite; widoczny: boolean }> = []
 
 /**
+ * Wymuszony rozmiar kadru na czas zrzutu do pliku, albo null.
+ *
+ * Pliki do pobrania maja STALY, PIONOWY format - drabina jest pionowa,
+ * a okno konfiguratora szerokie, wiec zrzut o proporcjach okna zostawial
+ * po bokach wiecej pustki niz samej drabiny. Kadr liczy sie z proporcji,
+ * a nie z bufora, wiec wystarczy podmienic to jedno zrodlo: czyta je
+ * wymiaryWidoku(), z ktorego korzystaja dopasujKamere3d()
+ * i enterTechDrawingMode().
+ */
+let zrzutRozmiar: { szerokosc: number; wysokosc: number } | null = null
+
+/**
+ * Wiersze tabelki parametrow, ostatnio zbudowane przez drawInfoLabel()
+ * albo drawAtticInfoLabel().
+ *
+ * Trzymamy je osobno, zeby zrzut mogl narysowac WLASNA tabelke zamiast
+ * fotografowac sprite'a ze sceny. Sprite jest teksturą w perspektywie:
+ * przy rzucie bocznym ladowal na drabinie i mial rozdzielczosc, jaka
+ * akurat wyszla z kadru. Rysowana na gotowym obrazku jest zawsze ostra,
+ * stoi w rogu i nie zaslania modelu.
+ */
+let wierszeTabelki: Array<{ label: string; value: string }> = []
+
+/**
  * Tabelka z podsumowaniem konfiguracji, rysowana w scenie jako sprite.
  *
  * Na zrzucie jej NIE pokazujemy - te same dane strona produktu wypisuje
@@ -8931,6 +8975,117 @@ function ustawEtykietyNaZrzut(): void {
   }
 }
 
+/** Prostokat z zaokraglonymi rogami. ctx.roundRect bywa niedostepny. */
+function zaokraglonyProstokat(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, szer: number, wys: number, r: number
+): void {
+  const promien = Math.min(r, szer / 2, wys / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + promien, y)
+  ctx.arcTo(x + szer, y, x + szer, y + wys, promien)
+  ctx.arcTo(x + szer, y + wys, x, y + wys, promien)
+  ctx.arcTo(x, y + wys, x, y, promien)
+  ctx.arcTo(x, y, x + szer, y, promien)
+  ctx.closePath()
+}
+
+/**
+ * Rysuje tabelke parametrow w lewym dolnym rogu gotowego zrzutu.
+ *
+ * Zastepuje sprite'a ze sceny, ktory na zrzut sie nie nadawal: byl
+ * teksturą w przestrzeni 3D, wiec przy rzucie bocznym potrafil wyladowac
+ * na drabinie, a jego ostrosc zalezala od tego, jak daleko stala kamera.
+ * Tutaj rysujemy po renderze, wprost na pikselach - zawsze ostro, zawsze
+ * w tym samym miejscu i bez zaslaniania modelu.
+ */
+function rysujTabelkeZrzutu(
+  ctx: CanvasRenderingContext2D, szerObrazu: number, wysObrazu: number
+): void {
+  const wiersze = wierszeTabelki
+  if (!wiersze.length) { return }
+
+  // Wszystko skalujemy szerokoscia obrazu, zeby tabelka czytala sie tak
+  // samo niezaleznie od tego, jak duzy plik zamowiono.
+  const k = Math.max(szerObrazu / 1240, 0.5)
+  const KROJ = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
+  const czcionka = Math.round(20 * k)
+  const wysWiersza = Math.round(38 * k)
+  const margines = Math.round(28 * k)
+  const padX = Math.round(20 * k)
+  const padY = Math.round(16 * k)
+  const odstepKolumn = Math.round(32 * k)
+  const wysNaglowka = Math.round(30 * k)
+
+  ctx.save()
+  ctx.textBaseline = 'middle'
+
+  ctx.font = `${czcionka}px ${KROJ}`
+  let szerEtykiet = 0
+  for (const w of wiersze) { szerEtykiet = Math.max(szerEtykiet, ctx.measureText(w.label).width) }
+
+  ctx.font = `600 ${czcionka}px ${KROJ}`
+  let szerWartosci = 0
+  for (const w of wiersze) { szerWartosci = Math.max(szerWartosci, ctx.measureText(w.value).width) }
+
+  const szerTresci = szerEtykiet + odstepKolumn + szerWartosci
+  const szerPanelu = szerTresci + padX * 2
+  const wysPanelu = padY * 2 + wysNaglowka + wiersze.length * wysWiersza
+
+  const x = margines
+  const y = wysObrazu - margines - wysPanelu
+
+  // Tlo. Cien jest delikatny - ma odkleic panel od rysunku, nie rzucac sie w oczy.
+  ctx.shadowColor = 'rgba(15, 23, 42, 0.18)'
+  ctx.shadowBlur = Math.round(18 * k)
+  ctx.shadowOffsetY = Math.round(4 * k)
+  ctx.fillStyle = '#ffffff'
+  zaokraglonyProstokat(ctx, x, y, szerPanelu, wysPanelu, Math.round(12 * k))
+  ctx.fill()
+  ctx.shadowColor = 'transparent'
+  ctx.shadowBlur = 0
+  ctx.shadowOffsetY = 0
+
+  ctx.strokeStyle = '#cbd5e1'
+  ctx.lineWidth = Math.max(1, Math.round(k))
+  zaokraglonyProstokat(ctx, x, y, szerPanelu, wysPanelu, Math.round(12 * k))
+  ctx.stroke()
+
+  // Naglowek
+  ctx.fillStyle = '#64748b'
+  ctx.font = `600 ${Math.round(czcionka * 0.72)}px ${KROJ}`
+  ctx.textAlign = 'left'
+  ctx.fillText('PARAMETRY DRABINY', x + padX, y + padY + wysNaglowka / 2)
+
+  const yTabeli = y + padY + wysNaglowka
+  for (let i = 0; i < wiersze.length; i++) {
+    const yw = yTabeli + i * wysWiersza
+    const srodek = yw + wysWiersza / 2
+
+    // Kreska miedzy wierszami zamiast ramek wokol kazdej komorki -
+    // mniej linii, a i tak wiadomo, gdzie konczy sie wiersz.
+    if (i > 0) {
+      ctx.strokeStyle = '#e2e8f0'
+      ctx.beginPath()
+      ctx.moveTo(x + padX, yw + 0.5)
+      ctx.lineTo(x + szerPanelu - padX, yw + 0.5)
+      ctx.stroke()
+    }
+
+    ctx.fillStyle = '#475569'
+    ctx.font = `${czcionka}px ${KROJ}`
+    ctx.textAlign = 'left'
+    ctx.fillText(wiersze[i].label, x + padX, srodek)
+
+    ctx.fillStyle = '#0f172a'
+    ctx.font = `600 ${czcionka}px ${KROJ}`
+    ctx.textAlign = 'right'
+    ctx.fillText(wiersze[i].value, x + szerPanelu - padX, srodek)
+  }
+
+  ctx.restore()
+}
+
 /** Przywraca skale sprzed zrzutu - w oknie etykiety maja dzialac jak dotad. */
 function przywrocEtykietyPoZrzucie(): void {
   for (const z of zapisaneSkaleEtykiet) {
@@ -8945,14 +9100,20 @@ function przywrocEtykietyPoZrzucie(): void {
  * `view` to jeden z rzutow technicznych albo `model3d` - wtedy oddajemy
  * zwykla perspektywe, dokladnie taka, jaka uzytkownik ma przed soba.
  *
- * `zTabelka` zostawia na obrazku tabelke z podsumowaniem konfiguracji.
- * Strona produktu w sklepie jej NIE chce, bo te same dane wypisuje sama
- * tekstem w HTML obok rysunku - dlatego domyslnie znika. Panel sprzedawcy
- * pobiera plik, ktory ma byc samodzielny, wiec prosi o nia wprost.
+ * `zTabelka` dokleja do obrazka tabelke z podsumowaniem konfiguracji.
+ * Sprite ze sceny jest przy tym chowany ZAWSZE - rysujemy wlasna tabelke
+ * na gotowych pikselach, bo sprite potrafil wyladowac na drabinie, a jego
+ * ostrosc zalezala od kadru (patrz rysujTabelkeZrzutu). Strona produktu
+ * w sklepie tabelki nie chce wcale: te same dane wypisuje sama tekstem
+ * w HTML obok rysunku.
+ *
+ * `szerokosc`/`wysokosc` narzucaja STALY format pliku zamiast proporcji
+ * okna konfiguratora. Okno jest szerokie, a drabina pionowa, wiec zrzut
+ * o proporcjach okna byl w wiekszosci pustka po bokach.
  */
 function eksportujRysunek(
   view: 'front' | 'side' | 'back' | 'top' | 'model3d' = 'side',
-  opcje: { zTabelka?: boolean } = {}
+  opcje: { zTabelka?: boolean; szerokosc?: number; wysokosc?: number } = {}
 ): {
   view: string; image: string | null; width?: number; height?: number; szczebelOdZiemi?: number
 } {
@@ -8988,21 +9149,34 @@ function eksportujRysunek(
   // wiecej pamieci, a na slabszym sprzecie nie ma po co ryzykowac.
   const powiekszenie = Math.min(3, Math.max(1, 1800 / Math.max(1, szerKontenera)))
 
+  // Staly format albo proporcje okna - patrz zrzutRozmiar
+  const staly = !!(opcje.szerokosc && opcje.wysokosc)
+  const szerZrzutu = staly
+    ? Math.round(opcje.szerokosc!)
+    : Math.round(szerKontenera * powiekszenie)
+  const wysZrzutu = staly
+    ? Math.round(opcje.wysokosc!)
+    : Math.round(wysKontenera * powiekszenie)
+
   try {
+    if (staly) {
+      zrzutRozmiar = { szerokosc: szerZrzutu, wysokosc: wysZrzutu }
+      perspectiveCamera.aspect = szerZrzutu / wysZrzutu
+      perspectiveCamera.updateProjectionMatrix()
+    }
+
     renderer.setPixelRatio(1)
     // false = nie ruszaj rozmiaru w CSS; plotno w oknie ma wygladac tak samo
-    renderer.setSize(
-      Math.round(szerKontenera * powiekszenie),
-      Math.round(wysKontenera * powiekszenie),
-      false
-    )
+    renderer.setSize(szerZrzutu, wysZrzutu, false)
 
     if (model3d) {
       /* Gdy uzytkownik akurat oglada rysunek techniczny, na czas zrzutu
          wychodzimy do perspektywy - a blok finally wraca tam, gdzie byl.
-         Kadru ani przyblizenia nie ruszamy: zrzut ma pokazywac to, co
-         sprzedawca ma przed soba, lacznie z obrotem, ktory sam ustawil. */
+         Obrotu nie ruszamy nigdy: zrzut ma pokazywac to, co sprzedawca
+         ustawil. Kadr przeliczamy tylko przy stalym formacie, bo zmienily
+         sie proporcje - chyba ze uzytkownik sam dobral przyblizenie. */
       if (bylWTrybie) { exitTechDrawingMode() }
+      if (staly && !recznyZoom) { dopasujKamere3d() }
     } else {
       enterTechDrawingMode(view)
     }
@@ -9016,11 +9190,25 @@ function eksportujRysunek(
     // W perspektywie nie ruszamy etykiet: tam maja wygladac tak jak na
     // ekranie, a powiekszenie liczone pod rzut rozsadzaloby je na boki.
     if (!model3d) { ustawEtykietyNaZrzut() }
-    if (!opcje.zTabelka) { ukryjTabeleNaZrzut() }
+    // Sprite ze sceny znika ZAWSZE - wlasna tabelke rysujemy nizej, juz na
+    // gotowych pikselach
+    ukryjTabeleNaZrzut()
 
     // Render i odczyt w jednym ciagu - bez tego bufor bywa juz wyczyszczony
     renderer.render(scene, camera)
-    const image = renderer.domElement.toDataURL('image/png')
+
+    let image: string
+    if (opcje.zTabelka) {
+      const plotno = document.createElement('canvas')
+      plotno.width = renderer.domElement.width
+      plotno.height = renderer.domElement.height
+      const ctx = plotno.getContext('2d')!
+      ctx.drawImage(renderer.domElement, 0, 0)
+      rysujTabelkeZrzutu(ctx, plotno.width, plotno.height)
+      image = plotno.toDataURL('image/png')
+    } else {
+      image = renderer.domElement.toDataURL('image/png')
+    }
 
     return {
       view,
@@ -9038,6 +9226,10 @@ function eksportujRysunek(
   } finally {
     przywrocEtykietyPoZrzucie()
     przywrocTabelePoZrzucie()
+
+    // Zdjac PRZED handleResize() - inaczej okno przeliczyloby sie pod
+    // format pliku i model zostalby w oknie zle skadrowany
+    zrzutRozmiar = null
 
     // Najpierw rozmiar - kamera przelicza sie przy powrocie do trybu
     renderer.setPixelRatio(poprzedniPixelRatio)
@@ -10035,8 +10227,8 @@ function dopasujKamere3d() {
   const atticZOffset = (handrailType === 'attic') ? 510 * SCALE : 0
   const przesun = new THREE.Vector3(0, -cameraOffset.y, -cameraOffset.z + atticZOffset)
 
-  const container = containerRef.value
-  const aspect = Math.max(container.clientWidth / Math.max(container.clientHeight, 1), 0.01)
+  const wymiary = wymiaryWidoku()
+  const aspect = Math.max(wymiary.szerokosc / wymiary.wysokosc, 0.01)
   const tgPion = Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov) / 2)
   const tgPoziom = tgPion * aspect
 
