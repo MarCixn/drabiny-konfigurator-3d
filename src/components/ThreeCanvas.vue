@@ -9924,7 +9924,10 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
      wychodza porecze, a drabina stoi odsunieta od sciany na wspornikach.
      Wartosci moga byc stale, bo rog i tak wedruje razem z konfiguracja. */
   const ODSUNIECIE = {
-    kadr_gorny: { x: -200, z: -200 },             // w lewo i w tyl
+    /* W tyl az 1200 mm: w rysunku technicznym glebokosc staje sie
+       pozioma osia rzutu bocznego i wymiary opisujace drabine wychodzily
+       poza kadr. Te 1000 mm ponad pierwotne 200 to miejsce na nie. */
+    kadr_gorny: { x: -200, z: -1200 },            // w lewo i w tyl
     // 200 - 350 w lewo, -200 + 400 - 100 w gore, 200 - 350 w tyl
     kadr_dolny: { x: -150, y: 100, z: -150 }
   }
