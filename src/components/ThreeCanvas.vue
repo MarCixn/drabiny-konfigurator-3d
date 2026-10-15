@@ -3414,6 +3414,20 @@ function drawHandrailHeightDimension(zPos: number, frontSide: boolean = false) {
   ladderContainer.add(handrailHeightLabel)
 }
 
+/**
+ * Nazwy wspornikow standardowych wg typu.
+ *
+ * Jedno miejsce na te zakresy: korzysta z nich tabelka w scenie (obie
+ * odmiany - klasyczna i attykowa) oraz lista wspornikow na zrzucie.
+ * Byly tu wczesniej trzy kopie tego samego.
+ */
+const NAZWY_WSPORNIKOW: Record<string, string> = {
+  'krotki': 'Regulowany 160-260mm',
+  'sredni': 'Regulowany 260-360mm',
+  'dlugi': 'Regulowany 360-460mm',
+  'none': 'Brak'
+}
+
 // Info label z tyłu sceny (tabelka z parametrami)
 function drawInfoLabel(lastRungToGround: number, wallHeight: number, wspornikType: string, hasCage: boolean, isPlatform: boolean, insulationThickness: number, zPos: number) {
   // Usuń poprzedni label
@@ -3430,12 +3444,7 @@ function drawInfoLabel(lastRungToGround: number, wallHeight: number, wspornikTyp
   }
 
   // Mapowanie typów wsporników na nazwy z zakresami
-  const wspornikNames: Record<string, string> = {
-    'krotki': 'Regulowany 160-260mm',
-    'sredni': 'Regulowany 260-360mm',
-    'dlugi': 'Regulowany 360-460mm',
-    'none': 'Brak'
-  }
+  const wspornikNames = NAZWY_WSPORNIKOW
   const wspornikName = wspornikNames[wspornikType] || 'Niestandardowy'
 
   // Przygotuj wiersze tabeli
@@ -3552,12 +3561,7 @@ function drawAtticInfoLabel(params: AtticInfoParams, zPos: number) {
   }
 
   // Mapowanie typów wsporników na nazwy z zakresami
-  const wspornikNames: Record<string, string> = {
-    'krotki': 'Regulowany 160-260mm',
-    'sredni': 'Regulowany 260-360mm',
-    'dlugi': 'Regulowany 360-460mm',
-    'none': 'Brak'
-  }
+  const wspornikNames = NAZWY_WSPORNIKOW
   const wspornikEntryName = wspornikNames[params.wspornikEntry] || 'Niestandardowy'
   const wspornikDescentName = wspornikNames[params.wspornikDescent] || 'Niestandardowy'
 
@@ -9005,6 +9009,15 @@ function ustawEtykietyNaZrzut(): void {
 /** Jeden kroj dla wszystkiego, co dorysowujemy na zrzucie. */
 const KROJ_ZRZUTU = 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif'
 
+/**
+ * Srednica wewnetrzna obreczy kosza w mm.
+ *
+ * Wlasciwosc WYROBU, nie sceny - obrecz jest wczytywanym modelem i nie da
+ * sie jej stad odczytac bez mierzenia geometrii, ktore i tak dalo by liczbe
+ * z grubosciami profili. Dlatego stala, podana przez klienta (75 cm).
+ */
+const SREDNICA_OBRECZY = 750
+
 /** Prostokat z zaokraglonymi rogami. ctx.roundRect bywa niedostepny. */
 function zaokraglonyProstokat(
   ctx: CanvasRenderingContext2D,
@@ -9032,9 +9045,60 @@ function zaokraglonyProstokat(
  * skonczyloby sie tym, czym zawsze: dwiema wartosciami rozniacymi sie
  * o kilka milimetrow.
  */
+/**
+ * Wsporniki policzone Z ELEMENTOW NA SCENIE, pogrupowane po rodzaju.
+ *
+ * Nie z ustawienia w panelu: ono jest jedno na cala drabine, a na modelu
+ * moga stac rozne. Sprzedawca zmienia pojedyncze w "Edytuj uchwyty", a przy
+ * attyce strona wejscia i zejscia maja wlasne. Ten sam BOM napedza liste
+ * "Elementy" w panelu, wiec liczby na zrzucie i w wycenie zawsze sie zgadzaja.
+ *
+ * Standardowe maja w BOM nazwe bez zakresu ("Wspornik krotki (para)"),
+ * a to wlasnie zakres mowi, czego klient ma szukac - podmieniamy ja wiec
+ * na opis z NAZWY_WSPORNIKOW. Typ C ma zakres juz w nazwie.
+ */
+function wspornikiZeSceny(): Array<{ nazwa: string; ilosc: number }> {
+  const Z_BOM: Record<string, string> = {
+    'wspornik_krotki': 'krotki',
+    'wspornik_sredni': 'sredni',
+    'wspornik_dlugi': 'dlugi'
+  }
+
+  const bom = generateBOM()
+  const razem = new Map<string, { nazwa: string; ilosc: number }>()
+
+  for (const strona of [bom.ladder1, bom.ladder2]) {
+    for (const pozycja of strona?.items || []) {
+      if (pozycja.category !== 'wspornik') { continue }
+
+      /* Grupujemy po `name` - to klucz definicji ("wspornik_krotki").
+         `id` jest tylko numerem porzadkowym w obrebie jednej strony
+         ("item_3"), wiec przy attyce ten sam numer z drugiej drabiny
+         scalilby ze soba dwa rozne wsporniki. */
+      const biezaca = razem.get(pozycja.name)
+      if (biezaca) {
+        biezaca.ilosc += pozycja.quantity
+        continue
+      }
+
+      const typ = Z_BOM[pozycja.name]
+      razem.set(pozycja.name, {
+        nazwa: typ ? `Wspornik ${NAZWY_WSPORNIKOW[typ]} (para)` : pozycja.namePL,
+        ilosc: pozycja.quantity
+      })
+    }
+  }
+
+  return Array.from(razem.values())
+}
+
 function wierszeTabelkiZrzutu(): Array<{ label: string; value: string }> {
-  const w = wierszeTabelki.slice()
-  if (!w.length) { return w }
+  /* Wiersze o wsporniku z tabelki sceny ODRZUCAMY - nizej wstawiamy liste
+     policzona z elementow na scenie. Tamte niosa jedno ustawienie z panelu
+     ("Wspornik", a przy attyce "Wspornik wejscie/zejscie"), wiec gdy na
+     modelu stoi kilka rodzajow, pokazuja tylko jeden z nich. */
+  const w = wierszeTabelki.filter((r) => !r.label.startsWith('Wspornik'))
+  if (!wierszeTabelki.length) { return w }
 
   const mm = (x: number) => `${x} mm`
   const attyka = handrailType === 'attic'
@@ -9059,15 +9123,25 @@ function wierszeTabelkiZrzutu(): Array<{ label: string; value: string }> {
     w.push({ label: 'Liczba szczebli', value: `${szczeble} szt.` })
   }
 
-  const wsporniki = wspornikTypes1.filter((t) => t !== 'none').length
-  if (wsporniki > 0) {
-    w.push({ label: 'Liczba wsporników', value: `${wsporniki} szt.` })
+  /* Przy jednym rodzaju czytelniejsze jest "Wspornik: nazwa" niz lista
+     z jedna pozycja; przy kilku kazdy dostaje wlasny wiersz z iloscia. */
+  const wsporniki = wspornikiZeSceny()
+  if (wsporniki.length === 1) {
+    w.push({ label: 'Wspornik', value: wsporniki[0].nazwa })
+    w.push({ label: 'Liczba wsporników', value: `${wsporniki[0].ilosc} szt.` })
+  } else {
+    for (const s of wsporniki) {
+      w.push({ label: s.nazwa, value: `szt. ${s.ilosc}` })
+    }
   }
 
   w.push({
     label: 'Kosz ochronny',
     value: safetyCageCount1 > 0 ? `${safetyCageCount1} obręczy` : 'Nie'
   })
+  if (safetyCageCount1 > 0) {
+    w.push({ label: 'Średnica wewnętrzna obręczy', value: `${SREDNICA_OBRECZY} mm` })
+  }
   if (safetyCageCount1 > 0 && wymiaryZeSceny.ostatniaObreczOdZiemi) {
     w.push({
       label: 'Ostatnia obręcz → ziemia',
