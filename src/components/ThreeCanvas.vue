@@ -8765,13 +8765,12 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
   // Przy bardzo niskim oknie rezerwa nie moze zjesc calego kadru
   const udzialTresci = Math.max(0.5, (wysPx - REZERWA_GORA_PX) / wysPx)
 
-  const rogi = rogiKadrowania()
+  const bryla = brylaKadrowania()
   let orthoSize: number
   let srodek: THREE.Vector3 | null = null
   let przesuniecieGora = 0
 
-  if (rogi) {
-    const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
+  if (bryla) {
     const rozmiar = bryla.getSize(new THREE.Vector3())
     srodek = bryla.getCenter(new THREE.Vector3())
 
@@ -10406,6 +10405,40 @@ function rogiKadrowania(): { gorny: THREE.Vector3; dolny: THREE.Vector3 } | null
   }
 
   return { gorny: rogi.kadr_gorny, dolny: rogi.kadr_dolny }
+}
+
+/**
+ * Bryla, ktora musi zmiescic sie w rzucie technicznym.
+ *
+ * Same dwa znaczniki NIE WYSTARCZA. Rozpiety na nich prostopadloscian
+ * siega w poziomie od LEWEJ krawedzi sciany do PRAWEJ krawedzi podlogi -
+ * prawej krawedzi sciany nie ma w nim wcale. Gdy sciana jest szersza od
+ * podlogi, jej prawy kawalek wypada poza kadr. Przy wysokiej drabinie
+ * tego nie widac, bo wiaze pion i w poziomie zostaje zapas; przy 2 m bez
+ * poreczy model jest niski, wiaze poziom - i sciana wychodzila poza obraz.
+ *
+ * Dokladamy wiec obrysy sciany, podlogi i szczytu. Dla rzutu
+ * ortogonalnego suma pudel jest DOKLADNA: patrzymy wzdluz osi, wiec
+ * zasieg na ekranie to wprost zasieg pudla w dwoch pozostalych osiach.
+ * (W perspektywie tak nie jest - tam liczymy po pojedynczych rogach,
+ * patrz dopasujKamere3d.)
+ */
+function brylaKadrowania(): THREE.Box3 | null {
+  const rogi = rogiKadrowania()
+  if (!rogi) { return null }
+
+  const bryla = new THREE.Box3().setFromPoints([rogi.gorny, rogi.dolny])
+
+  const { sciana, podloga } = znajdzSciangeIPodloge()
+  for (const pudlo of [
+    sciana ? obrysBryly(sciana) : null,
+    podloga ? obrysBryly(podloga) : null,
+    obrysSzczytu()
+  ]) {
+    if (pudlo) { bryla.union(pudlo) }
+  }
+
+  return bryla
 }
 
 /** Czy uzytkownik sam ustawil przyblizenie - wtedy nie nadpisujemy go. */
