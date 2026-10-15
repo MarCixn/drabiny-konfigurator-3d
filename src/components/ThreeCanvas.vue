@@ -8740,7 +8740,10 @@ function enterTechDrawingMode(view: 'front' | 'side' | 'back' | 'top' = 'front')
 
   const wymiary = wymiaryWidoku()
   const aspect = wymiary.szerokosc / wymiary.wysokosc
-  const margin = 1.08
+  /* Luz wokol modelu. Bylo 8%, czyli na rzucie przednim ledwie ~40 px
+     od sciany do krawedzi - model wygladal, jakby sie w kadr wciskal.
+     Podwojone do 16%: tyle samo luzu co bylo i jeszcze raz tyle. */
+  const margin = 1.16
 
   /* Kadr z dwoch rogow kadrowania.
      Dotad rozmiar kamery wynikal z samej WYSOKOSCI sceny - szerokosc nie
