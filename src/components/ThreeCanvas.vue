@@ -10042,7 +10042,7 @@ function dopasujKamere3d() {
      jej glebokosci - a to, co blizej kamery, rzutuje sie wieksze. Bez
      zapasu szczyt poreczy wychodzil poza gorna krawedz. 1.08 wystarcza,
      zeby model miescil sie w calosci, a ekran nadal byl wypelniony. */
-  perspectiveCamera.position.z = Math.max(dystans * 1.08, 10)
+  perspectiveCamera.position.z = Math.max(dystans * 1.035, 10)
   lastZoom = perspectiveCamera.position.z
   requestRender()
 }
