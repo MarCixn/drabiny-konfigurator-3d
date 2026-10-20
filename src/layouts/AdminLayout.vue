@@ -66,6 +66,23 @@ const isLoadingExternalConfig = ref(false)
 // ============================================
 const currentScreen = ref<'purpose' | 'params' | 'summary'>('purpose')
 
+/**
+ * Podgląd czeka na dane i do tego czasu nie pokazuje NICZEGO z kreatora.
+ *
+ * Tryb view startuje na ekranie wyboru przeznaczenia i dopiero wczytane
+ * dane przełączają go na scenę — przez chwilę migał więc klientowi
+ * „wewnętrzna czy zewnętrzna". Samo przeskoczenie od razu na scenę nie
+ * wystarczy: bez danych rysuje się drabina z wartości domyślnych, a migające
+ * 5 metrów wygląda gorzej niż kreator, bo wygląda na prawdziwe.
+ *
+ * Wartość początkowa musi zapaść TUTAJ, nie w onMounted — tamto wykonuje się
+ * po pierwszym renderze, więc kreator zdążyłby mrugnąć.
+ */
+const czekaNaPodglad = ref(props.mode === 'view')
+
+/** Dane podglądu nie przyszły w rozsądnym czasie — patrz zawór w onMounted. */
+const bladPodgladu = ref(false)
+
 // Blokada schematu (dla osadzonego konfiguratora na stronie produktu)
 const schemeLocked = ref(false)
 
@@ -2260,6 +2277,10 @@ async function checkUrlAndLoadOffer() {
     loadOfferError.value = 'Błąd ładowania oferty'
   } finally {
     isLoadingOffer.value = false
+    /* Zasłona podglądu schodzi TAKZE przy bledzie - inaczej nieudane
+       wczytanie oferty zostawialoby klienta na "Wczytywanie podgladu..."
+       bez szansy zobaczenia, co poszlo nie tak. */
+    czekaNaPodglad.value = false
   }
 }
 
@@ -3932,6 +3953,20 @@ onMounted(() => {
     // Start PostMessage listener
     postMessageService.startListening()
 
+    /* Zawor bezpieczenstwa. Przy ?mode=view bez ?ref= i bez strony, ktora
+       przysle LOAD_CONFIG, nie ma kto zdjac zaslony - zostaloby samo
+       "Wczytywanie podgladu..." bez konca. Po 15 sekundach mowimy wprost,
+       ze sie nie udalo.
+
+       Zaslony przy tym NIE zdejmujemy: pod nia jest kreator, a odsloniecie
+       go konczylo sie dokladnie tym, czego unikamy - pytaniem "wewnetrzna
+       czy zewnetrzna" w oknie podgladu. */
+    if (isViewMode.value) {
+      setTimeout(() => {
+        if (czekaNaPodglad.value) { bladPodgladu.value = true }
+      }, 15000)
+    }
+
     postMessageService.on('LOAD_CONFIG', (data) => {
       if (data.payload) {
         /* Migawka MUSI trafić na miejsce przed przebudową sceny -
@@ -3948,7 +3983,10 @@ onMounted(() => {
            przeznaczenia - checkUrlAndLoadOffer() wychodzi od razu, a to
            ono normalnie przełącza na scenę. Wchodząc z LOAD_CONFIG robimy
            to sami, inaczej panel pokazywałby pierwszy krok kreatora. */
-        if (isViewMode.value) { currentScreen.value = 'params' }
+        if (isViewMode.value) {
+          currentScreen.value = 'params'
+          czekaNaPodglad.value = false
+        }
 
         // Zablokuj auto-korektę wartości podczas ładowania konfiguracji z zewnątrz
         // Zapobiega nadpisywaniu wartości użytkownika przez watchery
@@ -4837,8 +4875,22 @@ function toggleCageClosing() {
          ============================================ -->
     <main class="app-content">
 
-      <!-- ========== EKRAN 1: Wybór przeznaczenia ========== -->
-      <div v-if="currentScreen === 'purpose'" class="screen">
+      <!-- Podgląd przed nadejściem danych - patrz czekaNaPodglad -->
+      <div v-if="czekaNaPodglad" class="screen">
+        <div class="fullscreen-layout">
+          <div class="screen-intro">
+            <p v-if="bladPodgladu">Nie udało się wczytać podglądu drabiny.</p>
+            <p v-else>Wczytywanie podglądu…</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== EKRAN 1: Wybór przeznaczenia ==========
+           W trybie podglądu kreatora NIE MA. Wcześniej pokazywał się
+           na starcie, zanim przyszły dane, i klientowi migało pytanie
+           „wewnętrzna czy zewnętrzna" w oknie, w którym i tak niczego
+           nie wybiera. -->
+      <div v-if="currentScreen === 'purpose' && !czekaNaPodglad && !isViewMode" class="screen">
         <div class="fullscreen-layout">
           <div class="screen-intro">
             <h2>Wybierz przeznaczenie drabiny</h2>
@@ -4878,7 +4930,7 @@ function toggleCageClosing() {
       </div>
 
       <!-- ========== EKRAN 2: Parametry (SPLIT LAYOUT z iframe) ========== -->
-      <div v-if="currentScreen === 'params'" class="screen">
+      <div v-if="currentScreen === 'params' && !czekaNaPodglad" class="screen">
         <div class="split-layout">
           <!-- Lewa strona - wizualizacja 3D (bezpośrednia integracja Three.js) -->
           <div class="visualization-panel">
