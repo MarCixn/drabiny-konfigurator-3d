@@ -3581,6 +3581,21 @@ function getConfigForPostMessage(): LadderConfig {
     connectorTypes: threeState.value.connectorTypes,
     wspornikTypes: threeState.value.wspornikTypes,
     sciskaneHandles: threeState.value.sciskaneHandles,
+    /* Odległości wsporników, ręczne nadpisania i wspornik śródszczeblowy.
+       Szły już do zapisanej oferty, ale NIE przez postMessage - więc
+       zamówienie złożone w panelu sprzedawcy gubiło je i podgląd
+       w panelu admina odtwarzał wsporniki domyślne. */
+    wspornikDistances: threeState.value.wspornikDistances,
+    wspornikManual: threeState.value.wspornikManual,
+    midRungBracket: threeState.value.midRungBracket
+      ? { ...threeState.value.midRungBracket }
+      : undefined,
+    cageCorrection: cageCorrection.value,
+    /* MIGAWKA SCENY - spis tego, co naprawdę stoi na scenie, razem
+       z usunięciami i ręcznymi zmianami pojedynczych elementów.
+       To ona pozwala pokazać w panelu admina dokładnie tę drabinę,
+       którą złożył handlowiec, zamiast budować ją od nowa z parametrów. */
+    sceneSnapshot: migawkaBiezaca.value ?? undefined,
     // Wysokości do opłaty stałej (w mm)
     lastHoopToGround: threeState.value.lastHoopToGround,
     lastRungToGround: threeState.value.lastRungToGround
@@ -3901,18 +3916,40 @@ onMounted(() => {
     }
   }
 
-  // Dla trybu seller - ustaw domyślne wartości i uruchom PostMessage
-  if (isSellerMode.value) {
-    state.value.purpose = 'external'
-    state.value.scheme = 'no-platform'
-    state.value.hasInsulation = true
-    currentScreen.value = 'params'
+  /* Tryb VIEW przyjmuje konfigurację z zewnątrz tak samo jak seller.
+     Dotąd umiał wczytać się TYLKO z ?ref=&code=, czyli z zapisanej oferty.
+     Panel admina pokazuje zamówienie złożone w panelu sprzedawcy, a ono
+     nie ma własnej oferty - cały stan, razem z migawką sceny, siedzi
+     w config_json zamówienia i jest wpychany tutaj przez LOAD_CONFIG. */
+  if (isSellerMode.value || isViewMode.value) {
+    if (isSellerMode.value) {
+      state.value.purpose = 'external'
+      state.value.scheme = 'no-platform'
+      state.value.hasInsulation = true
+      currentScreen.value = 'params'
+    }
 
     // Start PostMessage listener
     postMessageService.startListening()
 
     postMessageService.on('LOAD_CONFIG', (data) => {
       if (data.payload) {
+        /* Migawka MUSI trafić na miejsce przed przebudową sceny -
+           createLadder() czyta ją na samym początku i buduje z niej model
+           zamiast składać go z parametrów. */
+        const zapis = (data.payload as any).sceneSnapshot
+        if (zapis) {
+          migawkaSceny.value = Array.isArray(zapis)
+            ? { elementy: zapis }
+            : (Array.isArray(zapis.elementy) ? zapis : null)
+        }
+
+        /* Bez ?ref= tryb podglądu zatrzymuje się na ekranie wyboru
+           przeznaczenia - checkUrlAndLoadOffer() wychodzi od razu, a to
+           ono normalnie przełącza na scenę. Wchodząc z LOAD_CONFIG robimy
+           to sami, inaczej panel pokazywałby pierwszy krok kreatora. */
+        if (isViewMode.value) { currentScreen.value = 'params' }
+
         // Zablokuj auto-korektę wartości podczas ładowania konfiguracji z zewnątrz
         // Zapobiega nadpisywaniu wartości użytkownika przez watchery
         isLoadingExternalConfig.value = true

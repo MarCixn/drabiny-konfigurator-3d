@@ -83,6 +83,17 @@ export interface LadderConfig {
   // Wysokości do opłaty stałej (w mm)
   lastHoopToGround?: number
   lastRungToGround?: number
+
+  /**
+   * Migawka sceny — spis tego, co naprawdę na niej stoi, razem z usunięciami
+   * i ręcznymi zmianami pojedynczych elementów.
+   *
+   * Dzięki niej podgląd pokazuje dokładnie tę drabinę, którą złożył
+   * handlowiec, zamiast budować ją od nowa z parametrów. Starsze zapisy
+   * trzymały samą tablicę elementów, bez kotwic wymiarowych — takie też
+   * przyjmujemy, tylko rzut techniczny jest wtedy bez opisów.
+   */
+  sceneSnapshot?: { elementy: unknown[]; kotwice?: unknown } | unknown[]
 }
 
 export interface ConfigResult {

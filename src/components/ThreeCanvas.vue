@@ -5949,6 +5949,13 @@ function createLadder() {
 
       outlineEnabled = true
       reapplyOutlines()
+
+      /* Kadr trzeba dopasowac TAKZE tutaj. Ta galaz wychodzi z funkcji
+         wlasnym "return", wiec nigdy nie dochodzila do dopasowania na koncu
+         createLadder() - scena odtworzona z migawki zostawala z kadrem
+         sprzed przebudowy i drabina wychodzila poza ekran. */
+      if (!recznyZoom) dopasujKamere3d()
+
       requestRender()
       return
     }
@@ -12867,6 +12874,12 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
     model.userData.elementId = e.id
     model.userData.zMigawki = true
     model.userData.ladderNum = e.ladderNum || 1
+    /* Znaczniki szczytu. obrysSzczytu() szuka po nich tego, co stoi na
+       gorze drabiny - poreczy albo przelazu attykowego - i od tego liczy
+       gorny rog kadru. Bez nich scena z migawki kadrowala sie do szczytu
+       SCIANY i porecze wychodzily poza ekran. */
+    if (e.rodzaj === 'porecz') { model.userData.isHandrail = true }
+    if (e.rodzaj === 'attyka') { model.userData.isAtticPassage = true }
     ladderContainer.add(model)
     postawione++
   }
