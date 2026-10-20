@@ -4031,7 +4031,10 @@ onMounted(() => {
   // "if (isSellerMode)", wiec w trybie embed konfigurator nie odbieral zadnych
   // wiadomosci i prosba o rysunek szla w prozne. startListening() sam pilnuje,
   // zeby nie wystartowac dwa razy.
-  if (isSellerMode.value || isEmbedMode.value) {
+  //
+  // Tryb view tez tu nalezy: podglad zamowienia w panelu (admina
+  // i sprzedawcy) pozwala pobrac zrzuty tak samo jak panel zamowien.
+  if (isSellerMode.value || isEmbedMode.value || isViewMode.value) {
     postMessageService.startListening()
 
     postMessageService.on('GET_TECH_DRAWING', (data) => {
