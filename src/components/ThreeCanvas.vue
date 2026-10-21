@@ -9063,6 +9063,11 @@ function zaokraglonyProstokat(
  * Standardowe maja w BOM nazwe bez zakresu ("Wspornik krotki (para)"),
  * a to wlasnie zakres mowi, czego klient ma szukac - podmieniamy ja wiec
  * na opis z NAZWY_WSPORNIKOW. Typ C ma zakres juz w nazwie.
+ *
+ * Bez "(para)": liczymy SZTUKI, nie pary. generateBOM() bierze obiekty
+ * najwyzszego poziomu, a wspornik standardowy to dwa osobne modele -
+ * lewy i prawy - wiec przy szesciu pozycjach wychodzi 12. Nazwa z BOM-u
+ * mowi "(para)" przy tej samej liczbie i wprowadzalaby w blad.
  */
 function wspornikiZeSceny(): Array<{ nazwa: string; ilosc: number }> {
   const Z_BOM: Record<string, string> = {
@@ -9090,7 +9095,7 @@ function wspornikiZeSceny(): Array<{ nazwa: string; ilosc: number }> {
 
       const typ = Z_BOM[pozycja.name]
       razem.set(pozycja.name, {
-        nazwa: typ ? `Wspornik ${NAZWY_WSPORNIKOW[typ]} (para)` : pozycja.namePL,
+        nazwa: typ ? `Wspornik ${NAZWY_WSPORNIKOW[typ]}` : pozycja.namePL,
         ilosc: pozycja.quantity
       })
     }
@@ -12880,6 +12885,16 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
        SCIANY i porecze wychodzily poza ekran. */
     if (e.rodzaj === 'porecz') { model.userData.isHandrail = true }
     if (e.rodzaj === 'attyka') { model.userData.isAtticPassage = true }
+    /* Znaczniki wspornika. generateBOM() liczy po nich sztuki, a z tego
+       bierze sie wiersz "jakiego wspornika ile" w tabelce na zrzucie.
+       Bez nich scena odtworzona z migawki nie miala w spisie ani jednego
+       wspornika i tabelka w panelu byla o te wiersze ubozsza niz ta sama
+       tabelka w panelu zamowien. */
+    if (e.rodzaj === 'wspornik') {
+      model.userData.isWspornik = true
+      model.userData.wspornikType = e.model || 'krotki'
+      if (e.side) { model.userData.side = e.side }
+    }
     ladderContainer.add(model)
     postawione++
   }
