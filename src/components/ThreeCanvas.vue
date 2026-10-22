@@ -6404,6 +6404,12 @@ function renderPlatformHandrails(totalHeight: number, shouldRenderHandrails: boo
     krataMarker.userData.isKrataWema = true
     krataMarker.userData.krataSize = '50x50'
     krataMarker.userData.ladderNum = 1
+    /* TEN OBIEKT NICZEGO NIE RYSUJE - krata jest czescia modelu podestu,
+       a to pusta grupa po to, zeby zestawienie wykazalo ja osobna pozycja.
+       Bez tego znacznika migawka zapisywala ja jak zwykly element: w punkcie
+       zerowym i ze skala 1 zamiast 0.01, wiec podglad stawial w srodku sceny
+       krate stukrotnie za duza. */
+    krataMarker.userData.tylkoZestawienie = true
     ladderContainer.add(krataMarker)
   }
 }
@@ -12661,8 +12667,16 @@ function eksportujScene(): ElementMigawki[] {
     // Elementy ukryte przez sprzedawce nie maja byc w podgladzie klienta
     if (obj.visible === false) { return }
 
+    /* Znacznik dla zestawienia, nie element sceny - pusta grupa, ktora istnieje
+       tylko po to, zeby BOM wykazal pozycje wliczona w inny model. */
+    if (u.tylkoZestawienie === true) { return }
+
     const trafiony = RODZAJE_MIGAWKI.find((r) => u[r.flaga] === true)
     if (!trafiony) { return }
+
+    /* To samo od drugiej strony: obiekt bez wlasnej geometrii i bez dzieci
+       nie ma czego narysowac, wiec w migawce moze tylko zaszkodzic. */
+    if (!(obj as THREE.Mesh).isMesh && obj.children.length === 0) { return }
 
     /* Brak elementId nie moze wykluczac elementu z podgladu. Bigfoot, przelaz
        i krata wema go nie dostaja, bo assignElementIds() ich nie obsluguje -
@@ -12865,6 +12879,12 @@ function odtworzZMigawki(migawka: ElementMigawki[]): number {
       postawione++
       continue
     }
+
+    /* Migawki zapisane do 2026-10-22 niosa pusty znacznik kraty WEMA: punkt
+       zerowy, skala 1 zamiast 0.01. Postawiony jako model daje krate sto razy
+       za duza w srodku sceny. Prawdziwe elementy stoja w skali 0.01, a jedyne
+       inne ze skala 1 to przeszkody - te wychodza petla wyzej. */
+    if (e.skala[0] === 1 && e.poz[0] === 0 && e.poz[1] === 0 && e.poz[2] === 0) { continue }
 
     const zrodlo = modelDlaMigawki(e)
     if (!zrodlo) { continue }
