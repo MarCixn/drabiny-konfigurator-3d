@@ -97,6 +97,9 @@ const state = ref({
   // dotad, czyli jako wycena indywidualna bez modeli na scenie.
   // Wartosci: '16-26' | '26-36' | '36-46' | '50-60' | '60-70' | '70-80'
   bracketTypC: '',
+  // Mocowanie do plyty warstwowej - caly montaz na wspornikach typu C.
+  // Ustawia je sklep przez ?plytaWarstwowa=true (patrz zastosujReguleWspornikow).
+  plytaWarstwowa: false,
   bracketSpacing: 215,
   surfaceType: 'smooth' as 'smooth' | 'rough',
   // Opcje montażu
@@ -188,6 +191,87 @@ const TYP_C_LISTA: { zakres: string; odleglosc: number; min: number; max: number
   { zakres: '60-70', odleglosc: 650, min: 600, max: 700 },
   { zakres: '70-80', odleglosc: 750, min: 700, max: 800 }
 ]
+
+/* ===== Dobor wspornikow dla konfiguracji przyslanej ze sklepu =====
+
+   Im grubszy okap albo ocieplenie, tym dalej od sciany musi stanac drabina,
+   i tym dluzszy wspornik. Progi sa ustalone z wlascicielem (2026-10-27)
+   i zapisane WPROST, a nie wyprowadzone ze wzoru:
+
+       do 10 cm -> 16-26      do 44 cm -> 50-60
+       do 20 cm -> 26-36      do 54 cm -> 60-70
+       do 30 cm -> 36-46      do 64 cm -> 70-80
+
+   Pokrywaja sie one z regula "(grubosc + 15 cm) wpada w zakres wariantu"
+   wszedzie poza jednym punktem: przy 31 cm wzor daje jeszcze 36-46 (bo
+   460 mm to dokladnie gorna granica tego wariantu), a tabela mowi juz
+   50-60. Tabela jest wazniejsza - wspornik pracujacy na samej granicy
+   zakresu nie ma zapasu na nierownosc sciany.
+
+   Powyzej 64 cm nie ma juz wariantu; zostaje najwiekszy i taka drabina
+   i tak idzie do wyceny indywidualnej. */
+const TYP_C_PROGI_CM: { doCm: number; zakres: string }[] = [
+  { doCm: 10, zakres: '16-26' },
+  { doCm: 20, zakres: '26-36' },
+  { doCm: 30, zakres: '36-46' },
+  { doCm: 44, zakres: '50-60' },
+  { doCm: 54, zakres: '60-70' },
+  { doCm: 64, zakres: '70-80' }
+]
+
+/** Powyzej tylu cm okapu/ocieplenia standardowy wspornik juz nie siega. */
+const PROG_TYP_C_CM = 30
+
+function zakresTypCDlaGrubosci(cm: number): string {
+  for (const p of TYP_C_PROGI_CM) {
+    if (cm <= p.doCm) return p.zakres
+  }
+  return TYP_C_PROGI_CM[TYP_C_PROGI_CM.length - 1].zakres
+}
+
+/**
+ * Co wystaje ze sciany i decyduje o dlugosci wspornika (cm).
+ * Bierzemy WIEKSZE z dwojga - to ono jest ograniczeniem.
+ */
+function gruboscDecydujacaCm(): number {
+  const okap = state.value.hasEave ? (state.value.eaveDepth || 0) : 0
+  const ocieplenie = state.value.hasInsulation ? (state.value.insulationThickness || 0) : 0
+  return Math.max(okap, ocieplenie, 0)
+}
+
+/**
+ * Ustawia rodzine i rozmiar wspornikow wedlug konfiguracji ze sklepu.
+ *
+ * Dwa powody, dla ktorych wchodzi typ C:
+ *  - klient zaznaczyl mocowanie do plyty warstwowej (plyta nie uniesie
+ *    wspornika opartego punktowo),
+ *  - albo okap/ocieplenie przekroczylo PROG_TYP_C_CM i zwykly wspornik
+ *    po prostu nie siega.
+ *
+ * Gdy grubosc wroci do progu, a plyty nie zaznaczono, wracamy na zwykle
+ * wsporniki - stad jawne czyszczenie bracketTypC, bez ktorego czyTypC
+ * zostaloby wlaczone na zawsze.
+ *
+ * Wolane TYLKO w trybie embed, czyli z poziomu sklepu. Panel sprzedawcy
+ * wybiera wsporniki recznie i nie wolno mu tego nadpisywac.
+ */
+function zastosujReguleWspornikow() {
+  const grubosc = gruboscDecydujacaCm()
+
+  if (state.value.plytaWarstwowa || grubosc > PROG_TYP_C_CM) {
+    const zakres = zakresTypCDlaGrubosci(grubosc)
+    state.value.bracketType = 'custom'
+    state.value.bracketTypC = zakres
+    state.value.bracketSpacing = TYP_C_ODLEGLOSCI[zakres]
+    return
+  }
+
+  state.value.bracketTypC = ''
+  state.value.bracketType = 'short'
+  // Odleglosc od sciany rosnie z ociepleniem - ta sama regula co
+  // ReguleDrabin::odlegloscWspornikow() po stronie sklepu.
+  state.value.bracketSpacing = Math.min(460, Math.max(160, Math.round((grubosc + 15) * 10)))
+}
 
 function wybierzTypC(zakres: string) {
   state.value.bracketType = 'custom'
@@ -769,20 +853,25 @@ function onThreeUpdate(data: {
     }
   }
 
-  // W trybie seller - użyj BOM z eventu (już wygenerowany z aktualnej sceny 3D)
-  if (isSellerMode.value) {
-    console.log('[Seller] onThreeUpdate - bomData:', data.bomData)
-    console.log('[Seller] onThreeUpdate - bomData.ladder1.items count:', data.bomData?.ladder1?.items?.length)
+  /* BOM ze sceny zapamietujemy takze w trybie EMBED, czyli w sklepie.
+     Dotad robil to wylacznie seller, wiec sklep na GET_CONFIG dostawal pusta
+     liste komponentow - a potrzebuje jej, zeby policzyc doplate za wsporniki
+     typu C: ich liczba wynika z modelu (uchwyty, kolizje z przeszkodami,
+     reczne zmiany), a nie z samej wysokosci sciany.
+
+     ROZSYLAMY dalej tylko sprzedawcy. Sklep pyta wtedy, kiedy potrzebuje,
+     i nie ma po co dostawac CONFIG_RESULT przy kazdym przebudowaniu sceny. */
+  if (isSellerMode.value || isEmbedMode.value) {
     if (data.bomData && data.bomData.ladder1) {
       // Deep copy aby wymusić reaktywność Vue
       cachedBOMData.value = JSON.parse(JSON.stringify(data.bomData))
-      console.log('[Seller] cachedBOMData updated, allBomItems count:', allBomItems.value.length)
-      // Poczekaj na aktualizację computed przed wysłaniem
-      nextTick(() => {
-        console.log('[Seller] nextTick - sending CONFIG_RESULT with', allBomItems.value.length, 'items')
-        sendPostMessageResult()
-      })
-    } else {
+      if (isSellerMode.value) {
+        // Poczekaj na aktualizację computed przed wysłaniem
+        nextTick(() => {
+          sendPostMessageResult()
+        })
+      }
+    } else if (isSellerMode.value) {
       console.warn('[Seller] BOM data is empty or missing')
     }
   }
@@ -3935,6 +4024,15 @@ onMounted(() => {
       state.value.atticBackHasInsulation = ocieplZejscia > 0
       state.value.atticBackInsulationThickness = ocieplZejscia
     }
+
+    /* Mocowanie do plyty warstwowej. Plyta nie uniesie wspornika opartego
+       punktowo, wiec caly montaz idzie na wsporniki typu C - i to WSZYSTKIE
+       uchwyty, takze sciskane. Samo ustawienie rodziny wystarczy:
+       typWspornikaUchwytu() w ThreeCanvas dobiera typ C kazdemu uchwytowi,
+       ktory nie zostal zmieniony recznie. */
+    state.value.plytaWarstwowa = urlParams.get('plytaWarstwowa') === 'true'
+
+    zastosujReguleWspornikow()
   }
 
   /* Tryb VIEW przyjmuje konfigurację z zewnątrz tak samo jak seller.
@@ -4010,10 +4108,9 @@ onMounted(() => {
       }
     })
 
-    postMessageService.on('GET_CONFIG', () => {
-      sendPostMessageResult()
-    })
-
+    // GET_CONFIG obsluguje blok ponizej, wspolny dla seller/embed/view -
+    // rejestracja tutaj dokladalaby drugi handler i w trybie seller
+    // kazda prosba odsylalaby CONFIG_RESULT dwa razy.
 
     // Notify parent that we're ready
     nextTick(() => {
@@ -4036,6 +4133,15 @@ onMounted(() => {
   // i sprzedawcy) pozwala pobrac zrzuty tak samo jak panel zamowien.
   if (isSellerMode.value || isEmbedMode.value || isViewMode.value) {
     postMessageService.startListening()
+
+    /* GET_CONFIG takze w trybie EMBED. Dotad odpowiadal tylko seller i view,
+       wiec sklep nie mial jak zapytac sceny, co na niej stoi - a potrzebuje
+       tego, zeby policzyc doplate za wsporniki typu C: ich liczba wynika
+       z modelu (uchwyty, kolizje, reczne zmiany), a nie z samej wysokosci.
+       Zarejestrowane w JEDNYM miejscu, bo handlery sie sumuja. */
+    postMessageService.on('GET_CONFIG', () => {
+      sendPostMessageResult()
+    })
 
     postMessageService.on('GET_TECH_DRAWING', (data) => {
       const ladunek = (data && (data.payload as any)) || {}
