@@ -10702,9 +10702,22 @@ function dopasujKamere3d() {
 
   /* Zapas. Liczenie wzgledem srodka bryly zaklada, ze wszystko lezy na
      jej glebokosci - a to, co blizej kamery, rzutuje sie wieksze. Bez
-     zapasu szczyt poreczy wychodzil poza gorna krawedz. 1.08 wystarcza,
-     zeby model miescil sie w calosci, a ekran nadal byl wypelniony. */
-  perspectiveCamera.position.z = Math.max(dystans * 1.035, 10)
+     zapasu szczyt poreczy wychodzi poza gorna krawedz.
+
+     ZAPAS ZALEZY OD TEGO, CO WIAZE KADR.
+
+     Gdy wiaze SZEROKOSC, kamera i tak odjechala dalej, niz wymaga tego
+     pion - zostaje ukryty luz w pionie i 1.035 wystarcza. Na takim wlasnie
+     kadrze (szerokie okno panelu, 950 px wysokosci) zapas zostal
+     zmierzony i zmniejszony z 1.08 do 1.035.
+
+     Gdy wiaze PION, tego luzu NIE MA i caly zapas musi dac ten mnoznik.
+     Tak jest w waskim, pionowym kadrze strony produktu w sklepie
+     (358x477 px na telefonie): przy 1.035 szczyt poreczy siegal samej
+     krawedzi i chowal sie pod paskiem przyciskow nad scena. Dlatego
+     tam wracamy do zapasu, ktory byl na to wyliczony. */
+  const wiazePion = dystans <= dystansPion * 1.0001
+  perspectiveCamera.position.z = Math.max(dystans * (wiazePion ? 1.09 : 1.035), 10)
   lastZoom = perspectiveCamera.position.z
   requestRender()
 }
