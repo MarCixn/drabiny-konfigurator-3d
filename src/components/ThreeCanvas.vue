@@ -10390,29 +10390,49 @@ function obrysBryly(siatka: THREE.Mesh): THREE.Box3 | null {
  * zgadywanej stalej: przy attyce konstrukcja siega inaczej niz przy
  * klasycznej, a przy braku poreczy nie ma jej wcale.
  *
- * Zwracamy w ukladzie ladderContainer (tak jak reszta pozycji), wiec
- * swiatowy obrys przeliczamy odwrotnoscia jego macierzy - inaczej obrot
- * modelu przesuwalby wynik.
+ * Zwracamy w ukladzie ladderContainer (tak jak reszta pozycji).
+ *
+ * KAZDA SIATKE PRZELICZAMY OSOBNO, jej wlasna macierza wzgledem
+ * kontenera. Wczesniej szlo to przez swiatowy Box3.setFromObject(), a
+ * wynik wracal do ukladu lokalnego odwrotnoscia macierzy kontenera - i to
+ * bylo zrodlo bledu. Box3 jest ZAWSZE rownolegly do osi: gdy scena stoi
+ * obrocona, swiatowe pudlo jest wieksze od samej bryly, a obrocenie go
+ * z powrotem nie zdejmuje tego naddatku, tylko dokłada kolejny. Obrys
+ * wychodzil wiec tym wiekszy, im bardziej scena byla obrocona.
+ *
+ * Skutkiem byl kadr zalezny od tego, w ktorej klatce go policzono:
+ * pivotGroup dostaje obrot dopiero w animate(), wiec dopasowania tuz po
+ * przebudowie sceny widzialy obrot zerowy i obrys PRAWDZIWY (35,73),
+ * a pozniejsze - obrocony i NADMUCHANY (38,24). Te same parametry,
+ * ta sama scena, dwa rozne kadry - stad "po chwili samo sie przybliza".
+ *
+ * Iloczyn odwrotnosci macierzy kontenera i macierzy siatki skraca
+ * wszystko, co stoi NAD kontenerem (w tym obrot pivota), wiec wynik jest
+ * ten sam w kazdej klatce.
  */
 function obrysSzczytu(): THREE.Box3 | null {
   if (!ladderContainer) return null
   const szukany = handrailType === 'attic' ? 'isAtticPassage' : 'isHandrail'
 
+  ladderContainer.updateMatrixWorld(true)
+  const doLokalnych = new THREE.Matrix4().copy(ladderContainer.matrixWorld).invert()
+
   const laczny = new THREE.Box3()
   let znaleziono = false
-  ladderContainer.updateMatrixWorld(true)
   ladderContainer.traverse((obiekt) => {
     if (!obiekt.userData[szukany]) return
-    if (!(obiekt as THREE.Mesh).isObject3D) return
-    const obrys = new THREE.Box3().setFromObject(obiekt)
-    if (obrys.isEmpty()) return
-    laczny.union(obrys)
+    const siatka = obiekt as THREE.Mesh
+    if (!siatka.isMesh || !siatka.geometry) return
+    if (!siatka.geometry.boundingBox) siatka.geometry.computeBoundingBox()
+    const pudlo = siatka.geometry.boundingBox
+    if (!pudlo || pudlo.isEmpty()) return
+    const wzgledna = new THREE.Matrix4().multiplyMatrices(doLokalnych, siatka.matrixWorld)
+    laczny.union(pudlo.clone().applyMatrix4(wzgledna))
     znaleziono = true
   })
   if (!znaleziono || laczny.isEmpty()) return null
 
-  const doLokalnych = new THREE.Matrix4().copy(ladderContainer.matrixWorld).invert()
-  return laczny.applyMatrix4(doLokalnych)
+  return laczny
 }
 
 /** Znajdz sciane i podloge po znacznikach, ktorymi oznacza je renderWallAndGround. */
@@ -10540,6 +10560,33 @@ function brylaKadrowania(): THREE.Box3 | null {
 let recznyZoom = false
 
 /**
+ * Ile pikseli u gory plotna zaslania pasek przyciskow (0, gdy go nie ma).
+ *
+ * Przyciski nad scena NIE sa obok plotna, tylko NA nim. Kadr liczyl sie
+ * na cala wysokosc, wiec szczyt poreczy ladowal dokladnie pod nimi:
+ * geometrycznie w kadrze, dla patrzacego - schowany. Na szerokim ekranie
+ * tego nie widac, bo kadr wiaze tam szerokosc i w pionie i tak zostaje
+ * luz; widac dopiero w waskim, pionowym kadrze strony produktu.
+ *
+ * Mierzymy pasek, zamiast dobierac staly zapas: w trybie panelu go nie
+ * ma, a w sklepie jego wysokosc zalezy od szerokosci okna.
+ */
+function rezerwaGorna(): number {
+  // Zrzut do pliku nie ma zadnych przyciskow - tam kadr idzie na calosc.
+  if (zrzutRozmiar) return 0
+  const kontener = containerRef.value
+  if (!kontener) return 0
+  const pasek = kontener.ownerDocument.querySelector('.embed-top-controls')
+  if (!pasek) return 0
+  const pr = pasek.getBoundingClientRect()
+  if (!pr.height) return 0
+  const kr = kontener.getBoundingClientRect()
+  if (!kr.height) return 0
+  // Zabezpieczenie: pasek nie moze zjesc wiecej niz 1/3 kadru.
+  return Math.max(0, Math.min(pr.bottom - kr.top, kr.height / 3))
+}
+
+/**
  * O ile kamera stoi wyzej niz srodek obrotu (jednostki sceny).
  * Dzieki temu model moze siedziec nizej w kadrze, bez ruszania modelu
  * ani punktu, wokol ktorego sie obraca.
@@ -10665,13 +10712,30 @@ function dopasujKamere3d() {
      przy niskich drabinach kadr byl luzniejszy niz mogl, a przy wysokich
      - za ciasny. Teraz wysokosc dobiera sie sama: niskie modele ida
      lekko w gore, wysokie w dol. */
+  /* GORNA KRAWEDZ KADRU TO NIE GORA PLOTNA.
+     Pasek przyciskow lezy na scenie, wiec model ma siegac tylko pod
+     niego. W znormalizowanych wspolrzednych gora kadru przesuwa sie
+     z 1 na "gora", dol zostaje na 1 (nic go nie zaslania na tyle, zeby
+     warto bylo oddawac miejsce - dolem jest podloga).
+
+     Warunek dla rogu p przy kamerze (0,h,d) zmienia sie wtedy na
+         (p.y - h) <= gora * tg * (d - p.z)
+         (h - p.y) <= dol  * tg * (d - p.z)
+     co daje d >= (A - h)/(gora*tg) oraz d >= (h - B)/(dol*tg), gdzie
+         A = max(p.y + gora*tg*p.z),  B = min(p.y - dol*tg*p.z).
+     Obie granice zrownuja sie przy h = (dol*A + gora*B)/(gora+dol)
+     i wtedy d = (A - B)/((gora+dol)*tg). Dla gora=dol=1 wychodzi
+     dokladnie poprzedni wzor (U+L)/2 oraz (U-L)/(2*tg). */
+  const gora = Math.max(0.05, 1 - (2 * rezerwaGorna()) / wymiary.wysokosc)
+  const dol = 1
+
   let U = -Infinity
   let L = Infinity
   for (const p of rogiObrocone) {
-    U = Math.max(U, p.y + p.z * tgPion)
-    L = Math.min(L, p.y - p.z * tgPion)
+    U = Math.max(U, p.y + gora * p.z * tgPion)
+    L = Math.min(L, p.y - dol * p.z * tgPion)
   }
-  kadrPrzesuniecieY = (U + L) / 2
+  kadrPrzesuniecieY = (dol * U + gora * L) / (gora + dol)
 
   /* Odleglosc liczymy wzgledem SRODKA bryly, a nie jej najblizszego rogu.
      Warunek "kazdy rog musi sie zmiescic" brał pod uwage takze rogi
@@ -10684,7 +10748,7 @@ function dopasujKamere3d() {
      kadr. Sam model i oba znaczniki zostaja w srodku. */
   /* Pion wychodzi wprost ze wzoru wyzej, poziom liczymy po rogach -
      w poziomie kamera nie ma swobody, bo stoi na osi obrotu. */
-  const dystansPion = (U - L) / (2 * tgPion)
+  const dystansPion = (U - L) / ((gora + dol) * tgPion)
   let dystans = dystansPion
   for (const p of rogiObrocone) {
     dystans = Math.max(dystans, p.z + Math.abs(p.x) / tgPoziom)
@@ -10704,7 +10768,12 @@ function dopasujKamere3d() {
       let najgorszy = 0
       for (const p of rogiObrocone) {
         const zasieg = Math.max(dystans - p.z, 0.001)
-        najgorszy = Math.max(najgorszy, Math.abs(p.y - h) / zasieg)
+        // Gora i dol osobno - pasek przyciskow skraca tylko gore kadru.
+        najgorszy = Math.max(
+          najgorszy,
+          (p.y - h) / (zasieg * gora),
+          (h - p.y) / (zasieg * dol)
+        )
       }
       return najgorszy
     }
@@ -10724,20 +10793,12 @@ function dopasujKamere3d() {
      jej glebokosci - a to, co blizej kamery, rzutuje sie wieksze. Bez
      zapasu szczyt poreczy wychodzi poza gorna krawedz.
 
-     ZAPAS ZALEZY OD TEGO, CO WIAZE KADR.
-
-     Gdy wiaze SZEROKOSC, kamera i tak odjechala dalej, niz wymaga tego
-     pion - zostaje ukryty luz w pionie i 1.035 wystarcza. Na takim wlasnie
-     kadrze (szerokie okno panelu, 950 px wysokosci) zapas zostal
-     zmierzony i zmniejszony z 1.08 do 1.035.
-
-     Gdy wiaze PION, tego luzu NIE MA i caly zapas musi dac ten mnoznik.
-     Tak jest w waskim, pionowym kadrze strony produktu w sklepie
-     (358x477 px na telefonie): przy 1.035 szczyt poreczy siegal samej
-     krawedzi i chowal sie pod paskiem przyciskow nad scena. Dlatego
-     tam wracamy do zapasu, ktory byl na to wyliczony. */
-  const wiazePion = dystans <= dystansPion * 1.0001
-  perspectiveCamera.position.z = Math.max(dystans * (wiazePion ? 1.09 : 1.035), 10)
+     Jeden mnoznik na wszystkie kadry. Przez chwile bylo tu 1.09 dla
+     kadru wiazanego pionem - zapas dobrany na oko po to, zeby szczyt
+     poreczy nie chowal sie pod paskiem przyciskow w sklepie. Teraz pasek
+     jest w rachunku wprost (rezerwaGorna), wiec mnoznik wraca do jednej
+     wartosci zmierzonej na kadrze panelu. */
+  perspectiveCamera.position.z = Math.max(dystans * 1.035, 10)
   lastZoom = perspectiveCamera.position.z
   requestRender()
 }
