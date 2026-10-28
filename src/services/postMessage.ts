@@ -123,6 +123,12 @@ export type MessageType =
   // kosztowałby na słabszym sprzęcie tyle samo, co pierwszy.
   | 'GET_TECH_DRAWING' // Parent -> Iframe: poproś o rzut jako PNG
   | 'TECH_DRAWING'     // Iframe -> Parent: gotowy obrazek (data URL)
+  // Układ strony, która nas osadza: `{ waski: boolean }`. Ramka nie pozna go
+  // po własnej szerokości — w sklepie ma 380x406 na telefonie i 554x443 na
+  // komputerze, więc własne `@media` wskazałoby w obu wypadkach to samo.
+  // Pierwszy stan przychodzi w adresie (?uklad=), a tą wiadomością strona
+  // dosyła zmiany, bo adres ramki sam się nie odświeża.
+  | 'UKLAD'            // Parent -> Iframe: jednokolumnowy czy szeroki
 
 /** Prośba o rzut techniczny. */
 export interface TechDrawingRequest {

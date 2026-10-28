@@ -86,6 +86,21 @@ const bladPodgladu = ref(false)
 // Blokada schematu (dla osadzonego konfiguratora na stronie produktu)
 const schemeLocked = ref(false)
 
+/**
+ * Czy strona, ktora nas osadza, stoi w ukladzie jednokolumnowym (telefon).
+ *
+ * NIE DA SIE TEGO POZNAC PO WLASNEJ SZEROKOSCI. Ramka ma w sklepie 380x406
+ * na telefonie i 554x443 na komputerze - prawie tyle samo, a zwykly
+ * `@media` patrzy wlasnie na te ramke, nie na okno przegladarki. Decyduje
+ * wiec strona, ktora jedyna wie, w ktorym ukladzie sie ulozyla: przysyla
+ * `uklad=waski|szeroki` w adresie, a przy zmianie rozmiaru okna dosyla
+ * wiadomosc UKLAD (adres ramki sam z siebie sie nie odswieza).
+ *
+ * Od tego zalezy pasek widokow: na telefonie niski, poziomy, zeby nie zjadal
+ * wysokosci waskiego kadru; na komputerze pionowy, jak w panelu.
+ */
+const waskiUklad = ref(false)
+
 const state = ref({
   purpose: '' as '' | 'internal' | 'external',
   scheme: '' as '' | 'none' | 'no-platform' | 'with-platform' | 'attic-passage',
@@ -4032,6 +4047,9 @@ onMounted(() => {
        ktory nie zostal zmieniony recznie. */
     state.value.plytaWarstwowa = urlParams.get('plytaWarstwowa') === 'true'
 
+    // Uklad strony, ktora nas osadza - patrz waskiUklad.
+    waskiUklad.value = urlParams.get('uklad') === 'waski'
+
     zastosujReguleWspornikow()
   }
 
@@ -4141,6 +4159,15 @@ onMounted(() => {
        Zarejestrowane w JEDNYM miejscu, bo handlery sie sumuja. */
     postMessageService.on('GET_CONFIG', () => {
       sendPostMessageResult()
+    })
+
+    /* Zmiana ukladu strony, ktora nas osadza (patrz waskiUklad).
+       Adres ramki ustala sie raz, przy wczytaniu, a okno przegladarki mozna
+       zmniejszyc pozniej - wtedy sklep dosyla te wiadomosc zamiast
+       przeladowywac scene. */
+    postMessageService.on('UKLAD', (data) => {
+      const ladunek = (data && (data.payload as any)) || {}
+      waskiUklad.value = !!ladunek.waski
     })
 
     postMessageService.on('GET_TECH_DRAWING', (data) => {
@@ -5064,7 +5091,12 @@ function toggleCageClosing() {
                    Zostaja wszystkie trzy widoki, bo tylko stad da sie je
                    przelaczyc: naglowek rysunku technicznego jest w tym
                    trybie ukryty. -->
-              <nav v-if="isEmbedMode" class="pk-rail pk-rail--kompakt" aria-label="Widok modelu">
+              <nav
+                v-if="isEmbedMode"
+                class="pk-rail"
+                :class="waskiUklad ? 'pk-rail--kompakt' : 'pk-rail--pion'"
+                aria-label="Widok modelu"
+              >
                 <button
                   class="pk-btn"
                   :class="{ 'is-active': !techDrawingActive }"
@@ -12911,6 +12943,41 @@ body {
 .pk-rail--kompakt .pk-ikona {
   width: 17px;
   height: 17px;
+}
+
+/* WERSJA PIONOWA - sklep na komputerze.
+   Nie wystarczylo NIE dawac klasy kompaktowej: ramka ma w sklepie 554 px
+   szerokosci, czyli miesci sie w `@media (max-width: 640px)` nizej, i pasek
+   i tak kladl sie poziomo na dole. Ta regula jest od niej mocniejsza (dwie
+   klasy zamiast jednej), wiec przywraca pion niezaleznie od kolejnosci.
+
+   Pasek stoi po LEWEJ, a strzalka galerii sklepu po lewej pokazuje sie
+   tylko wtedy, gdy jest dokad cofnac - a model 3D jest pierwszym widokiem,
+   wiec na nim lewej strzalki nie ma. Pasek zyje tylko na tym jednym widoku
+   (na pozostalych sklep chowa cala ramke), wiec kolizji nie ma. */
+.pk-rail.pk-rail--pion {
+  top: 50%;
+  bottom: auto;
+  left: 16px;
+  transform: translateY(-50%);
+  flex-direction: column;
+  width: 132px;
+  max-width: none;
+  border-radius: 14px;
+}
+
+.pk-rail.pk-rail--pion .pk-btn {
+  flex: 0 0 auto;
+  min-width: 0;
+  flex-direction: column;
+  padding: 12px 8px;
+  font-size: 11.5px;
+}
+
+.pk-rail.pk-rail--pion .pk-kreska {
+  width: auto;
+  height: 1px;
+  margin: 4px 6px;
 }
 
 .pk-btn {
