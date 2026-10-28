@@ -10593,7 +10593,27 @@ function dopasujKamere3d() {
      musi zachodzic |p.x| <= (d - p.z) * tgPoziom oraz
      |p.y| <= (d - p.z) * tgPion. Stad minimalne d dla kazdego rogu;
      bierzemy najwieksze. */
-  const obrot = new THREE.Quaternion().setFromEuler(pivotGroup.rotation)
+  /* Obrot bierzemy z targetRotation, a NIE z pivotGroup.rotation.
+   *
+   * To ta sama pulapka, ktora opisuje komentarz o przesunieciu kilka linii
+   * wyzej, tylko dla obrotu: pivotGroup.rotation ustawia animate() co klatke
+   * z currentRotation, a my potrafimy wejsc tu ZANIM zrobi to pierwszy raz
+   * po przebudowie sceny. Czytalismy wtedy zero.
+   *
+   * Skutek byl taki, ze kadr liczyl sie dla drabiny ustawionej na wprost,
+   * a scena pokazuje ja w ujeciu 3/4 (0,35 / -0,785). Obrocona drabina
+   * zajmuje wiecej miejsca, wiec kamera podjezdzala za blisko i szczyt
+   * poreczy wychodzil poza gorna krawedz. Zmierzone na drabinie 5 m
+   * w kadrze 358x477: trzy pierwsze dopasowania dawaly z = 85,18, a
+   * czwarte - juz z zerowym obrotem - 72,59. Stad "po sekundzie samo
+   * sie przybliza".
+   *
+   * targetRotation, a nie currentRotation: kadr ma pasowac do ujecia
+   * DOCELOWEGO, zeby nie zmienial sie w trakcie dojezdzania animacji.
+   */
+  const obrot = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(targetRotation.x, targetRotation.y, 0, 'XYZ')
+  )
 
   /* Punkty, ktore musza sie zmiescic.
      NIE sa to rogi prostopadloscianu rozpietego na dwoch znacznikach -
