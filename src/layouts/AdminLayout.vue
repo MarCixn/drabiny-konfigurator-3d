@@ -5064,7 +5064,7 @@ function toggleCageClosing() {
                    Zostaja wszystkie trzy widoki, bo tylko stad da sie je
                    przelaczyc: naglowek rysunku technicznego jest w tym
                    trybie ukryty. -->
-              <nav v-if="isEmbedMode" class="pk-rail" aria-label="Widok modelu">
+              <nav v-if="isEmbedMode" class="pk-rail pk-rail--kompakt" aria-label="Widok modelu">
                 <button
                   class="pk-btn"
                   :class="{ 'is-active': !techDrawingActive }"
@@ -5226,13 +5226,10 @@ function toggleCageClosing() {
                 </button>
               </div>
 
-              <!-- Podpowiedź nawigacji (lewy dolny róg) -->
-              <div v-if="isEmbedMode || isViewMode" class="embed-nav-hint">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
-                  <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/>
-                </svg>
-                <span>Shift + LPM = przesuwanie</span>
-              </div>
+              <!-- Podpowiedzi "Shift + LPM = przesuwanie" tu NIE MA (usunieta 2026-10-28).
+                   Instrukcja do myszy w widoku, ktory najczesciej oglada sie na
+                   telefonie - nie ma tam ani Shiftu, ani lewego przycisku myszy.
+                   Zajmowala przy tym dolny lewy rog sceny tuz obok paska widokow. -->
 
               <!-- Lekki popup ostrzeżenia u góry modelu 3D (tylko jeden na raz, priorytet: autoSwitch > thickness > bracket > collision) -->
               <div v-if="(autoSwitchMessage || atticThicknessWarning || atticBracketWarning || collisionWarning) && !warningDismissed" class="model-toast" :class="{ 'model-toast-info': autoSwitchMessage }">
@@ -12853,32 +12850,8 @@ body {
   height: 18px;
 }
 
-/* Embed navigation hint (bottom left) */
-/* Podpowiedz nawigacji. Pokazuje sie TYLKO w embed i w podgladzie klienta,
-   nigdy w panelu admina, wiec nie potrzebuje warunku - jest jasna zawsze. */
-.embed-nav-hint {
-  position: absolute;
-  bottom: 12px;
-  left: 12px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 14px;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 999px;
-  box-shadow: 0 6px 20px -8px rgba(15, 23, 42, 0.3);
-  font-family: 'Segoe UI', Arial, sans-serif;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: #64748b;
-  z-index: 100;
-  pointer-events: none;
-}
-
-.embed-nav-hint svg {
-  opacity: 0.7;
-}
+/* Stylow .embed-nav-hint juz nie ma - sama podpowiedz zostala usunieta,
+   patrz komentarz w szablonie. */
 
 /* ==========================================================================
    PODGLAD DLA KLIENTA (?mode=view)
@@ -12909,6 +12882,35 @@ body {
     0 1px 2px rgba(15, 23, 42, 0.06),
     0 12px 32px -8px rgba(15, 23, 42, 0.28);
   backdrop-filter: blur(8px);
+}
+
+/* WERSJA NISKA - pasek w sklepie.
+   Stoi NA scenie, a kadr strony produktu jest waski i wysoki, wiec kazdy
+   pikseL wysokosci paska to pikseL mniej dla drabiny. W ukladzie pionowym
+   (ikona nad etykieta) pasek mial 83 px przy kadrze 477 px, czyli zjadal
+   17% wysokosci sceny. Ikona obok etykiety schodzi do okolo 40 px.
+   Pasek podgladu klienta (?mode=view) zostaje jaki byl - tam etykiety sa
+   dluzsze i w jednej linii by sie nie zmiescily. */
+.pk-rail--kompakt {
+  flex-direction: row;
+  width: auto;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.pk-rail--kompakt .pk-btn {
+  flex-direction: row;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.pk-rail--kompakt .pk-ikona {
+  width: 17px;
+  height: 17px;
 }
 
 .pk-btn {
