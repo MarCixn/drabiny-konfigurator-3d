@@ -12961,7 +12961,11 @@ body {
   left: 16px;
   transform: translateY(-50%);
   flex-direction: column;
-  width: 132px;
+  /* 108, nie 132 jak w panelu. Panel ma scene na calym ekranie, a tu stoi
+     ona w kolumnie karty produktu (554 px) - tam 132 px to prawie czwarta
+     czesc szerokosci. Etykiety sa krotkie ("Model 3D", "Przod", "Bok"),
+     wiec po odjeciu marginesow zostaje im nadal ponad 70 px. */
+  width: 108px;
   max-width: none;
   border-radius: 14px;
 }
@@ -12970,8 +12974,14 @@ body {
   flex: 0 0 auto;
   min-width: 0;
   flex-direction: column;
-  padding: 12px 8px;
-  font-size: 11.5px;
+  gap: 5px;
+  padding: 10px 6px;
+  font-size: 11px;
+}
+
+.pk-rail.pk-rail--pion .pk-ikona {
+  width: 22px;
+  height: 22px;
 }
 
 .pk-rail.pk-rail--pion .pk-kreska {
