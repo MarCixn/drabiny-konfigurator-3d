@@ -3000,6 +3000,32 @@ function updateMeasurementBoxesVisibility() {
   if (descentLadderLengthDiskBottom) descentLadderLengthDiskBottom.visible = showDimensions
 }
 
+/**
+ * Kreska na koncu linii wymiarowej - ta, ktora mowi "stad dotad".
+ *
+ * BYLO: plaskie kolko (CircleGeometry) polozone poziomo. Na rzucie z boku
+ * patrzymy na nie DOKLADNIE Z KANTU, a kant plaskiej figury ma zero
+ * grubosci. Czy taka kreska w ogole zlapie wiersz pikseli, decydowalo
+ * zaokraglenie przy rasteryzacji - czyli rozdzielczosc renderu.
+ *
+ * Na komputerze zrzut wychodzi 1662 px szerokosci i kreski widac. Na
+ * telefonie 1140 px i wypadaly miedzy probkami: zostawala sama pionowa
+ * linia, bez konca i poczatku (zmierzone na gotowych plikach).
+ *
+ * JEST: plaski prostopadloscian o tych samych wymiarach w poziomie, ale
+ * z PRAWDZIWA gruboscia. Z gory wyglada jak wczesniej kolko, z boku ma
+ * kilka pikseli wysokosci przy kazdej rozdzielczosci.
+ *
+ * Grubosc w milimetrach modelu, jak wszystko inne w tej scenie: przy
+ * typowym rysunku (ok. 4 mm na piksel) daje to 6 px, a przy drabinie
+ * dwa razy wyzszej wciaz 3 px.
+ */
+const GRUBOSC_ZNACZNIKA_MM = 25
+
+function geometriaZnacznikaWymiaru(promien: number) {
+  return new THREE.BoxGeometry(promien * 2, GRUBOSC_ZNACZNIKA_MM * SCALE, promien * 2)
+}
+
 function drawMeasurementLineBetweenBoxes(zPos: number) {
   // Usuń poprzednią linię, label i dyski
   if (measurementLine) {
@@ -3051,20 +3077,18 @@ function drawMeasurementLineBetweenBoxes(zPos: number) {
 
   // Dyski na końcach linii (płaskie kółka - wymiarowanie techniczne)
   const diskRadius = 100 * SCALE // Duży dysk
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk górny (przy magenta)
   measurementDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   measurementDiskTop.position.set(xOffset, magentaBottom, zPos + lineZOffset)
-  measurementDiskTop.rotation.x = -Math.PI / 2 // Poziomo - widoczny z góry, kreska z boku
   measurementDiskTop.visible = showDimensions
   ladderContainer.add(measurementDiskTop)
 
   // Dysk dolny (przy cyan)
   measurementDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   measurementDiskBottom.position.set(xOffset, cyanTop, zPos + lineZOffset)
-  measurementDiskBottom.rotation.x = -Math.PI / 2 // Poziomo - widoczny z góry, kreska z boku
   measurementDiskBottom.visible = showDimensions
   ladderContainer.add(measurementDiskBottom)
 
@@ -3155,20 +3179,18 @@ function drawLadderLengthDimension(zPos: number, frontSide: boolean = false) {
 
   // Dyski na końcach linii
   const diskRadius = 100 * SCALE
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk górny (przy zielonym)
   ladderLengthDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   ladderLengthDiskTop.position.set(xOffset, greenTop, zPos + lineZOffset)
-  ladderLengthDiskTop.rotation.x = -Math.PI / 2
   ladderLengthDiskTop.visible = showDimensions
   ladderContainer.add(ladderLengthDiskTop)
 
   // Dysk dolny (przy żółtym)
   ladderLengthDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   ladderLengthDiskBottom.position.set(xOffset, yellowTop, zPos + lineZOffset)
-  ladderLengthDiskBottom.rotation.x = -Math.PI / 2
   ladderLengthDiskBottom.visible = showDimensions
   ladderContainer.add(ladderLengthDiskBottom)
 
@@ -3265,20 +3287,18 @@ function drawCageHeightDimension(zPos: number) {
 
   // Dyski na końcach linii
   const diskRadius = 100 * SCALE
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk górny (przy cyan)
   cageHeightDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   cageHeightDiskTop.position.set(xOffset, cyanTop, zPos + lineZOffset)
-  cageHeightDiskTop.rotation.x = -Math.PI / 2
   cageHeightDiskTop.visible = showDimensions
   ladderContainer.add(cageHeightDiskTop)
 
   // Dysk dolny (przy podłodze)
   cageHeightDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   cageHeightDiskBottom.position.set(xOffset, groundTop, zPos + lineZOffset)
-  cageHeightDiskBottom.rotation.x = -Math.PI / 2
   cageHeightDiskBottom.visible = showDimensions
   ladderContainer.add(cageHeightDiskBottom)
 
@@ -3365,20 +3385,18 @@ function drawHandrailHeightDimension(zPos: number, frontSide: boolean = false) {
 
   // Dyski na końcach linii
   const diskRadius = 100 * SCALE
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk dolny (przy zielonym)
   handrailHeightDiskBottom = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   handrailHeightDiskBottom.position.set(xOffset, greenBottom, zPos + lineZOffset)
-  handrailHeightDiskBottom.rotation.x = -Math.PI / 2
   handrailHeightDiskBottom.visible = showDimensions
   ladderContainer.add(handrailHeightDiskBottom)
 
   // Dysk górny (przy pomarańczowym)
   handrailHeightDiskTop = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   handrailHeightDiskTop.position.set(xOffset, orangeBottom, zPos + lineZOffset)
-  handrailHeightDiskTop.rotation.x = -Math.PI / 2
   handrailHeightDiskTop.visible = showDimensions
   ladderContainer.add(handrailHeightDiskTop)
 
@@ -3704,20 +3722,18 @@ function drawSuspensionHeightDimension(zPos: number, frontSide: boolean = false)
 
   // Dyski na końcach linii
   const diskRadius = 100 * SCALE
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk górny (przy żółtym)
   suspensionHeightDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   suspensionHeightDiskTop.position.set(xOffset, yellowTop, zPos + lineZOffset)
-  suspensionHeightDiskTop.rotation.x = -Math.PI / 2
   suspensionHeightDiskTop.visible = showDimensions
   ladderContainer.add(suspensionHeightDiskTop)
 
   // Dysk dolny (przy niebieskim)
   suspensionHeightDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   suspensionHeightDiskBottom.position.set(xOffset, blueTop, zPos + lineZOffset)
-  suspensionHeightDiskBottom.rotation.x = -Math.PI / 2
   suspensionHeightDiskBottom.visible = showDimensions
   ladderContainer.add(suspensionHeightDiskBottom)
 
@@ -3904,20 +3920,18 @@ function drawDescentLadderLengthDimension(zPos: number) {
 
   // Dyski na końcach linii
   const diskRadius = 100 * SCALE
-  const diskGeometry = new THREE.CircleGeometry(diskRadius, 32)
+  const diskGeometry = geometriaZnacznikaWymiaru(diskRadius)
   const diskMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })
 
   // Dysk górny (przy zielonym)
   descentLadderLengthDiskTop = new THREE.Mesh(diskGeometry, diskMaterial.clone())
   descentLadderLengthDiskTop.position.set(xOffset, greenTop, zPos + lineZOffset)
-  descentLadderLengthDiskTop.rotation.x = -Math.PI / 2
   descentLadderLengthDiskTop.visible = showDimensions
   ladderContainer.add(descentLadderLengthDiskTop)
 
   // Dysk dolny (przy fioletowym)
   descentLadderLengthDiskBottom = new THREE.Mesh(diskGeometry.clone(), diskMaterial.clone())
   descentLadderLengthDiskBottom.position.set(xOffset, purpleBottom, zPos + lineZOffset)
-  descentLadderLengthDiskBottom.rotation.x = -Math.PI / 2
   descentLadderLengthDiskBottom.visible = showDimensions
   ladderContainer.add(descentLadderLengthDiskBottom)
 
