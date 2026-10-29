@@ -3016,14 +3016,26 @@ function updateMeasurementBoxesVisibility() {
  * z PRAWDZIWA gruboscia. Z gory wyglada jak wczesniej kolko, z boku ma
  * kilka pikseli wysokosci przy kazdej rozdzielczosci.
  *
- * Grubosc w milimetrach modelu, jak wszystko inne w tej scenie: przy
- * typowym rysunku (ok. 4 mm na piksel) daje to 6 px, a przy drabinie
- * dwa razy wyzszej wciaz 3 px.
+ * GRUBOSC NIE JEST STALA LICZBA MILIMETROW - i to jest tu sedno.
+ * Rysunek kadrujemy do calego modelu, a model rosnie razem ze sciana,
+ * wiec skala pliku spada mniej wiecej odwrotnie proporcjonalnie do jej
+ * wysokosci. Stala wartosc trafia wiec tylko w jedna drabine: 25 mm
+ * dawalo 5 px przy 5 m (na telefonie klocowato przy wlosowej linii
+ * wymiarowej), a 15 mm - dobre przy 5 m - przy 10 m spadalo do 1 px.
+ *
+ * Dzielnik dobrany z pomiaru: przy scianie 5 m 15 mm wychodzilo rowno
+ * 3 px, czyli wysokosc/333. Widelki na wypadek nietypowej konfiguracji
+ * (albo zera, gdyby ktos narysowal wymiar przed ustawieniem sciany).
  */
-const GRUBOSC_ZNACZNIKA_MM = 25
+const DZIELNIK_GRUBOSCI = 333   // mm sciany na 1 mm grubosci - celujemy w 3 px
+
+function gruboscZnacznikaMm(): number {
+  const zSkali = wallHeightConfig / DZIELNIK_GRUBOSCI
+  return Math.min(40, Math.max(6, zSkali || 15))
+}
 
 function geometriaZnacznikaWymiaru(promien: number) {
-  return new THREE.BoxGeometry(promien * 2, GRUBOSC_ZNACZNIKA_MM * SCALE, promien * 2)
+  return new THREE.BoxGeometry(promien * 2, gruboscZnacznikaMm() * SCALE, promien * 2)
 }
 
 function drawMeasurementLineBetweenBoxes(zPos: number) {
