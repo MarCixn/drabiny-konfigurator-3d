@@ -10445,16 +10445,31 @@ function obrysSzczytu(): THREE.Box3 | null {
 
   const laczny = new THREE.Box3()
   let znaleziono = false
+
+  /* ZNACZNIK BYWA NA GRUPIE, NIE NA SIATCE - i to kosztowalo kadr attyki.
+     Porecze rozdaja isHandrail wszystkim potomkom (traverse przy tworzeniu),
+     ale przelaz attykowy dostaje isAtticPassage tylko na korzeniu wczytanego
+     modelu. Korzen nie jest siatka, wiec stary warunek odrzucal go od razu,
+     a jego dzieci nie mialy znacznika - obrys wychodzil pusty i caly szczyt
+     znikal z kadru. Gorna krawedz spadala wtedy na szczyt SCIANY, a przelaz
+     stoi ponad nia: w modelu 3D i na rysunku byl po prostu ucinany.
+
+     Dlatego od znalezionego obiektu schodzimy w dol po jego wlasnym
+     poddrzewie. obiekt.traverse() obejmuje tez sam obiekt, wiec oznaczona
+     siatka dziala jak wczesniej, a obrysy linii (addOutlineToModel) i tak
+     odpadaja na tescie isMesh. */
   ladderContainer.traverse((obiekt) => {
     if (!obiekt.userData[szukany]) return
-    const siatka = obiekt as THREE.Mesh
-    if (!siatka.isMesh || !siatka.geometry) return
-    if (!siatka.geometry.boundingBox) siatka.geometry.computeBoundingBox()
-    const pudlo = siatka.geometry.boundingBox
-    if (!pudlo || pudlo.isEmpty()) return
-    const wzgledna = new THREE.Matrix4().multiplyMatrices(doLokalnych, siatka.matrixWorld)
-    laczny.union(pudlo.clone().applyMatrix4(wzgledna))
-    znaleziono = true
+    obiekt.traverse((potomek) => {
+      const siatka = potomek as THREE.Mesh
+      if (!siatka.isMesh || !siatka.geometry) return
+      if (!siatka.geometry.boundingBox) siatka.geometry.computeBoundingBox()
+      const pudlo = siatka.geometry.boundingBox
+      if (!pudlo || pudlo.isEmpty()) return
+      const wzgledna = new THREE.Matrix4().multiplyMatrices(doLokalnych, siatka.matrixWorld)
+      laczny.union(pudlo.clone().applyMatrix4(wzgledna))
+      znaleziono = true
+    })
   })
   if (!znaleziono || laczny.isEmpty()) return null
 
